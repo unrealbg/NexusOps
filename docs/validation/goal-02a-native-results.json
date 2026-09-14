@@ -1,0 +1,38 @@
+{
+  "phase1": true,
+  "hostId": "b3e9ae06-c56c-4eb1-9339-2908d94e108c",
+  "firstTerminalId": "0dc6c95a-8468-47a5-a227-cac1db396103",
+  "secondTerminalId": "0d77e81c-b012-4743-9742-8655b438a82d",
+  "checks": [
+    "actual Windows release and real OpenSSH",
+    "PTY shell output and ANSI rendering",
+    "native resize propagated to backend PTY",
+    "local search plus explicit copy shortcut",
+    "explicit paste shortcut",
+    "independent tabs, rename, switch, and close",
+    "top and vim full-screen applications",
+    "12,000-line output remained responsive",
+    "no browser-storage secret",
+    "two connected host workspaces preserved isolated tabs and scrollback",
+    "disconnect produced an explicit ended overlay",
+    "reconnect issued a new connection and terminal identity",
+    "stale terminal ownership was rejected",
+    "process restart restored hosts and trust but no terminal sessions or scrollback",
+    "fresh post-restart terminal used a new identity",
+    "fixture hosts and credential revisions deleted after validation"
+  ],
+  "capturedAt": "2026-09-14T17:07:19.981Z",
+  "phase2": true,
+  "betaHostId": "8f63350f-2327-481f-813d-896854e4ac91",
+  "staleTerminalId": "ab5b2a19-51a3-4500-8886-db1eecca09ec",
+  "reconnectedTerminalId": "0e08db7e-f39b-46f6-a073-65bcf7abf8b1",
+  "phase3": true,
+  "restartTerminalId": "0a07099f-48b9-4b60-9efd-3c93ee9b4430",
+  "cleanup": {
+    "nativeProfileExists": false,
+    "fixturePathExists": false,
+    "fixtureDistroPresent": false,
+    "listenerCount": 0,
+    "releaseProcessCount": 0
+  }
+}

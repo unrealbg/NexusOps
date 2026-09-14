@@ -1,0 +1,55 @@
+# Threat model
+
+## Assets and trust boundaries
+
+Protect SSH passwords, private keys/passphrases, trusted server identities and the user's remote machines. Treat the renderer, all host form inputs, DNS, remote SSH output, local files and dependency updates as separate trust boundaries. The application runs with the user's ordinary local privileges and the remote account's existing SSH privileges. It requests no elevation and makes no remote changes.
+
+## Network attacker and first contact
+
+russh verifies the actual negotiated host key before sending credentials. Pins bind canonical configured hostname and port, key algorithm and SHA-256 fingerprint. DNS changes do not bypass the configured endpoint's pin. Host aliases intentionally have separate pins. Unknown hosts fail the handshake and show hostname, port, algorithm and fingerprint for explicit trust. The service accepts only the current pending challenge. It reconnects and verifies again after trust, closing a key-change race between approval and connection.
+
+TOFU cannot prove the identity of a first-contact endpoint under active attack. The user must compare the fingerprint through an independent trusted channel. Changed keys are blocked and cannot be accepted through the first-contact API. Legitimate key rotation and multi-key algorithm migration need deliberate out-of-band verification; no automatic rotation or unsafe override is implemented. Deleting a host configuration preserves endpoint pins.
+
+## Credential handling
+
+`SecretStore` is the only persistence API for credentials. The production vault stores AES-256-GCM ciphertext in SQLite, with random nonces and authenticated revision identifiers. Windows Credential Manager, macOS Keychain or Linux Secret Service stores the vault key through keyring 4's platform-backed API. There is no plaintext fallback. Large private keys do not depend on the OS's per-secret blob limit. A locked or unavailable keychain fails with `secureStorage`.
+
+Reading a missing master key never creates a replacement. A durable vault initialization marker also prevents automatic key creation during later writes, even after every credential has been deleted. Key loss requires deliberate recovery outside Goal 01. Ciphertext reads are bounded before loading SQLite blobs, including worst-case JSON escaping of otherwise valid credential inputs.
+
+Credential input has no Debug or Serialize implementation. Rust owns zeroizing buffers for passwords, key PEM, passphrases, decrypted JSON and master keys. The SSH library needs transient copies and decrypted key structures; no promise is made that every allocator, crypto-library buffer, IPC buffer or OS copy can be wiped. JavaScript strings cannot be reliably zeroized. Form controls are cleared before awaiting IPC and on dismissal, and credentials bypass TanStack mutation caches. They never enter browser storage, Query snapshots, Zustand, logs, audit or plaintext configuration. Private keys are pasted into a transient form field; local file paths are not persisted.
+
+Compromise of the logged-in account, debugger access, injected renderer code at runtime, a malicious OS/keychain or memory dumps can expose active secrets. Full-disk encryption, OS account security and dependency review remain important deployment controls. Copying the data directory alone is insufficient to decrypt secrets; losing the OS keychain key makes old credentials unrecoverable. Backups and migrations must account for the keychain; no credential export is provided.
+
+## Remote-host and output safety
+
+The IPC allowlist exposes no command, process, filesystem or shell plugin. Only bundled content in the main window receives custom command permissions; no remote URLs are granted IPC. CSP blocks external scripts, frames and network connections except Tauri IPC (and the loopback Vite server in development). React renders remote values as text.
+
+The operation engine admits a fixed read-only enum, with no caller-supplied command strings. It does not source `/etc/os-release` or construct shell commands from host inputs. It bounds each probe execution by 10 seconds and combined stdout/stderr by 64 KiB; transport additionally bounds channel setup and cleanup. DNS/handshake is bounded to 15 seconds and authentication to 30 seconds. Cancellation and session lifetime guards tear down network I/O. Expensive encrypted-key decoding runs on a blocking worker; a started native KDF cannot be forcibly interrupted and may outlive a canceled request briefly.
+
+Remote SSH servers may lie about data or be malicious. Output sizes, numeric ranges, invalid text and malformed records are checked, and optional failures remain warnings. A fixed command still executes through the remote account's shell and existing command environment; a compromised remote account may redefine utilities. NexusOps cannot guarantee that a hostile server implements those commands as read-only. NexusOps itself never sends remote writes, installs software, requests sudo or modifies services/firewalls.
+
+## Interactive terminal boundary
+
+An interactive PTY is an explicit user-controlled capability and is separate from structured operations. React receives seven dedicated terminal commands for list, open, poll, input, resize, local rename and close. It still has no generic command/process/filesystem API. Every operation validates `HostId`, the current `HostSessionId`, and `TerminalSessionId` in Rust. Reconnect always changes the connection identity, so a stale terminal ID cannot be used against a new transport or another host.
+
+Terminal input is deliberately arbitrary and can mutate the remote system with the SSH account's privileges. NexusOps does not classify it as an operation, ask for structured-operation approval, retain local command history, or audit its content. The remote shell may retain history according to its own configuration. Users remain responsible for commands entered into the shell.
+
+PTY output, input, search terms, selections and clipboard contents are potentially secret. Output stays in xterm's bounded in-memory scrollback and a bounded transport queue; no contents enter logs, audit, application state stores, databases, crash reports, screenshots by default, analytics or AI. Safe logs record identifiers and failure stage only. The renderer necessarily sees active PTY bytes, and explicit Copy/Paste necessarily accesses plain text in the system clipboard. Only clipboard read-text/write-text permissions are granted; image, HTML, clear and automatic clipboard access are absent.
+
+The per-terminal Rust queue is capped at 64 chunks of 16 KiB and backpressures the SSH receive window. Poll responses are capped at 64 KiB, input calls at 16 KiB, xterm scrollback at 10,000 lines, active terminals at eight per host, and startup/I/O/close operations have deadlines. These controls limit accidental or hostile output growth but do not make an interactive remote shell harmless. Sustained output can still consume CPU, the remote can emit deceptive control sequences, and the user can paste dangerous commands.
+
+Production still serves bundled assets under a restrictive CSP and freezes JavaScript prototypes. The xterm 6 bundle contains one namespace assignment that conflicts with a frozen inherited `toString`; a version-pinned build transform creates the same own property with `Object.defineProperty` and stops the build if the expected source construct changes. Remote terminal text is consumed by xterm rather than interpolated into HTML.
+
+## Persistence, logs and audit
+
+SQLite parameter binding prevents metadata SQL injection. Credential revisions avoid unsafe cross-store updates; crashes may leave encrypted orphans for future maintenance. Local profile locking prevents concurrent instances. Unix profile permissions are restricted to the owner; Windows uses the user's application-data ACL. A local attacker able to write the profile can alter host metadata or pins; pins are not a defense against account compromise.
+
+Audit records contain identifiers and outcomes only, never credential values or output. Log diagnostic context uses stage, safe error codes and I/O kinds rather than full library error/config Debug. Audit rotation keeps two bounded files; logs keep seven daily files. Audit is not cryptographically tamper-evident. Audit write failures are surfaced even if a local action has already completed; refreshing host state resolves that partial-success situation.
+
+The release bootstrap accepts an alternate test profile only through `NEXUSOPS_TEST_APP_DATA_DIR`, and only when the path is absolute and has the exact isolated-profile ownership marker. This prevents an accidental environment override from redirecting normal application data. It is not a sandbox against a malicious local account that already controls the process environment and filesystem.
+
+Ed25519 is the supported client-key type in the Windows alpha. Optional RSA support is disabled because the current upstream RSA implementation has an unfixed RustSec timing-side-channel advisory. Other parsed key formats are not claimed as verified support.
+
+## Not in Goal 01
+
+Structured remote mutation and AI/plugin policy, SFTP, key rotation UI, certificate authorities, SSH agent forwarding, jump hosts, persistent or shared terminal sessions, vault export/recovery, hardware-backed keys, signed installers/updaters, telemetry, secure deletion of encrypted orphan records and an independent security audit. No compliance or complete resistance to local malware is claimed.

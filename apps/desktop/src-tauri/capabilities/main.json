@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Only the bundled main window can use the typed host application API.",
+  "windows": ["main"],
+  "permissions": ["allow-list-hosts", "allow-save-host", "allow-delete-host", "allow-connect-host", "allow-disconnect-host", "allow-reconnect-host", "allow-get-session", "allow-trust-host-key", "allow-refresh-host", "allow-list-terminals", "allow-open-terminal", "allow-poll-terminal", "allow-write-terminal", "allow-resize-terminal", "allow-rename-terminal", "allow-close-terminal", "clipboard-manager:allow-read-text", "clipboard-manager:allow-write-text"]
+}

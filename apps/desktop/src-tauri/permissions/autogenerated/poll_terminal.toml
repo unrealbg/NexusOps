@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-poll-terminal"
+description = "Enables the poll_terminal command without any pre-configured scope."
+commands.allow = ["poll_terminal"]
+
+[[permission]]
+identifier = "deny-poll-terminal"
+description = "Denies the poll_terminal command without any pre-configured scope."
+commands.deny = ["poll_terminal"]

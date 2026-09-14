@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/desktop/src-tauri"]
+default-members = ["crates/nexus-model", "crates/nexus-core", "crates/nexus-secrets", "crates/nexus-ssh", "crates/nexus-discovery", "crates/nexus-operations", "crates/nexus-audit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+
+[workspace.dependencies]
+async-trait = "0.1.89"
+chrono = { version = "0.4.44", features = ["serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
+tracing = "0.1.44"
+uuid = { version = "1.23", features = ["serde", "v4"] }
+base64 = "0.22.1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+zeroize = { version = "1.8.2", features = ["derive", "serde"] }
+tempfile = "3.26"
+ts-rs = { version = "12.0.1", features = ["uuid-impl"] }
+nexus-model = { path = "crates/nexus-model" }
+nexus-core = { path = "crates/nexus-core" }
+nexus-ssh = { path = "crates/nexus-ssh" }
+nexus-secrets = { path = "crates/nexus-secrets" }
+nexus-discovery = { path = "crates/nexus-discovery" }
+nexus-operations = { path = "crates/nexus-operations" }
+nexus-audit = { path = "crates/nexus-audit" }
+nexus-terminal = { path = "crates/nexus-terminal" }
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
