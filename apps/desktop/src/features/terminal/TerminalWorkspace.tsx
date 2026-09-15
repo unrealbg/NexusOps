@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Host, TerminalSession } from '@nexusops/protocol';
 import { Button, Notice, Spinner } from '@nexusops/ui';
 import { applicationError, terminalApi } from '../../api/client';
@@ -6,6 +6,7 @@ import { useHostSession } from '../../api/queries';
 import { ConnectionBadge } from '../../components/ConnectionBadge';
 import { Icon } from '../../components/Icon';
 import { TerminalPane } from './TerminalPane';
+import { mergeTerminalSession, type SessionUpdateSource } from './terminalFlow';
 
 type SearchRequest = {
   text: string;
@@ -33,9 +34,19 @@ export function TerminalWorkspace({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [searchRequest, setSearchRequest] = useState<SearchRequest | null>(null);
+  const mutationRevisions = useRef(new Map<string, number>());
 
-  const updateSession = useCallback((next: TerminalSession) => {
-    setSessions((current) => current.map((item) => (item.id === next.id ? next : item)));
+  const updateSession = useCallback((next: TerminalSession, source: SessionUpdateSource) => {
+    setSessions((current) => {
+      let changed = false;
+      const updated = current.map((item) => {
+        if (item.id !== next.id) return item;
+        const merged = mergeTerminalSession(item, next, source);
+        changed ||= merged !== item;
+        return merged;
+      });
+      return changed ? updated : current;
+    });
   }, []);
   const reportError = useCallback((message: string | null) => setError(message), []);
 
@@ -89,6 +100,7 @@ export function TerminalWorkspace({
   }
 
   async function closeTerminal(session: TerminalSession) {
+    mutationRevisions.current.set(session.id, (mutationRevisions.current.get(session.id) ?? 0) + 1);
     setError(null);
     try {
       await terminalApi.close(session);
@@ -103,9 +115,11 @@ export function TerminalWorkspace({
   }
 
   async function commitRename(session: TerminalSession) {
+    const revision = (mutationRevisions.current.get(session.id) ?? 0) + 1;
+    mutationRevisions.current.set(session.id, revision);
     try {
       const renamed = await terminalApi.rename(session, renameValue);
-      updateSession(renamed);
+      if (mutationRevisions.current.get(session.id) === revision) updateSession(renamed, 'rename');
       setRenamingId(null);
     } catch (reason) {
       setError(applicationError(reason).message);
@@ -301,7 +315,7 @@ export function TerminalWorkspace({
               active={session.id === activeId}
               visible={visible}
               search={session.id === activeId ? searchRequest : null}
-              onSession={updateSession}
+              onSession={(next) => updateSession(next, 'poll')}
               onError={reportError}
               onOpenSearch={() => setSearchOpen(true)}
               onNew={() => void openTerminal()}

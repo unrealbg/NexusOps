@@ -30,7 +30,9 @@ vi.mock('../../api/client', () => ({
     list: vi.fn((hostId: string) => Promise.resolve(mocks.sessions.get(hostId) ?? [])),
     open: vi.fn((hostId: string) => {
       mocks.openCount += 1;
-      return Promise.resolve(terminal(hostId, `terminal-${mocks.openCount}`, `Terminal ${mocks.openCount}`));
+      const opened = terminal(hostId, `terminal-${mocks.openCount}`, `Terminal ${mocks.openCount}`);
+      mocks.sessions.set(hostId, [...(mocks.sessions.get(hostId) ?? []), opened]);
+      return Promise.resolve(opened);
     }),
     poll: mocks.poll,
     write: mocks.write,
@@ -123,15 +125,32 @@ beforeEach(() => {
   mocks.hostState = 'connected';
   mocks.sessions.clear();
   mocks.openCount = 0;
-  mocks.poll.mockReset().mockImplementation((session: TerminalSession) =>
-    Promise.resolve({ session, chunksBase64: [] }),
-  );
+  mocks.poll.mockReset().mockImplementation((session: TerminalSession) => {
+    const backend = (mocks.sessions.get(session.hostId) ?? []).find((item) => item.id === session.id);
+    if (!backend) return Promise.reject({ code: 'notFound', message: 'removed', hostKey: null });
+    return Promise.resolve({
+      session: { ...backend },
+      chunksBase64: [],
+      outputDrained: ['closed', 'failed', 'disconnected'].includes(backend.state),
+    });
+  });
   mocks.write.mockReset().mockResolvedValue(undefined);
   mocks.resize.mockReset().mockResolvedValue(undefined);
-  mocks.close.mockReset().mockResolvedValue(undefined);
-  mocks.rename.mockReset().mockImplementation((session: TerminalSession, label: string) =>
-    Promise.resolve({ ...session, label }),
-  );
+  mocks.close.mockReset().mockImplementation((session: TerminalSession) => {
+    mocks.sessions.set(
+      session.hostId,
+      (mocks.sessions.get(session.hostId) ?? []).filter((item) => item.id !== session.id),
+    );
+    return Promise.resolve();
+  });
+  mocks.rename.mockReset().mockImplementation((session: TerminalSession, label: string) => {
+    const renamed = { ...session, label };
+    mocks.sessions.set(
+      session.hostId,
+      (mocks.sessions.get(session.hostId) ?? []).map((item) => (item.id === session.id ? renamed : item)),
+    );
+    return Promise.resolve(renamed);
+  });
   mocks.searchNext.mockReset();
   mocks.searchPrevious.mockReset();
   mocks.focus.mockReset();
@@ -205,5 +224,60 @@ describe('TerminalWorkspace', () => {
     render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
     expect(await screen.findByText('Connect this host first')).toBeVisible();
     expect(screen.getByRole('button', { name: 'New terminal' })).toBeDisabled();
+  });
+
+  test('does not let a poll started before rename overwrite the newer label', async () => {
+    const user = userEvent.setup();
+    const original = terminal('host-a', 'terminal-a', 'Original shell');
+    mocks.sessions.set('host-a', [original]);
+    let resolvePoll!: (value: { session: TerminalSession; chunksBase64: string[]; outputDrained: boolean }) => void;
+    mocks.poll.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolvePoll = resolve;
+        }),
+    );
+
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    const tab = await screen.findByRole('tab', { name: /Original shell/ });
+    await waitFor(() => expect(mocks.poll).toHaveBeenCalledTimes(1));
+    await user.click(tab);
+    await user.click(screen.getByRole('button', { name: 'Rename active terminal' }));
+    const name = screen.getByLabelText('Terminal name');
+    await user.clear(name);
+    await user.type(name, 'Production shell{Enter}');
+    expect(await screen.findByRole('tab', { name: /Production shell/ })).toBeVisible();
+
+    resolvePoll({ session: original, chunksBase64: [], outputDrained: false });
+    await waitFor(() => expect(screen.getByRole('tab', { name: /Production shell/ })).toBeVisible());
+    expect(screen.queryByRole('tab', { name: /Original shell/ })).toBeNull();
+  });
+
+  test('ignores an older rename result that resolves after a newer rename', async () => {
+    const user = userEvent.setup();
+    const original = terminal('host-a', 'terminal-a', 'Original shell');
+    mocks.sessions.set('host-a', [original]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    const resolvers: Array<(session: TerminalSession) => void> = [];
+    mocks.rename.mockImplementation(
+      (_session: TerminalSession, label: string) =>
+        new Promise((resolve) => resolvers.push(() => resolve({ ...original, label }))),
+    );
+
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    await screen.findByRole('tab', { name: /Original shell/ });
+    await user.click(screen.getByRole('button', { name: 'Rename active terminal' }));
+    const name = screen.getByLabelText('Terminal name');
+    await user.clear(name);
+    await user.type(name, 'Older result{Enter}');
+    await user.clear(name);
+    await user.type(name, 'Newest result{Enter}');
+    expect(resolvers).toHaveLength(2);
+
+    resolvers[1]?.({ ...original, label: 'Newest result' });
+    expect(await screen.findByRole('tab', { name: /Newest result/ })).toBeVisible();
+    resolvers[0]?.({ ...original, label: 'Older result' });
+    await waitFor(() => expect(screen.getByRole('tab', { name: /Newest result/ })).toBeVisible());
+    expect(screen.queryByRole('tab', { name: /Older result/ })).toBeNull();
   });
 });

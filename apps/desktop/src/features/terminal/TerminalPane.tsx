@@ -6,31 +6,20 @@ import { SearchAddon } from '@xterm/addon-search';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { terminalApi, applicationError } from '../../api/client';
+import {
+  BoundedTerminalInput,
+  bytesToBase64,
+  MAX_QUEUED_INPUT_BYTES,
+  runTerminalPollLoop,
+} from './terminalFlow';
 
-const INPUT_CHUNK_BYTES = 16 * 1024;
 const RESIZE_DEBOUNCE_MS = 80;
-const POLL_INTERVAL_MS = 20;
 
 type SearchRequest = {
   text: string;
   direction: 'next' | 'previous';
   nonce: number;
 };
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 8_192) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + 8_192));
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  return bytes;
-}
 
 export function TerminalPane({
   session,
@@ -58,7 +47,8 @@ export function TerminalPane({
   const fitRef = useRef<FitAddon | null>(null);
   const searchRef = useRef<SearchAddon | null>(null);
   const sessionRef = useRef(session);
-  const inputQueue = useRef<Uint8Array[]>([]);
+  const inputQueue = useRef(new BoundedTerminalInput());
+  const inputAbort = useRef(new AbortController());
   const inputTimer = useRef<number | null>(null);
   const flushingInput = useRef(false);
   const stopped = useRef(false);
@@ -74,14 +64,12 @@ export function TerminalPane({
     if (flushingInput.current || stopped.current) return;
     flushingInput.current = true;
     try {
-      while (inputQueue.current.length && !stopped.current) {
-        const next = inputQueue.current.shift();
-        if (!next) break;
-        await terminalApi.write(sessionRef.current, bytesToBase64(next));
-      }
+      await inputQueue.current.flush(
+        (next) => terminalApi.write(sessionRef.current, bytesToBase64(next)),
+        inputAbort.current.signal,
+      );
     } catch (error) {
-      inputQueue.current = [];
-      onError(applicationError(error).message);
+      if (!inputAbort.current.signal.aborted) onError(applicationError(error).message);
     } finally {
       flushingInput.current = false;
     }
@@ -89,8 +77,11 @@ export function TerminalPane({
 
   function queueInput(bytes: Uint8Array) {
     if (sessionRef.current.state !== 'open' || stopped.current) return;
-    for (let offset = 0; offset < bytes.length; offset += INPUT_CHUNK_BYTES) {
-      inputQueue.current.push(bytes.slice(offset, offset + INPUT_CHUNK_BYTES));
+    if (!inputQueue.current.enqueue(bytes)) {
+      onError(
+        `Terminal input was rejected because the ${MAX_QUEUED_INPUT_BYTES / 1024} KiB send queue is full.`,
+      );
+      return;
     }
     if (inputTimer.current !== null) return;
     inputTimer.current = window.setTimeout(() => {
@@ -116,6 +107,8 @@ export function TerminalPane({
     const element = containerRef.current;
     if (!element) return;
     stopped.current = false;
+    inputQueue.current = new BoundedTerminalInput();
+    inputAbort.current = new AbortController();
     const terminal = new Terminal({
       cols: session.size.columns,
       rows: session.size.rows,
@@ -215,7 +208,8 @@ export function TerminalPane({
 
     return () => {
       stopped.current = true;
-      inputQueue.current = [];
+      inputAbort.current.abort();
+      inputQueue.current.stop();
       if (inputTimer.current !== null) window.clearTimeout(inputTimer.current);
       if (resizeTimer.current !== null) window.clearTimeout(resizeTimer.current);
       element.removeEventListener('contextmenu', contextHandler);
@@ -233,24 +227,19 @@ export function TerminalPane({
   }, [session.id]);
 
   useEffect(() => {
-    let cancelled = false;
-    let timer = 0;
-    async function poll() {
-      if (cancelled) return;
-      try {
-        const batch = await terminalApi.poll(sessionRef.current);
-        for (const chunk of batch.chunksBase64) terminalRef.current?.write(base64ToBytes(chunk));
-        onSession(batch.session);
-        if (['closed', 'failed', 'disconnected'].includes(batch.session.state)) return;
-      } catch (error) {
-        onError(applicationError(error).message);
-      }
-      timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
-    }
-    void poll();
+    const cancellation = new AbortController();
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    void runTerminalPollLoop({
+      getSession: () => sessionRef.current,
+      poll: terminalApi.poll,
+      terminal,
+      onSession,
+      onError: (reason) => onError(applicationError(reason).message),
+      signal: cancellation.signal,
+    });
     return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
+      cancellation.abort();
     };
   }, [onError, onSession, session.id]);
 
