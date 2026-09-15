@@ -913,7 +913,7 @@ mod tests {
     async fn upload_plan_rejects_servers_without_safe_no_clobber_extension() {
         let client = PlanClient::new();
         let store = FilePlanStore::default();
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let source_path = directory.path().join("data.bin");
         std::fs::write(&source_path, [1_u8]).unwrap();
         let error = store
@@ -931,7 +931,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn selected_directory_handle_blocks_parent_replacement() {
-        let parent = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let destination = parent.path().join("destination");
         std::fs::create_dir(&destination).unwrap();
         let selected = open_local_directory(destination.clone()).unwrap();
@@ -952,7 +952,7 @@ mod tests {
             },
         ]);
         let store = FilePlanStore::default();
-        let local = tempfile::tempdir().unwrap();
+        let local = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let upload_path = local.path().join("upload.bin");
         std::fs::write(&upload_path, b"data").unwrap();
         let upload = store

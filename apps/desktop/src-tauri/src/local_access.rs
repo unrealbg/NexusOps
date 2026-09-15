@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn grants_are_typed_one_shot_bounded_and_expiring() {
         let service = LocalAccessService::default();
-        let directory = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let selected = nexus_sftp::open_local_directory(directory.path().to_path_buf()).unwrap();
         let scope = GrantScope {
             host_id: HostId::new(),
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn grants_are_bound_to_host_connection_and_sftp_session() {
         let service = LocalAccessService::default();
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let selected = nexus_sftp::open_local_directory(temporary.path().to_path_buf()).unwrap();
         let scope = GrantScope {
             host_id: HostId::new(),
