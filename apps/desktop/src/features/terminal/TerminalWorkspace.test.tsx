@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Host, TerminalSession } from '@nexusops/protocol';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
@@ -15,6 +15,10 @@ const mocks = vi.hoisted(() => ({
   searchNext: vi.fn(),
   searchPrevious: vi.fn(),
   focus: vi.fn(),
+  xtermWrites: [] as Uint8Array[],
+  xtermWriteCallbacks: [] as Array<() => void>,
+  xtermDataHandlers: [] as Array<(data: string) => void>,
+  xtermDisposals: 0,
 }));
 
 vi.mock('../../api/queries', () => ({
@@ -79,17 +83,23 @@ vi.mock('@xterm/xterm', () => ({
       terminal.append(textarea);
       element.append(terminal);
     }
-    onData() {
+    onData(handler: (data: string) => void) {
+      mocks.xtermDataHandlers.push(handler);
       return { dispose() {} };
     }
     onBinary() {
       return { dispose() {} };
     }
     attachCustomKeyEventHandler() {}
-    write() {}
+    write(data: Uint8Array, callback: () => void) {
+      mocks.xtermWrites.push(data.slice());
+      mocks.xtermWriteCallbacks.push(callback);
+    }
     focus = mocks.focus;
     clear() {}
-    dispose() {}
+    dispose() {
+      mocks.xtermDisposals += 1;
+    }
     hasSelection() {
       return false;
     }
@@ -102,6 +112,7 @@ vi.mock('@xterm/xterm', () => ({
 }));
 
 import { TerminalWorkspace } from './TerminalWorkspace';
+import { bytesToBase64 } from './terminalFlow';
 
 const host = (id: string, name: string): Host => ({
   id,
@@ -154,6 +165,10 @@ beforeEach(() => {
   mocks.searchNext.mockReset();
   mocks.searchPrevious.mockReset();
   mocks.focus.mockReset();
+  mocks.xtermWrites.length = 0;
+  mocks.xtermWriteCallbacks.length = 0;
+  mocks.xtermDataHandlers.length = 0;
+  mocks.xtermDisposals = 0;
 });
 
 describe('TerminalWorkspace', () => {
@@ -279,5 +294,111 @@ describe('TerminalWorkspace', () => {
     resolvers[0]?.({ ...original, label: 'Older result' });
     await waitFor(() => expect(screen.getByRole('tab', { name: /Newest result/ })).toBeVisible());
     expect(screen.queryByRole('tab', { name: /Older result/ })).toBeNull();
+  });
+
+  test('keeps one output consumer across parent renders and drains a multi-chunk batch exactly once', async () => {
+    const user = userEvent.setup();
+    const original = terminal('host-a', 'terminal-a', 'Original shell');
+    mocks.sessions.set('host-a', [original]);
+    const marker = new TextEncoder().encode('REVIEW-02-FINAL-MARKER');
+    const chunks = [65, 66, 67, 68].map((value) => new Uint8Array(16 * 1024).fill(value));
+    chunks[3]?.set(marker, (chunks[3]?.length ?? 0) - marker.length);
+    const secondPolls: Array<
+      (value: { session: TerminalSession; chunksBase64: string[]; outputDrained: boolean }) => void
+    > = [];
+    mocks.poll
+      .mockResolvedValueOnce({
+        session: original,
+        chunksBase64: chunks.map(bytesToBase64),
+        outputDrained: false,
+      })
+      .mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            secondPolls.push(resolve);
+          }),
+      );
+
+    const view = render(
+      <TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />,
+    );
+    await waitFor(() => expect(mocks.xtermWrites).toHaveLength(1));
+
+    await user.click(screen.getByRole('button', { name: 'Rename active terminal' }));
+    await user.type(screen.getByLabelText('Terminal name'), ' updated');
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: 'Search terminal' }));
+    await user.type(screen.getByLabelText('Search terminal scrollback'), 'marker');
+
+    expect(mocks.poll).toHaveBeenCalledTimes(1);
+    expect(mocks.xtermDisposals).toBe(0);
+    for (let index = 0; index < chunks.length; index += 1) {
+      mocks.xtermWriteCallbacks.shift()?.();
+      if (index + 1 < chunks.length) {
+        await waitFor(() => expect(mocks.xtermWrites).toHaveLength(index + 2));
+      }
+    }
+    await waitFor(() => expect(mocks.poll).toHaveBeenCalledTimes(2));
+    expect(secondPolls).toHaveLength(1);
+    secondPolls[0]?.({
+      session: terminal('host-a', 'terminal-a', 'Original shell', 'closed'),
+      chunksBase64: [],
+      outputDrained: true,
+    });
+    expect(await screen.findByText('Connection lost')).toBeVisible();
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+    expect(mocks.poll).toHaveBeenCalledTimes(2);
+
+    const expected = chunks.flatMap((bytes) => [...bytes]);
+    const actual = mocks.xtermWrites.flatMap((bytes) => [...bytes]);
+    expect(new Uint8Array(actual)).toEqual(new Uint8Array(expected));
+    expect(new TextDecoder().decode(mocks.xtermWrites.at(-1))).toContain('REVIEW-02-FINAL-MARKER');
+    expect(mocks.xtermDisposals).toBe(0);
+    view.unmount();
+    expect(mocks.xtermDisposals).toBe(1);
+  });
+
+  test('marks a removed open backend session failed and stops polling across parent renders', async () => {
+    const user = userEvent.setup();
+    const original = terminal('host-a', 'terminal-a', 'Original shell');
+    mocks.sessions.set('host-a', [original]);
+    mocks.poll.mockRejectedValue({
+      code: 'notFound',
+      message: 'The terminal session was removed.',
+      hostKey: null,
+    });
+
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    expect(await screen.findByText('Terminal failed')).toBeVisible();
+    await waitFor(() => expect(mocks.poll).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole('button', { name: 'Search terminal' }));
+    await user.type(screen.getByLabelText('Search terminal scrollback'), 'still stopped');
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+
+    expect(screen.getAllByText('The terminal session was removed.').length).toBeGreaterThan(0);
+    expect(mocks.poll).toHaveBeenCalledTimes(1);
+  });
+
+  test('stops terminal input visibly after an ambiguous write failure without replaying bytes', async () => {
+    const original = terminal('host-a', 'terminal-a', 'Original shell');
+    mocks.sessions.set('host-a', [original]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    mocks.write.mockRejectedValue({
+      code: 'terminalStream',
+      message: 'The terminal input acknowledgement failed.',
+      hostKey: null,
+    });
+
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    await waitFor(() => expect(mocks.xtermDataHandlers).toHaveLength(1));
+    act(() => mocks.xtermDataHandlers[0]?.('FIRST'));
+    await waitFor(() => expect(mocks.write).toHaveBeenCalledTimes(1));
+    expect(
+      await screen.findByText(/Terminal input stopped after a write failure because delivery may be incomplete/),
+    ).toBeVisible();
+
+    act(() => mocks.xtermDataHandlers[0]?.('SECOND'));
+    await new Promise((resolve) => window.setTimeout(resolve, 25));
+    expect(mocks.write).toHaveBeenCalledTimes(1);
   });
 });

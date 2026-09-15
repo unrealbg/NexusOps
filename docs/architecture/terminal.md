@@ -29,7 +29,11 @@ Input is a byte stream. xterm's text and binary callbacks feed `Uint8Array` chun
 
 Each terminal output queue has 64 slots of at most 16 KiB, about 1 MiB worst-case queued payload. The pump awaits a free slot rather than allocating an unbounded queue. Backpressure reaches russh's 64 KiB SSH receive window when the renderer falls behind. A poll returns at most 64 KiB. The renderer does not request another batch until xterm invokes the write callback for every byte in the current batch; cancellation releases a poll waiting on a stalled emulator. xterm keeps 10,000 scrollback lines.
 
+Each mounted terminal identity owns one polling consumer. Rename, search, tab selection and other parent renders keep that consumer and its current xterm write acknowledgements alive. Changing or unmounting the terminal identity aborts it. Permanent typed poll failures, including a missing or invalid terminal identity, publish a failed terminal snapshot and stop immediately. Only `timeout`, `connection` and `terminalStream` poll failures are treated as transient; three consecutive failures end the consumer, while a successful poll resets the counter.
+
 Aggregate queued terminal input is limited to 256 KiB, including the in-flight 16 KiB chunk. Admission is all-or-nothing for each xterm input event: when the queue is full, the new event is rejected with a visible error instead of being truncated. Accepted chunks retain byte order, and closing the pane cancels queued delivery.
+
+A rejected input write is ambiguous because the frontend cannot know whether the remote accepted none, some or all of its bytes. NexusOps therefore never retries that chunk. It stops and clears the local input queue, rejects subsequent input for that terminal with a visible instruction to open a new session, and continues to allow output rendering so the user can inspect the remote state.
 
 `ResizeObserver` fits the emulator to the visible panel. An 80 ms debounce coalesces changes and sends columns, rows, device-pixel width, and device-pixel height through the ownership-checked resize API. Hidden host workspaces do not send resize storms. OpenSSH validation checks the remote result with `stty size`.
 

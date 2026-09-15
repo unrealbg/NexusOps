@@ -11,6 +11,7 @@ import {
   bytesToBase64,
   MAX_QUEUED_INPUT_BYTES,
   runTerminalPollLoop,
+  TERMINAL_INPUT_FAILURE_MESSAGE,
 } from './terminalFlow';
 
 const RESIZE_DEBOUNCE_MS = 80;
@@ -69,7 +70,10 @@ export function TerminalPane({
         inputAbort.current.signal,
       );
     } catch (error) {
-      if (!inputAbort.current.signal.aborted) onError(applicationError(error).message);
+      if (!inputAbort.current.signal.aborted) {
+        const reason = applicationError(error);
+        onError(`${TERMINAL_INPUT_FAILURE_MESSAGE} ${reason.message}`);
+      }
     } finally {
       flushingInput.current = false;
     }
@@ -78,6 +82,10 @@ export function TerminalPane({
   function queueInput(bytes: Uint8Array) {
     if (sessionRef.current.state !== 'open' || stopped.current) return;
     if (!inputQueue.current.enqueue(bytes)) {
+      if (inputQueue.current.failed) {
+        onError(TERMINAL_INPUT_FAILURE_MESSAGE);
+        return;
+      }
       onError(
         `Terminal input was rejected because the ${MAX_QUEUED_INPUT_BYTES / 1024} KiB send queue is full.`,
       );
@@ -235,7 +243,7 @@ export function TerminalPane({
       poll: terminalApi.poll,
       terminal,
       onSession,
-      onError: (reason) => onError(applicationError(reason).message),
+      onError: (reason) => onError(reason === null ? null : applicationError(reason).message),
       signal: cancellation.signal,
     });
     return () => {

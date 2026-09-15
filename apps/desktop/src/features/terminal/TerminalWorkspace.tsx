@@ -48,6 +48,10 @@ export function TerminalWorkspace({
       return changed ? updated : current;
     });
   }, []);
+  const acceptPolledSession = useCallback(
+    (next: TerminalSession) => updateSession(next, 'poll'),
+    [updateSession],
+  );
   const reportError = useCallback((message: string | null) => setError(message), []);
 
   useEffect(() => {
@@ -315,7 +319,7 @@ export function TerminalWorkspace({
               active={session.id === activeId}
               visible={visible}
               search={session.id === activeId ? searchRequest : null}
-              onSession={(next) => updateSession(next, 'poll')}
+              onSession={acceptPolledSession}
               onError={reportError}
               onOpenSearch={() => setSearchOpen(true)}
               onNew={() => void openTerminal()}

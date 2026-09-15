@@ -1,8 +1,13 @@
-import type { TerminalOutputBatch, TerminalSession } from '@nexusops/protocol';
+import type { AppError, ErrorCode, TerminalOutputBatch, TerminalSession } from '@nexusops/protocol';
 
 export const INPUT_CHUNK_BYTES = 16 * 1024;
 export const MAX_QUEUED_INPUT_BYTES = 256 * 1024;
 export const MAX_OUTPUT_BATCH_BYTES = 64 * 1024;
+export const MAX_TRANSIENT_POLL_FAILURES = 3;
+export const TERMINAL_INPUT_FAILURE_MESSAGE =
+  'Terminal input stopped after a write failure because delivery may be incomplete. Close this terminal and open a new session before sending more input.';
+
+const TRANSIENT_POLL_ERROR_CODES = new Set<ErrorCode>(['timeout', 'connection', 'terminalStream']);
 
 export type TerminalWriteTarget = {
   write(data: Uint8Array, callback: () => void): void;
@@ -43,10 +48,15 @@ export class BoundedTerminalInput {
   private readonly chunks: Uint8Array[] = [];
   private bytes = 0;
   private stopped = false;
+  private writeFailed = false;
   private flushing: Promise<void> | null = null;
 
   get bufferedBytes(): number {
     return this.bytes;
+  }
+
+  get failed(): boolean {
+    return this.writeFailed;
   }
 
   enqueue(bytes: Uint8Array): boolean {
@@ -78,7 +88,20 @@ export class BoundedTerminalInput {
     while (!this.stopped && this.chunks.length > 0) {
       const next = this.chunks[0];
       if (!next) return;
-      await abortable(write(next), signal);
+      try {
+        await abortable(write(next), signal);
+      } catch (error) {
+        if (!signal.aborted && !this.stopped) {
+          // A rejected write cannot reveal whether the remote accepted none,
+          // some, or all of the bytes. Discard the remaining local queue and
+          // require a new terminal instead of replaying an ambiguous chunk.
+          this.writeFailed = true;
+          this.stopped = true;
+          this.chunks.length = 0;
+          this.bytes = 0;
+        }
+        throw error;
+      }
       if (this.stopped || signal.aborted) return;
       this.chunks.shift();
       this.bytes -= next.length;
@@ -123,25 +146,41 @@ export async function runTerminalPollLoop({
   wait?: (signal: AbortSignal) => Promise<void>;
 }): Promise<void> {
   let ended = isEnded(getSession().state);
+  let transientFailures = 0;
   while (!signal.aborted) {
     try {
       const batch = await abortable(poll(getSession()), signal);
       await writeConsumed(terminal, batch.chunksBase64, signal);
       if (signal.aborted) return;
+      if (transientFailures > 0) onError(null);
+      transientFailures = 0;
       onSession(batch.session);
       ended = isEnded(batch.session.state);
       if (ended && batch.outputDrained) return;
     } catch (error) {
       if (signal.aborted || isAbortError(error)) return;
       onError(error);
-      if (ended) return;
+      const current = getSession();
+      if (ended || isEnded(current.state)) return;
+      const appError = terminalPollError(error);
+      if (
+        !TRANSIENT_POLL_ERROR_CODES.has(appError.code) ||
+        ++transientFailures >= MAX_TRANSIENT_POLL_FAILURES
+      ) {
+        onSession({ ...current, state: 'failed', error: appError });
+        return;
+      }
     }
     try {
       await wait(signal);
     } catch (error) {
       if (signal.aborted || isAbortError(error)) return;
       onError(error);
-      if (ended) return;
+      const current = getSession();
+      if (!ended && !isEnded(current.state)) {
+        onSession({ ...current, state: 'failed', error: terminalPollError(error) });
+      }
+      return;
     }
   }
 }
@@ -181,6 +220,24 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function terminalPollError(error: unknown): AppError {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    'message' in error &&
+    typeof error.code === 'string' &&
+    typeof error.message === 'string'
+  ) {
+    return error as AppError;
+  }
+  return {
+    code: 'connection',
+    message: 'Terminal polling could not continue. Open a new terminal to continue.',
+    hostKey: null,
+  };
 }
 
 function waitForNextPoll(signal: AbortSignal): Promise<void> {

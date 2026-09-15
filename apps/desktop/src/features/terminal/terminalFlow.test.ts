@@ -149,10 +149,42 @@ describe('terminal renderer flow control', () => {
     const queue = new BoundedTerminalInput();
     expect(queue.enqueue(new Uint8Array(32 * 1024))).toBe(true);
     const controller = new AbortController();
-    const flush = queue.flush(() => new Promise<void>(() => {}), controller.signal);
+    const stalledWriter = vi.fn(() => new Promise<void>(() => {}));
+    const flush = queue.flush(stalledWriter, controller.signal);
     controller.abort();
     queue.stop();
     await expect(flush).rejects.toMatchObject({ name: 'AbortError' });
+    expect(queue.bufferedBytes).toBe(0);
+    expect(queue.enqueue(new TextEncoder().encode('AFTER-STOP'))).toBe(false);
+    const replacementWriter = vi.fn(async () => {});
+    await queue.flush(replacementWriter, new AbortController().signal);
+    expect(stalledWriter).toHaveBeenCalledTimes(1);
+    expect(replacementWriter).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { scenario: 'before accepting the chunk', acceptedBytes: 0 },
+    { scenario: 'after possibly accepting part of the chunk', acceptedBytes: 2 },
+    { scenario: 'after accepting the chunk but losing its acknowledgement', acceptedBytes: 5 },
+  ])('never replays input after a failure $scenario', async ({ acceptedBytes }) => {
+    const queue = new BoundedTerminalInput();
+    const first = new TextEncoder().encode('FIRST');
+    const second = new TextEncoder().encode('SECOND');
+    const remoteBytes: number[] = [];
+    const writer = vi.fn(async (chunk: Uint8Array) => {
+      remoteBytes.push(...chunk.subarray(0, acceptedBytes));
+      throw { code: 'terminalStream', message: 'simulated acknowledgement failure', hostKey: null };
+    });
+
+    expect(queue.enqueue(first)).toBe(true);
+    await expect(queue.flush(writer, new AbortController().signal)).rejects.toMatchObject({
+      code: 'terminalStream',
+    });
+    expect(queue.enqueue(second)).toBe(false);
+    await queue.flush(writer, new AbortController().signal);
+
+    expect(writer).toHaveBeenCalledTimes(1);
+    expect(remoteBytes).toEqual([...first.subarray(0, acceptedBytes)]);
     expect(queue.bufferedBytes).toBe(0);
   });
 
@@ -179,5 +211,86 @@ describe('terminal renderer flow control', () => {
     });
     expect(poll).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  test('an open session becomes failed and stops after a typed not-found response', async () => {
+    const controller = new AbortController();
+    const poll = vi.fn(async () =>
+      Promise.reject({ code: 'notFound', message: 'The terminal session was removed.', hostKey: null }),
+    );
+    const onSession = vi.fn();
+    const onError = vi.fn();
+    const wait = vi.fn(async () => {
+      if (poll.mock.calls.length >= 2) controller.abort();
+    });
+    const loop = runTerminalPollLoop({
+      getSession: () => session('Open terminal', 'open'),
+      poll,
+      terminal: { write: vi.fn() },
+      onSession,
+      onError,
+      signal: controller.signal,
+      wait,
+    });
+
+    await loop;
+
+    expect(poll).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onSession).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'failed', error: expect.objectContaining({ code: 'notFound' }) }),
+    );
+  });
+
+  test('bounds consecutive transient poll failures and publishes a terminal failure', async () => {
+    const controller = new AbortController();
+    const poll = vi.fn(async () =>
+      Promise.reject({ code: 'connection', message: 'Temporary polling failure.', hostKey: null }),
+    );
+    const onSession = vi.fn();
+    const wait = vi.fn(async () => {
+      if (poll.mock.calls.length >= 3) controller.abort();
+    });
+    await runTerminalPollLoop({
+      getSession: () => session(),
+      poll,
+      terminal: { write: vi.fn() },
+      onSession,
+      onError: vi.fn(),
+      signal: controller.signal,
+      wait,
+    });
+
+    expect(poll).toHaveBeenCalledTimes(3);
+    expect(onSession).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'failed', error: expect.objectContaining({ code: 'connection' }) }),
+    );
+  });
+
+  test('recovers when a transient poll failure clears before the retry limit', async () => {
+    const poll = vi
+      .fn()
+      .mockRejectedValueOnce({ code: 'timeout', message: 'Temporary timeout.', hostKey: null })
+      .mockRejectedValueOnce({ code: 'connection', message: 'Temporary connection error.', hostKey: null })
+      .mockResolvedValueOnce({
+        session: session('Recovered', 'closed'),
+        chunksBase64: [],
+        outputDrained: true,
+      });
+    const onSession = vi.fn();
+    const onError = vi.fn();
+    await runTerminalPollLoop({
+      getSession: () => session(),
+      poll,
+      terminal: { write: vi.fn() },
+      onSession,
+      onError,
+      signal: new AbortController().signal,
+      wait: async () => {},
+    });
+
+    expect(poll).toHaveBeenCalledTimes(3);
+    expect(onSession).toHaveBeenLastCalledWith(expect.objectContaining({ state: 'closed' }));
+    expect(onError).toHaveBeenLastCalledWith(null);
   });
 });
