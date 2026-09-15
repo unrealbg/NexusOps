@@ -1,0 +1,22 @@
+[package]
+name = "nexus-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = [] }
+nexus-core.workspace = true
+nexus-model.workspace = true
+nexus-secrets.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
+tracing-appender = "0.2.4"
+tokio.workspace = true
+tauri-plugin-clipboard-manager = "=2.3.2"
+
+[lints]
+workspace = true

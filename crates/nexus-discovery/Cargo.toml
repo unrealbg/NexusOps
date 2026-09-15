@@ -1,0 +1,19 @@
+[package]
+name = "nexus-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+nexus-model = { path = "../nexus-model" }
+nexus-operations = { path = "../nexus-operations" }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

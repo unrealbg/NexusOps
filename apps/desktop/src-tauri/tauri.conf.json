@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NexusOps",
+  "version": "0.1.0",
+  "identifier": "org.nexusops.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "NexusOps", "width": 1320, "height": 860, "minWidth": 960, "minHeight": 640, "backgroundColor": "#101418" }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data:; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+      "devCsp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+      "freezePrototype": true
+    }
+  },
+  "bundle": { "active": true, "targets": "all", "shortDescription": "An agentless infrastructure control plane", "category": "DeveloperTool", "icon": ["icons/icon.ico", "icons/icon.png"] }
+}

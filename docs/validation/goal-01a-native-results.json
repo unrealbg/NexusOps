@@ -1,0 +1,21 @@
+{
+  "phase1": true,
+  "checks": [
+    "actual native release",
+    "host create",
+    "unknown key reject and explicit trust",
+    "real Windows credential store",
+    "real OpenSSH discovery",
+    "two host state isolation",
+    "arbitrary IPC rejected",
+    "no browser-storage secret",
+    "application restart retained host trust and Windows Credential Manager password",
+    "switching hosts did not reuse stale discovery",
+    "displayed key A approval did not authorize subsequent key B",
+    "changed key blocked without discovery or UI bypass",
+    "test hosts and credential revisions deleted"
+  ],
+  "capturedAt": "2026-09-14T14:58:41.579Z",
+  "phase2": true,
+  "phase3": true
+}
