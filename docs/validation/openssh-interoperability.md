@@ -12,7 +12,7 @@ The fixture scripts are in `tools/openssh-fixture/`:
 - `configure.sh` installs only Alpine's OpenSSH server and account-management package. It creates `nexusops_fixture`, a non-root account with no sudo package or sudo membership, generates disposable credentials, two Ed25519 host keys, and unencrypted and encrypted Ed25519 client keys.
 - `Start-OpenSshFixture.ps1` runs `sshd` only inside that disposable distribution and checks the loopback-forwarded port.
 - `Run-OpenSshInterop.ps1` runs the two ignored Rust phases, rotates the real server key, and reruns the changed-key phase.
-- `Cleanup-OpenSshFixture.ps1` requires the exact ownership marker and a path below the task work directory before it unregisters the named distribution and removes its scratch data.
+- `Cleanup-OpenSshFixture.ps1` requires an explicit approved root, a strict owned child, a valid versioned ownership record, no reparse point, and a matching WSL registry identity and installation path before it unregisters the distribution and removes its scratch data.
 
 The rootfs used in this run had SHA-256 `de9a11c0e0e7e9c94db3ed8af7b450eafc0b13687bd7e9199d55050f20aa0a89`. The fixture used OpenSSH defaults for algorithms, except that it supplied only a disposable Ed25519 host key. It did not enable obsolete algorithms or weaken key exchange or cipher settings. Password and public-key authentication were enabled for the test user; root login, empty passwords, forwarding, tunnels, user-controlled environment variables, and X11 forwarding were disabled.
 
@@ -23,10 +23,11 @@ The fixture is local-only in this environment. WSL localhost forwarding exposed 
 From the repository root in PowerShell:
 
 ```powershell
-$fixture = & .\tools\openssh-fixture\Setup-OpenSshFixture.ps1
-& .\tools\openssh-fixture\Start-OpenSshFixture.ps1 -RunRoot $fixture.RunRoot
-& .\tools\openssh-fixture\Run-OpenSshInterop.ps1 -RunRoot $fixture.RunRoot
-& .\tools\openssh-fixture\Cleanup-OpenSshFixture.ps1 -RunRoot $fixture.RunRoot
+$allowed = "<existing-disposable-root>"
+$fixture = & .\tools\openssh-fixture\Setup-OpenSshFixture.ps1 -AllowedRoot $allowed
+& .\tools\openssh-fixture\Start-OpenSshFixture.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
+& .\tools\openssh-fixture\Run-OpenSshInterop.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
+& .\tools\openssh-fixture\Cleanup-OpenSshFixture.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
 ```
 
 The tests are ignored in the default suite because they install packages in a disposable WSL distribution and require Windows, WSL2, network access to Alpine mirrors, and an unlocked local environment. The tests themselves are `crates/nexus-ssh/tests/openssh_interop.rs`.
@@ -69,11 +70,11 @@ Goal 02A reran the authentication/trust suite and added the ignored `openssh_ter
 The production `SshProvider` passed PTY and shell request acknowledgement, UTF-8 Bulgarian and symbol output, ANSI styles, remote resize reported as 37 rows by 101 columns, two simultaneous isolated PTYs, closing one while the other continued, 2 MiB of generated output, a real `top` alternate-screen interaction, and transport disconnect teardown. The same run passed phase A authentication/trust before the terminal test and phase B changed-key rejection after rotating to its independently generated key B.
 
 ```powershell
-$run = "<task-work>\goal-02a-openssh"
-.\tools\openssh-fixture\Setup-OpenSshFixture.ps1 -RunRoot $run
-.\tools\openssh-fixture\Start-OpenSshFixture.ps1 -RunRoot $run
-.\tools\openssh-fixture\Run-OpenSshInterop.ps1 -RunRoot $run
-.\tools\openssh-fixture\Cleanup-OpenSshFixture.ps1 -RunRoot $run
+$allowed = "<existing-disposable-root>"
+$fixture = .\tools\openssh-fixture\Setup-OpenSshFixture.ps1 -AllowedRoot $allowed
+.\tools\openssh-fixture\Start-OpenSshFixture.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
+.\tools\openssh-fixture\Run-OpenSshInterop.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
+.\tools\openssh-fixture\Cleanup-OpenSshFixture.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
 ```
 
-The Goal 02A scripts use an exact `nexusops-goal-02a-disposable-openssh` ownership marker and refuse cleanup outside the task `work` root. Terminal test output and generated secrets were not printed or copied into this repository.
+The current scripts use a versioned ownership record and an explicit approved root, with no dependency on the original Codex directory layout or a task-local build environment. Terminal test output and generated secrets are not printed or copied into this repository.

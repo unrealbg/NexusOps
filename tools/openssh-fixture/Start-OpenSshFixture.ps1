@@ -1,6 +1,10 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$RunRoot)
+param(
+    [Parameter(Mandatory)][string]$AllowedRoot,
+    [Parameter(Mandatory)][string]$RunRoot
+)
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot 'FixtureSafety.psm1') -Force
 function ConvertTo-WslPath([string]$Path) {
     $Full = [IO.Path]::GetFullPath($Path)
     if ($Full -notmatch '^([A-Za-z]):\\(.*)$') { throw "Unsupported Windows path: $Full" }
@@ -8,11 +12,11 @@ function ConvertTo-WslPath([string]$Path) {
     $Rest = $Matches[2].Replace('\', '/')
     return "/mnt/$Drive/$Rest"
 }
-$RunRoot = (Resolve-Path $RunRoot).Path
-$State = Get-Content -Raw (Join-Path $RunRoot "fixture-owner.json") | ConvertFrom-Json
-if ($State.marker -ne "nexusops-goal-02a-disposable-openssh" -or $State.runRoot -ne $RunRoot) {
-    throw "Fixture ownership marker does not match"
-}
+$State = Get-FixtureOwnershipState -AllowedRoot $AllowedRoot -RunRoot $RunRoot
+$RunRoot = $State.runRoot
+$Distribution = Get-WslDistributionRecord -DistroName $State.distroName
+if (-not $Distribution) { throw 'Owned WSL distribution is not registered.' }
+Assert-OwnedDistribution -State $State -Distribution $Distribution
 $RunRootLinux = ConvertTo-WslPath $RunRoot
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $RunRoot "sshd.log")
 $Arguments = @("-d",$State.distroName,"-u","root","--","/usr/sbin/sshd","-D","-e","-f","/opt/nexusops-fixture/sshd_config","-E","$RunRootLinux/sshd.log")

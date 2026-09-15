@@ -49,17 +49,17 @@ It is ignored in normal CI because headless runners may not have an unlocked key
 
 Goal 01A adds an independent OpenSSH fixture. It imports an owned Alpine WSL2 distribution, verifies the downloaded rootfs checksum, installs OpenSSH only in that disposable VM, runs the opt-in tests, and removes only the marker-owned distribution and scratch directory. See [OpenSSH interoperability validation](../validation/openssh-interoperability.md) for commands and safety details.
 
-Goal 02A extends that disposable fixture with test-only terminal utilities and a real PTY test. From PowerShell, use a scratch path inside this task's `work` directory:
+Goal 02A extends that disposable fixture with test-only terminal utilities and a real PTY test. The fixture has no dependency on a Codex task layout or `work/build-env.ps1`. Start PowerShell with the documented Node, Rust and MSVC prerequisites available, choose an existing disposable root, and pass it explicitly to every fixture command. The scripts never create or clean the approved root itself.
 
 ```powershell
-$run = "<task-work>\goal-02a-openssh"
-.\tools\openssh-fixture\Setup-OpenSshFixture.ps1 -RunRoot $run
-.\tools\openssh-fixture\Start-OpenSshFixture.ps1 -RunRoot $run
-.\tools\openssh-fixture\Run-OpenSshInterop.ps1 -RunRoot $run
-.\tools\openssh-fixture\Cleanup-OpenSshFixture.ps1 -RunRoot $run
+$allowed = "<existing-disposable-root>"
+$fixture = .\tools\openssh-fixture\Setup-OpenSshFixture.ps1 -AllowedRoot $allowed
+.\tools\openssh-fixture\Start-OpenSshFixture.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
+.\tools\openssh-fixture\Run-OpenSshInterop.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
+.\tools\openssh-fixture\Cleanup-OpenSshFixture.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
 ```
 
-The combined run executes the existing authentication/trust phases plus `openssh_terminal_pty_interoperability`: shell output, UTF-8, ANSI styles, `stty size`, two independent PTYs, single-tab close, 2 MiB flow, `top`, and disconnect teardown. The fixture installs `vim` and terminal definitions only inside its owned Alpine VM. Its default distribution and marker are Goal 02A-specific; cleanup refuses an unmarked path.
+The combined run executes the existing authentication/trust phases plus `openssh_terminal_pty_interoperability`: shell output, UTF-8, ANSI styles, `stty size`, two independent PTYs, single-tab close, 2 MiB flow, `top`, and disconnect teardown. The fixture installs `vim` and terminal definitions only inside its owned Alpine VM. Cleanup requires a strict child path, rejects reparse points, validates the versioned ownership record, and verifies both the WSL registry identity and installation path before unregistering a distribution. Run `tools/openssh-fixture/Test-FixtureSafety.ps1` for non-destructive negative coverage.
 
 Ed25519 is the supported client-key type for the Windows alpha. Optional RSA support is disabled because its current transitive Rust implementation has an unfixed timing-side-channel advisory. Do not enable legacy or obsolete SSH algorithms to work around server compatibility.
 
