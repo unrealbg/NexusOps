@@ -28,6 +28,8 @@ fn main() {
             "plan_rename",
             "plan_delete",
             "execute_file_plan",
+            "discard_file_plan",
+            "discard_local_grant",
             "list_transfers",
             "cancel_transfer",
             "plan_retry_transfer",

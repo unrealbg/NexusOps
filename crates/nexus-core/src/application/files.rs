@@ -254,6 +254,17 @@ impl Application {
         result
     }
 
+    pub async fn discard_file_plan(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+        sftp_session_id: SftpSessionId,
+        plan_id: FilePlanId,
+    ) -> Result<(), AppError> {
+        self.file_plans
+            .discard(plan_id, host_id, host_session_id, sftp_session_id)
+    }
+
     pub fn list_transfers(&self, host_id: Option<HostId>) -> Vec<TransferJob> {
         self.transfers.list(host_id)
     }

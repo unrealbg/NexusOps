@@ -12,9 +12,10 @@ pub use path::{
     validate_windows_file_name,
 };
 pub use policy::{
-    DestinationAction, FilePlanStore, InternalPlan, LocalDirectory, LocalItem, MutationSpec,
-    PlanPayload, PlannedDownload, PlannedUpload, RemoteSource, open_local_directory,
-    open_local_source, validate_local_directory, validate_local_directory_handle,
+    DestinationAction, FilePlanStore, InternalPlan, LocalDirectory, LocalIdentity, LocalItem,
+    LocalObjectId, MutationSpec, PlanPayload, PlannedDownload, PlannedUpload, RemoteSource,
+    open_local_directory, open_local_source, validate_local_directory,
+    validate_local_directory_handle,
 };
 pub use transfer::TransferManager;
 

@@ -977,7 +977,7 @@ async fn wait_for_transfer(app: &Application, id: TransferJobId) -> TransferJob 
 }
 
 #[tokio::test]
-async fn core_retry_boundary_rejects_unknown_and_permanent_outcomes_without_io() {
+async fn core_retry_boundary_releases_authority_and_requires_new_selection() {
     let (_profile, app, _) = setup(false);
     let host = app.save_host(input(), Some(credential())).await.unwrap();
     app.connect_host(host.id).await.unwrap();
@@ -1087,10 +1087,12 @@ async fn core_retry_boundary_rejects_unknown_and_permanent_outcomes_without_io()
         .await
         .unwrap()[0]
         .clone();
-    assert!(wait_for_transfer(&app, job.id).await.retryable);
-    let retry = app
-        .plan_retry_transfer(host.id, host_session_id, sftp_session_id, job.id)
-        .await
-        .unwrap();
-    assert_ne!(retry.id, plan.id);
+    assert!(!wait_for_transfer(&app, job.id).await.retryable);
+    assert_eq!(
+        app.plan_retry_transfer(host.id, host_session_id, sftp_session_id, job.id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Policy
+    );
 }

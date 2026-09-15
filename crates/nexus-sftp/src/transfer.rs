@@ -28,7 +28,6 @@ struct JobSpec {
     direction: TransferDirection,
     source: Source,
     destination: Destination,
-    policy: ConflictPolicy,
 }
 #[derive(Clone)]
 enum Source {
@@ -50,7 +49,9 @@ enum Destination {
 struct JobRecord {
     view: TransferJob,
     cancel: CancellationToken,
-    spec: JobSpec,
+    /// Present only while the job is active. Terminal history never retains
+    /// selected local handles or remote clients.
+    active_spec: Option<JobSpec>,
 }
 struct RemoteStagingGuard {
     client: Arc<dyn SftpClient>,
@@ -203,13 +204,13 @@ impl TransferManager {
 
     pub async fn retry_plan(
         &self,
-        store: &FilePlanStore,
+        _store: &FilePlanStore,
         id: TransferJobId,
         host: HostId,
         host_session: HostSessionId,
         sftp: SftpSessionId,
     ) -> Result<FileOperationPlan, AppError> {
-        let spec = {
+        {
             let state = self
                 .state
                 .lock()
@@ -237,33 +238,11 @@ impl TransferManager {
                     "This transfer outcome cannot be retried; refresh and prepare a new operation.",
                 ));
             }
-            job.spec.clone()
-        };
-        match (&spec.source, &spec.destination) {
-            (Source::Local(source), Destination::Remote { path, .. }) => {
-                validate_local_source(source)?;
-                store
-                    .plan_upload(
-                        spec.client,
-                        vec![source.clone()],
-                        &crate::parent_remote(path)?,
-                        spec.policy,
-                    )
-                    .await
-            }
-            (Source::Remote(source), Destination::Local { directory, .. }) => {
-                validate_local_directory_handle(directory)?;
-                store
-                    .plan_download(
-                        spec.client,
-                        vec![source.path.clone()],
-                        directory.clone(),
-                        spec.policy,
-                    )
-                    .await
-            }
-            _ => Err(transfer_error("The transfer cannot be retried.")),
         }
+        Err(AppError::new(
+            ErrorCode::Policy,
+            "Select the local source or destination again to prepare a retry.",
+        ))
     }
 
     pub fn disconnect(&self, host: HostId, host_session: HostSessionId) {
@@ -378,7 +357,7 @@ impl TransferManager {
                     JobRecord {
                         view: view.clone(),
                         cancel: cancel.clone(),
-                        spec: spec.clone(),
+                        active_spec: Some(spec.clone()),
                     },
                 );
             }
@@ -406,18 +385,34 @@ impl TransferManager {
         tokio::spawn(async move {
             let host_permit = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => { set_state(&state, id, TransferState::Cancelled); return; }
+                _ = cancel.cancelled() => {
+                    drop(spec);
+                    set_state(&state, id, TransferState::Cancelled);
+                    return;
+                }
                 permit = host_sem.acquire_owned() => match permit {
                     Ok(value) => value,
-                    Err(_) => { finish_error(&state, id, transfer_error("The transfer queue stopped.")); return; }
+                    Err(_) => {
+                        drop(spec);
+                        finish_error(&state, id, transfer_error("The transfer queue stopped."));
+                        return;
+                    }
                 }
             };
             let global_permit = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => { set_state(&state, id, TransferState::Cancelled); return; }
+                _ = cancel.cancelled() => {
+                    drop(spec);
+                    set_state(&state, id, TransferState::Cancelled);
+                    return;
+                }
                 permit = global.acquire_owned() => match permit {
                     Ok(value) => value,
-                    Err(_) => { finish_error(&state, id, transfer_error("The transfer queue stopped.")); return; }
+                    Err(_) => {
+                        drop(spec);
+                        finish_error(&state, id, transfer_error("The transfer queue stopped."));
+                        return;
+                    }
                 }
             };
             set_state(&state, id, TransferState::Preparing);
@@ -431,6 +426,7 @@ impl TransferManager {
             let destination_guard = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
+                    drop(spec);
                     set_state(&state, id, TransferState::Cancelled);
                     if let Ok(mut map) = destinations.lock()
                         && Arc::strong_count(&lock) == 2
@@ -450,6 +446,7 @@ impl TransferManager {
             {
                 map.remove(&key);
             }
+            drop(spec);
             match outcome {
                 Ok(()) => set_state(&state, id, TransferState::Completed),
                 Err(error) if error.code == ErrorCode::Cancelled => {
@@ -488,7 +485,7 @@ fn trim_history_locked(state: &mut ManagerState) {
 
 fn upload_spec(
     client: Arc<dyn SftpClient>,
-    policy: ConflictPolicy,
+    _policy: ConflictPolicy,
     item: PlannedUpload,
 ) -> Result<JobSpec, AppError> {
     Ok(JobSpec {
@@ -499,12 +496,11 @@ fn upload_spec(
             path: item.destination,
             action: item.action,
         },
-        policy,
     })
 }
 fn download_spec(
     client: Arc<dyn SftpClient>,
-    policy: ConflictPolicy,
+    _policy: ConflictPolicy,
     item: PlannedDownload,
 ) -> Result<JobSpec, AppError> {
     Ok(JobSpec {
@@ -516,7 +512,6 @@ fn download_spec(
             file_name: item.file_name,
             action: item.action,
         },
-        policy,
     })
 }
 fn labels(spec: &JobSpec) -> (String, String, Option<u64>) {
@@ -549,11 +544,9 @@ fn destination_key(spec: &JobSpec) -> String {
             file_name,
             ..
         } => format!(
-            "l:{}:{}",
-            directory.identity.file_id.map_or_else(
-                || directory.path.to_string_lossy().to_lowercase(),
-                |(volume, file)| format!("{volume}:{file}")
-            ),
+            "l:{}:{}:{}",
+            directory.identity.object_id.storage_id,
+            directory.identity.object_id.file_id,
             file_name.to_lowercase()
         ),
     }
@@ -842,7 +835,12 @@ fn set_state(manager: &Arc<Mutex<ManagerState>>, id: TransferJobId, next: Transf
     if let Ok(mut value) = manager.lock() {
         let should_trim = if let Some(job) = value.jobs.get_mut(&id) {
             job.view.state = next;
-            terminal(&job.view.state)
+            let terminal = terminal(&job.view.state);
+            if terminal {
+                job.active_spec = None;
+                job.view.retryable = false;
+            }
+            terminal
         } else {
             false
         };
@@ -856,15 +854,8 @@ fn finish_error(state: &Arc<Mutex<ManagerState>>, id: TransferJobId, error: AppE
         if let Some(job) = value.jobs.get_mut(&id) {
             job.view.state = TransferState::Failed;
             job.view.error = Some(error);
-            job.view.retryable = matches!(
-                job.view.error.as_ref().map(|value| value.code),
-                Some(
-                    ErrorCode::Timeout
-                        | ErrorCode::Connection
-                        | ErrorCode::LocalAccess
-                        | ErrorCode::Transfer
-                )
-            );
+            job.view.retryable = false;
+            job.active_spec = None;
         }
         trim_history_locked(&mut value);
     }
@@ -875,6 +866,7 @@ fn finish_unknown(state: &Arc<Mutex<ManagerState>>, id: TransferJobId, error: Ap
             job.view.state = TransferState::OutcomeUnknown;
             job.view.error = Some(error);
             job.view.retryable = false;
+            job.active_spec = None;
         }
         trim_history_locked(&mut value);
     }
@@ -917,6 +909,7 @@ mod tests {
         upload_release: Notify,
         download_bytes: Mutex<Vec<u8>>,
         competing_local_path: Mutex<Option<std::path::PathBuf>>,
+        remove_local_path: Mutex<Option<std::path::PathBuf>>,
     }
 
     impl CountingClient {
@@ -961,6 +954,7 @@ mod tests {
                 upload_release: Notify::new(),
                 download_bytes: Mutex::new(b"remote payload".to_vec()),
                 competing_local_path: Mutex::new(None),
+                remove_local_path: Mutex::new(None),
             })
         }
     }
@@ -992,7 +986,11 @@ mod tests {
             Err(unused())
         }
         async fn remove_file(&self, _: &str) -> Result<(), AppError> {
-            Err(unused())
+            let path = self.remove_local_path.lock().unwrap().take();
+            match path {
+                Some(path) => std::fs::remove_file(path).map_err(|_| unused()),
+                None => Err(unused()),
+            }
         }
         async fn remove_dir(&self, _: &str) -> Result<(), AppError> {
             Err(unused())
@@ -1082,6 +1080,27 @@ mod tests {
 
     fn local_item(path: &std::path::Path) -> crate::LocalItem {
         crate::open_local_source(path.canonicalize().unwrap(), "binary.dat".into()).unwrap()
+    }
+
+    async fn wait_for_state(
+        manager: &TransferManager,
+        id: TransferJobId,
+        expected: TransferState,
+    ) -> TransferJob {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(job) = manager
+                    .list(None)
+                    .into_iter()
+                    .find(|job| job.id == id && job.state == expected)
+                {
+                    return job;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("transfer state watchdog")
     }
 
     #[tokio::test]
@@ -1204,6 +1223,7 @@ mod tests {
         state: TransferState,
         retryable: bool,
     ) -> TransferJobId {
+        let active = !terminal(&state);
         let info = spec.client.info();
         let id = TransferJobId::new();
         let (source_display, destination_display, total) = labels(&spec);
@@ -1228,7 +1248,7 @@ mod tests {
             JobRecord {
                 view,
                 cancel: CancellationToken::new(),
-                spec,
+                active_spec: active.then_some(spec),
             },
         );
         id
@@ -1582,6 +1602,42 @@ mod tests {
         assert_eq!(client.rename_calls.load(Ordering::SeqCst), 0);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_delete_removes_the_link_and_preserves_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.bin");
+        let link = directory.path().join("link.bin");
+        std::fs::write(&target, b"distinguishable target").unwrap();
+        symlink(&target, &link).unwrap();
+        let expected = crate::EntryIdentity {
+            kind: RemoteEntryKind::Symlink,
+            size: Some(7),
+            modified: Some(1),
+        };
+        let client = CountingClient::new();
+        client
+            .identities
+            .lock()
+            .unwrap()
+            .push_back(Ok(Some(expected.clone())));
+        *client.remove_local_path.lock().unwrap() = Some(link.clone());
+        execute_mutation(
+            client,
+            crate::MutationSpec::Delete {
+                path: "/tmp/link.bin".into(),
+                kind: RemoteEntryKind::Symlink,
+                expected,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!link.exists());
+        assert_eq!(std::fs::read(target).unwrap(), b"distinguishable target");
+    }
+
     #[cfg(windows)]
     #[test]
     fn selected_upload_handle_blocks_path_replacement_and_writes() {
@@ -1595,7 +1651,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retry_rejects_unknown_and_permanent_failures_but_replans_valid_work() {
+    async fn retry_requires_new_explicit_local_selection() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("retry.bin");
         std::fs::write(&path, b"retry payload").unwrap();
@@ -1641,18 +1697,21 @@ mod tests {
             ErrorCode::Policy
         );
         assert_eq!(client.identity_calls.load(Ordering::SeqCst), 0);
-        let plan = manager
-            .retry_plan(
-                &store,
-                retryable,
-                info.host_id,
-                info.host_session_id,
-                info.id,
-            )
-            .await
-            .unwrap();
-        assert_ne!(plan.id.0, retryable.0);
-        assert_eq!(client.identity_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            manager
+                .retry_plan(
+                    &store,
+                    retryable,
+                    info.host_id,
+                    info.host_session_id,
+                    info.id,
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Policy
+        );
+        assert_eq!(client.identity_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1819,5 +1878,299 @@ mod tests {
         }
         trim_history_locked(&mut manager.state.lock().unwrap());
         assert_eq!(manager.list(None).len(), HISTORY_CAP);
+    }
+
+    #[test]
+    fn destination_keys_use_object_identity_and_final_name() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_directory =
+            crate::open_local_directory(first.path().canonicalize().unwrap()).unwrap();
+        let alias = first_directory.clone();
+        let second_directory =
+            crate::open_local_directory(second.path().canonicalize().unwrap()).unwrap();
+        let client = CountingClient::new();
+        let make_spec = |directory| {
+            download_spec(
+                client.clone(),
+                ConflictPolicy::KeepBoth,
+                PlannedDownload {
+                    source: crate::RemoteSource {
+                        path: "/tmp/source.bin".into(),
+                        name: "source.bin".into(),
+                        size: Some(1),
+                        identity: crate::EntryIdentity {
+                            kind: RemoteEntryKind::File,
+                            size: Some(1),
+                            modified: Some(1),
+                        },
+                    },
+                    destination: directory,
+                    file_name: "source.bin".into(),
+                    action: DestinationAction::CreateNew,
+                },
+            )
+            .unwrap()
+        };
+        let first_key = destination_key(&make_spec(first_directory));
+        let alias_key = destination_key(&make_spec(alias));
+        let second_key = destination_key(&make_spec(second_directory));
+        assert_eq!(first_key, alias_key);
+        assert_ne!(first_key, second_key);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminal_upload_history_releases_local_handles() {
+        let parent = tempfile::tempdir().unwrap();
+
+        let completed_path = parent.path().join("completed.bin");
+        std::fs::write(&completed_path, b"completed").unwrap();
+        let completed_client = CountingClient::new();
+        let completed_manager = TransferManager::new();
+        let completed = completed_manager
+            .enqueue(
+                upload_spec(
+                    completed_client,
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&completed_path),
+                        destination: "/tmp/completed.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        wait_for_state(&completed_manager, completed.id, TransferState::Completed).await;
+        assert_eq!(completed_manager.list(None).len(), 1);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&completed_path)
+            .unwrap();
+        std::fs::rename(
+            &completed_path,
+            parent.path().join("completed-released.bin"),
+        )
+        .unwrap();
+
+        for (name, failure, expected) in [
+            (
+                "failed",
+                StagedUploadFailure::NotCreated(AppError::new(
+                    ErrorCode::Conflict,
+                    "Permanent failure.",
+                )),
+                TransferState::Failed,
+            ),
+            (
+                "unknown",
+                StagedUploadFailure::CreationOutcomeUnknown(AppError::new(
+                    ErrorCode::OutcomeUnknown,
+                    "Unknown outcome.",
+                )),
+                TransferState::OutcomeUnknown,
+            ),
+        ] {
+            let path = parent.path().join(format!("{name}.bin"));
+            std::fs::write(&path, name.as_bytes()).unwrap();
+            let client = CountingClient::new();
+            *client.upload_result.lock().unwrap() = Some(Err(failure));
+            let manager = TransferManager::new();
+            let job = manager
+                .enqueue(
+                    upload_spec(
+                        client,
+                        ConflictPolicy::KeepBoth,
+                        PlannedUpload {
+                            source: local_item(&path),
+                            destination: format!("/tmp/{name}.bin"),
+                            action: DestinationAction::CreateNew,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            wait_for_state(&manager, job.id, expected).await;
+            assert_eq!(manager.list(None).len(), 1);
+            std::fs::rename(&path, parent.path().join(format!("{name}-released.bin"))).unwrap();
+        }
+
+        let cancelled_path = parent.path().join("cancelled.bin");
+        std::fs::write(&cancelled_path, b"cancelled").unwrap();
+        let cancelled_client = CountingClient::new();
+        let cancelled_manager = TransferManager::new();
+        let held = cancelled_manager
+            .global
+            .clone()
+            .acquire_many_owned(GLOBAL_ACTIVE as u32)
+            .await
+            .unwrap();
+        let cancelled = cancelled_manager
+            .enqueue(
+                upload_spec(
+                    cancelled_client,
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&cancelled_path),
+                        destination: "/tmp/cancelled.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        cancelled_manager
+            .cancel(
+                cancelled.id,
+                cancelled.host_id,
+                cancelled.host_session_id,
+                cancelled.sftp_session_id,
+            )
+            .unwrap();
+        wait_for_state(&cancelled_manager, cancelled.id, TransferState::Cancelled).await;
+        std::fs::rename(
+            &cancelled_path,
+            parent.path().join("cancelled-released.bin"),
+        )
+        .unwrap();
+        drop(held);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn completed_download_history_releases_destination_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        let client = CountingClient::new();
+        let identity = crate::EntryIdentity {
+            kind: RemoteEntryKind::File,
+            size: Some(14),
+            modified: Some(1),
+        };
+        client
+            .identities
+            .lock()
+            .unwrap()
+            .extend([Ok(Some(identity.clone())), Ok(Some(identity.clone()))]);
+        let manager = TransferManager::new();
+        let job = manager
+            .enqueue(
+                download_spec(
+                    client,
+                    ConflictPolicy::KeepBoth,
+                    PlannedDownload {
+                        source: crate::RemoteSource {
+                            path: "/tmp/source.bin".into(),
+                            name: "source.bin".into(),
+                            size: Some(14),
+                            identity,
+                        },
+                        destination: crate::open_local_directory(
+                            destination.canonicalize().unwrap(),
+                        )
+                        .unwrap(),
+                        file_name: "source.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        wait_for_state(&manager, job.id, TransferState::Completed).await;
+        assert_eq!(manager.list(None).len(), 1);
+        std::fs::rename(&destination, parent.path().join("destination-released")).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cancelling_one_job_does_not_release_another_active_lease() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("shared.bin");
+        std::fs::write(&path, b"shared").unwrap();
+        let client = CountingClient::new();
+        let manager = TransferManager::new();
+        let held = manager
+            .global
+            .clone()
+            .acquire_many_owned(GLOBAL_ACTIVE as u32)
+            .await
+            .unwrap();
+        let make_spec = |suffix: &str| {
+            upload_spec(
+                client.clone(),
+                ConflictPolicy::KeepBoth,
+                PlannedUpload {
+                    source: local_item(&path),
+                    destination: format!("/tmp/{suffix}.bin"),
+                    action: DestinationAction::CreateNew,
+                },
+            )
+            .unwrap()
+        };
+        let jobs = manager
+            .enqueue_batch(vec![make_spec("first"), make_spec("second")])
+            .await
+            .unwrap();
+        manager
+            .cancel(
+                jobs[0].id,
+                jobs[0].host_id,
+                jobs[0].host_session_id,
+                jobs[0].sftp_session_id,
+            )
+            .unwrap();
+        wait_for_state(&manager, jobs[0].id, TransferState::Cancelled).await;
+        assert!(std::fs::rename(&path, parent.path().join("still-leased.bin")).is_err());
+        manager
+            .cancel(
+                jobs[1].id,
+                jobs[1].host_id,
+                jobs[1].host_session_id,
+                jobs[1].sftp_session_id,
+            )
+            .unwrap();
+        wait_for_state(&manager, jobs[1].id, TransferState::Cancelled).await;
+        std::fs::rename(&path, parent.path().join("all-released.bin")).unwrap();
+        drop(held);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn active_disconnect_cancels_once_cleans_owned_staging_and_releases_source() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("disconnect.bin");
+        std::fs::write(&path, b"disconnect").unwrap();
+        let client = CountingClient::new();
+        client.block_upload.store(true, Ordering::SeqCst);
+        let info = client.info();
+        let manager = TransferManager::new();
+        let job = manager
+            .enqueue(
+                upload_spec(
+                    client.clone(),
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&path),
+                        destination: "/tmp/disconnect.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        client.upload_started.notified().await;
+        manager.disconnect(info.host_id, info.host_session_id);
+        client.upload_release.notify_one();
+        wait_for_state(&manager, job.id, TransferState::Cancelled).await;
+        assert_eq!(client.upload_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
+        std::fs::rename(&path, parent.path().join("disconnect-released.bin")).unwrap();
     }
 }

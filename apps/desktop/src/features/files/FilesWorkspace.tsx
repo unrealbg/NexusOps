@@ -125,8 +125,9 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   }
   async function prepareDelete() {
     const session = owner(); setError(null);
-    try { const next: FileOperationPlan[] = []; for (const entry of selectedEntries) next.push(await filesApi.planDelete(session, entry.path)); setPlans(next); }
-    catch (reason) { setError(applicationError(reason).message); }
+    const next: FileOperationPlan[] = [];
+    try { for (const entry of selectedEntries) next.push(await filesApi.planDelete(session, entry.path)); setPlans(next); }
+    catch (reason) { await Promise.allSettled(next.map((plan) => filesApi.discardPlan(session, plan.id))); setError(applicationError(reason).message); }
   }
   async function prepareEntryDialog() {
     const session = owner(); if (!dialog || !listing) return;
@@ -141,7 +142,15 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   async function executePlans() {
     const session = owner(); const accepted = plans; setPlans([]); setError(null);
     try { for (const plan of accepted) await filesApi.execute(session, plan.id); if (listing) await loadDirectory(session, listing.path, 'history'); }
-    catch (reason) { setError(applicationError(reason).message); }
+    catch (reason) { await Promise.allSettled(accepted.map((plan) => filesApi.discardPlan(session, plan.id))); setError(applicationError(reason).message); }
+  }
+  async function discardPlans() {
+    const pending = plans;
+    setPlans([]);
+    if (!sftp) return;
+    const results = await Promise.allSettled(pending.map((plan) => filesApi.discardPlan(sftp, plan.id)));
+    const failure = results.find((result) => result.status === 'rejected');
+    if (failure?.status === 'rejected') setError(applicationError(failure.reason).message);
   }
   async function showProperties(entry: RemoteEntry) {
     try { setProperties(await filesApi.properties(owner(), entry.path)); } catch (reason) { setError(applicationError(reason).message); }
@@ -202,7 +211,7 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
       </div>
       <section className="transfer-queue" aria-label="Transfer queue"><h2>Transfers</h2>{transfers.length === 0 ? <p>No transfers in this session.</p> : transfers.map((job) => <div className="transfer-row" key={job.id}><div><strong>{job.direction === 'upload' ? '↑' : '↓'} {job.sourceDisplay}</strong><span> → {job.destinationDisplay}</span></div><div><span className={`transfer-state transfer-state--${job.state}`}>{job.state}</span> <span>{formatProgress(job)}</span>{['queued','preparing','transferring'].includes(job.state) && <button onClick={() => { if (sftp) void filesApi.cancel(sftp, job.id); }}>Cancel</button>}{job.retryable && <button onClick={() => void retry(job)}>Prepare retry</button>}</div>{job.error && <span className="transfer-error">{job.error.message}</span>}</div>)}</section>
       {dialog && <Modal title={dialog.type === 'mkdir' ? 'Create remote directory' : 'Rename remote entry'} onClose={() => setDialog(null)}><label className="field"><span>Name</span><input autoFocus value={dialog.value} onChange={(event) => setDialog({ ...dialog, value: event.target.value })} /></label><p className="dialog-description">The operation will be prepared as an immutable plan. Rename never overwrites an existing destination.</p><div className="modal-actions"><Button onClick={() => setDialog(null)}>Cancel</Button><Button disabled={!dialog.value} onClick={() => void prepareEntryDialog()}>Review plan</Button></div></Modal>}
-      {plans.length > 0 && <Modal title="Approve file operation" onClose={() => setPlans([])}><p className="dialog-description">Host: <strong>{host.displayName}</strong>. This one-time approval expires at {new Date(plans[0]!.expiresAt).toLocaleTimeString()}.</p>{plans.map((plan) => <div className="file-plan" key={plan.id}><strong>{plan.kind} · {plan.risk}{plan.conflictPolicy ? ` · Conflict: ${plan.conflictPolicy}` : ''}</strong>{plan.items.map((item, index) => <div key={index}><code>{item.sourceDisplay}</code> → <code>{item.destinationDisplay}</code>{item.sizeBytes && ` · ${item.sizeBytes} bytes`}</div>)}</div>)}{plans.some((plan) => plan.kind === 'delete') && <Notice>Delete is permanent. Directories must be empty; symbolic links are removed without following their target.</Notice>}<div className="modal-actions"><Button onClick={() => setPlans([])}>Cancel</Button><Button variant={plans.some((plan) => plan.kind === 'delete') ? 'danger' : 'primary'} onClick={() => void executePlans()}>Approve and execute</Button></div></Modal>}
+      {plans.length > 0 && <Modal title="Approve file operation" onClose={() => { void discardPlans(); }}><p className="dialog-description">Host: <strong>{host.displayName}</strong>. This one-time approval expires at {new Date(plans[0]!.expiresAt).toLocaleTimeString()}.</p>{plans.map((plan) => <div className="file-plan" key={plan.id}><strong>{plan.kind} · {plan.risk}{plan.conflictPolicy ? ` · Conflict: ${plan.conflictPolicy}` : ''}</strong>{plan.items.map((item, index) => <div key={index}><code>{item.sourceDisplay}</code> → <code>{item.destinationDisplay}</code>{item.sizeBytes && ` · ${item.sizeBytes} bytes`}</div>)}</div>)}{plans.some((plan) => plan.kind === 'delete') && <Notice>Delete is permanent. Directories must be empty; symbolic links are removed without following their target.</Notice>}<div className="modal-actions"><Button onClick={() => { void discardPlans(); }}>Cancel</Button><Button variant={plans.some((plan) => plan.kind === 'delete') ? 'danger' : 'primary'} onClick={() => void executePlans()}>Approve and execute</Button></div></Modal>}
       {properties && <Modal title="Remote properties" onClose={() => setProperties(null)}><dl className="properties"><dt>Name</dt><dd>{properties.displayName}</dd><dt>Type</dt><dd>{properties.kind}</dd><dt>Size</dt><dd>{properties.sizeBytes ?? 'Unknown'}</dd><dt>Modified</dt><dd>{properties.modifiedAt ?? 'Unknown'}</dd><dt>Permissions</dt><dd>{properties.permissions ?? 'Unknown'}</dd><dt>UID / GID</dt><dd>{properties.uid ?? 'Unknown'} / {properties.gid ?? 'Unknown'}</dd></dl><div className="modal-actions"><Button onClick={() => setProperties(null)}>Close</Button></div></Modal>}
     </section>
   );

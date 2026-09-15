@@ -337,6 +337,37 @@ pub async fn execute_file_plan(
         .await
 }
 #[tauri::command]
+pub async fn discard_file_plan(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    plan_id: FilePlanId,
+) -> Result<(), AppError> {
+    app.discard_file_plan(host_id, host_session_id, sftp_session_id, plan_id)
+        .await
+}
+#[tauri::command]
+pub async fn discard_local_grant(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    grant_id: LocalGrantId,
+) -> Result<(), AppError> {
+    app.validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await?;
+    local.discard(
+        grant_id,
+        crate::local_access::GrantScope {
+            host_id,
+            host_session_id,
+            sftp_session_id,
+        },
+    )
+}
+#[tauri::command]
 pub fn list_transfers(app: State<'_, Application>, host_id: Option<HostId>) -> Vec<TransferJob> {
     app.list_transfers(host_id)
 }

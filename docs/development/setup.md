@@ -10,7 +10,7 @@
 
 The frontend uses React 19, Vite 8, Query 5 and Zustand 5. TypeScript 6.0 is deliberately selected because the current typescript-eslint 8 release supports versions below 6.1; upgrading to TypeScript 7 without a compatible lint toolchain would violate mutual compatibility. Exact resolutions are committed in npm and Cargo lockfiles. Stable russh uses some prerelease cryptography dependencies internally; review the lockfile on updates.
 
-Goal 02B pins `russh-sftp` 3.0.0 for SFTP v3 on the existing russh transport and `rfd` 0.17.2 for native local file/directory selection. The renderer receives neither broad filesystem permission nor local paths.
+Goal 02B pins `russh-sftp` 3.0.0 for SFTP v3 on the existing russh transport, `rfd` 0.17.2 for native local file/directory selection, and `fs-id` 0.2.0 for a safe handle-based volume plus full file-ID query. The small `fs-id` implementation was source-reviewed; its platform FFI stays behind its safe `FileID::new(&File)` API and does not weaken the workspace unsafe-code lint. The renderer receives neither broad filesystem permission nor local paths.
 
 ## Run and build
 

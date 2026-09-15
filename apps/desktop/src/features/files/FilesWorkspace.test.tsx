@@ -14,7 +14,8 @@ vi.mock('../../api/client', async (original) => ({
     open: vi.fn(), list: vi.fn(), properties: vi.fn(), chooseUploadFiles: vi.fn(),
     chooseDownloadDirectory: vi.fn(), planUpload: vi.fn(), planDownload: vi.fn(),
     planCreateDirectory: vi.fn(), planRename: vi.fn(), planDelete: vi.fn(),
-    execute: vi.fn(), transfers: vi.fn(), cancel: vi.fn(), planRetry: vi.fn(),
+    execute: vi.fn(), discardPlan: vi.fn(), discardGrant: vi.fn(),
+    transfers: vi.fn(), cancel: vi.fn(), planRetry: vi.fn(),
   },
 }));
 
@@ -98,5 +99,32 @@ describe('Files workspace boundaries', () => {
     await screen.findByDisplayValue('/home/test');
     view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible={false} onShowOverview={vi.fn()} /></QueryClientProvider>);
     expect(filesApi.cancel).not.toHaveBeenCalled();
+  });
+
+  it('shows the full final download target and discards a cancelled approval', async () => {
+    vi.mocked(filesApi.chooseDownloadDirectory).mockResolvedValue({
+      id: 'grant-download', kind: 'downloadDirectory', items: [], expiresAt: '2026-09-15T20:00:00Z',
+    });
+    vi.mocked(filesApi.planDownload).mockResolvedValue({
+      id: 'plan-download', hostId: host.id, hostSessionId: session.hostSessionId,
+      sftpSessionId: session.id, kind: 'download', risk: 'moderate', conflictPolicy: 'keepBoth',
+      items: [{
+        sourceDisplay: 'данни.bin',
+        destinationDisplay: 'C:\\Users\\owner\\Downloads\\данни (1).bin',
+        sizeBytes: '9007199254740993',
+      }],
+      expiresAt: '2026-09-15T20:00:00Z',
+    });
+    vi.mocked(filesApi.discardPlan).mockResolvedValue(undefined);
+    renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select данни.bin' }));
+    await userEvent.selectOptions(screen.getByLabelText('Conflict'), 'keepBoth');
+    await userEvent.click(screen.getByRole('button', { name: 'Download selected…' }));
+
+    expect(await screen.findByText('C:\\Users\\owner\\Downloads\\данни (1).bin')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(filesApi.discardPlan).toHaveBeenCalledWith(session, 'plan-download'));
+    expect(filesApi.execute).not.toHaveBeenCalled();
   });
 });

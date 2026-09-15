@@ -10,7 +10,7 @@ use std::{
     collections::HashMap,
     fs::File,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 
@@ -62,7 +62,15 @@ pub struct PlannedDownload {
 pub struct LocalIdentity {
     pub size: u64,
     pub modified: Option<std::time::SystemTime>,
-    pub file_id: Option<(u64, u64)>,
+    pub object_id: LocalObjectId,
+}
+
+/// Immutable filesystem object identity. Mutable size and timestamps remain
+/// separate preconditions in [`LocalIdentity`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LocalObjectId {
+    pub storage_id: u64,
+    pub file_id: u128,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,9 +125,18 @@ struct StoredPlan {
     expires: Instant,
 }
 
-#[derive(Default)]
 pub struct FilePlanStore {
-    plans: Mutex<HashMap<FilePlanId, StoredPlan>>,
+    plans: Arc<Mutex<HashMap<FilePlanId, StoredPlan>>>,
+    lifetime: Duration,
+}
+
+impl Default for FilePlanStore {
+    fn default() -> Self {
+        Self {
+            plans: Arc::default(),
+            lifetime: PLAN_LIFETIME,
+        }
+    }
 }
 
 impl FilePlanStore {
@@ -131,6 +148,40 @@ impl FilePlanStore {
                 })
             });
         }
+    }
+
+    /// Discards only the named pending plan. If execution consumed it first,
+    /// the active job owns its resources and this operation is idempotent.
+    pub fn discard(
+        &self,
+        id: FilePlanId,
+        host: HostId,
+        host_session: HostSessionId,
+        sftp: SftpSessionId,
+    ) -> Result<(), AppError> {
+        let mut plans = self
+            .plans
+            .lock()
+            .map_err(|_| policy_error("The file plan store is unavailable."))?;
+        let Some(stored) = plans.get(&id) else {
+            return Ok(());
+        };
+        let Some(plan) = stored.plan.as_ref() else {
+            plans.remove(&id);
+            return Ok(());
+        };
+        if (
+            plan.view.host_id,
+            plan.view.host_session_id,
+            plan.view.sftp_session_id,
+        ) != (host, host_session, sftp)
+        {
+            return Err(policy_error(
+                "The file-operation plan does not belong to this host session.",
+            ));
+        }
+        plans.remove(&id);
+        Ok(())
     }
 
     pub async fn plan_upload(
@@ -244,11 +295,7 @@ impl FilePlanStore {
             })?;
             items.push(FilePlanItem {
                 source_display: entry.display_name,
-                destination_display: destination
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .map(display_name)
-                    .unwrap_or_else(|| "Unavailable".into()),
+                destination_display: display_name(&destination.to_string_lossy()),
                 size_bytes: entry.size_bytes,
             });
             planned.push(PlannedDownload {
@@ -350,13 +397,16 @@ impl FilePlanStore {
             .plans
             .lock()
             .map_err(|_| policy_error("The file plan store is unavailable."))?;
+        let expired = plans
+            .get(&id)
+            .is_some_and(|stored| Instant::now() > stored.expires);
+        if expired {
+            plans.remove(&id);
+            return Err(policy_error("The file-operation plan expired."));
+        }
         let stored = plans.get_mut(&id).ok_or_else(|| {
             policy_error("The file-operation plan is missing or was already used.")
         })?;
-        if Instant::now() > stored.expires {
-            stored.plan = None;
-            return Err(policy_error("The file-operation plan expired."));
-        }
         let plan = stored
             .plan
             .take()
@@ -382,7 +432,7 @@ impl FilePlanStore {
         payload: PlanPayload,
     ) -> Result<FileOperationPlan, AppError> {
         let id = FilePlanId::new();
-        let expires = Instant::now() + PLAN_LIFETIME;
+        let expires = Instant::now() + self.lifetime;
         let view = FileOperationPlan {
             id,
             host_id: info.host_id,
@@ -392,7 +442,10 @@ impl FilePlanStore {
             risk,
             conflict_policy,
             items,
-            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            expires_at: (chrono::Utc::now()
+                + chrono::Duration::from_std(self.lifetime)
+                    .map_err(|_| policy_error("The file plan lifetime is invalid."))?)
+            .to_rfc3339(),
         };
         let mut plans = self
             .plans
@@ -414,8 +467,32 @@ impl FilePlanStore {
                 expires,
             },
         );
+        schedule_plan_expiry(Arc::downgrade(&self.plans), id, expires);
         Ok(view)
     }
+}
+
+fn schedule_plan_expiry(
+    plans: Weak<Mutex<HashMap<FilePlanId, StoredPlan>>>,
+    id: FilePlanId,
+    expires: Instant,
+) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(expires)).await;
+        let Some(plans) = plans.upgrade() else {
+            return;
+        };
+        if let Ok(mut plans) = plans.lock()
+            && plans
+                .get(&id)
+                .is_some_and(|stored| stored.expires == expires)
+        {
+            plans.remove(&id);
+        }
+    });
 }
 
 fn supports(info: &nexus_model::SftpSessionInfo, name: &str, version: &str) -> bool {
@@ -465,7 +542,16 @@ pub fn local_identity(path: &std::path::Path) -> Result<Option<LocalIdentity>, A
                     "The local destination is not a regular non-reparse file.",
                 ));
             }
-            Ok(Some(metadata_identity(&metadata)))
+            let handle = open_file_identity_handle(path)?;
+            let handle_metadata = handle.metadata().map_err(|_| {
+                local_access_error("The local destination identity could not be read.")
+            })?;
+            if !handle_metadata.file_type().is_file() || is_reparse(&handle_metadata) {
+                return Err(policy_error(
+                    "The local destination is not a regular non-reparse file.",
+                ));
+            }
+            Ok(Some(handle_identity(&handle, &handle_metadata)?))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(AppError::new(
@@ -518,8 +604,17 @@ pub fn open_local_source(path: PathBuf, display_name: String) -> Result<LocalIte
     let handle_metadata = handle
         .metadata()
         .map_err(|_| local_access_error("A selected local file identity is unavailable."))?;
-    let identity = metadata_identity(&handle_metadata);
-    if identity != metadata_identity(&path_metadata) {
+    if !handle_metadata.file_type().is_file() || is_reparse(&handle_metadata) {
+        return Err(local_access_error(
+            "Uploads accept only regular non-reparse files.",
+        ));
+    }
+    let identity = handle_identity(&handle, &handle_metadata)?;
+    let path_handle = open_file_identity_handle(&path)?;
+    let path_handle_metadata = path_handle
+        .metadata()
+        .map_err(|_| local_access_error("A selected local file identity is unavailable."))?;
+    if identity != handle_identity(&path_handle, &path_handle_metadata)? {
         return Err(local_access_error(
             "The selected local file changed while it was opened.",
         ));
@@ -537,15 +632,15 @@ pub fn open_local_source(path: PathBuf, display_name: String) -> Result<LocalIte
 pub fn open_local_directory(path: PathBuf) -> Result<LocalDirectory, AppError> {
     validate_local_directory(&path)?;
     let handle = open_directory_handle(&path)?;
-    let identity = metadata_identity(
-        &handle
-            .metadata()
-            .map_err(|_| local_access_error("The selected directory identity is unavailable."))?,
-    );
-    let path_identity = metadata_identity(
-        &std::fs::metadata(&path)
-            .map_err(|_| local_access_error("The selected directory identity is unavailable."))?,
-    );
+    let handle_metadata = handle
+        .metadata()
+        .map_err(|_| local_access_error("The selected directory identity is unavailable."))?;
+    let identity = handle_identity(&handle, &handle_metadata)?;
+    let path_handle = open_directory_handle(&path)?;
+    let path_metadata = path_handle
+        .metadata()
+        .map_err(|_| local_access_error("The selected directory identity is unavailable."))?;
+    let path_identity = handle_identity(&path_handle, &path_metadata)?;
     if identity != path_identity {
         return Err(local_access_error(
             "The selected directory changed while it was opened.",
@@ -570,14 +665,20 @@ pub fn validate_local_source(item: &LocalItem) -> Result<(), AppError> {
             "The selected local source is unavailable.",
         )
     })?;
+    let path_handle = open_file_identity_handle(&item.path)?;
+    let path_handle_metadata = path_handle
+        .metadata()
+        .map_err(|_| local_access_error("The selected local source is unavailable."))?;
     let handle_metadata = item
         .handle
         .metadata()
         .map_err(|_| local_access_error("The selected local source handle is unavailable."))?;
     if !path_metadata.file_type().is_file()
         || is_reparse(&path_metadata)
-        || metadata_identity(&path_metadata) != item.identity
-        || metadata_identity(&handle_metadata) != item.identity
+        || !path_handle_metadata.file_type().is_file()
+        || is_reparse(&path_handle_metadata)
+        || handle_identity(&path_handle, &path_handle_metadata)? != item.identity
+        || handle_identity(&item.handle, &handle_metadata)? != item.identity
     {
         return Err(policy_error(
             "The selected local source changed after approval.",
@@ -588,18 +689,18 @@ pub fn validate_local_source(item: &LocalItem) -> Result<(), AppError> {
 
 pub fn validate_local_directory_handle(directory: &LocalDirectory) -> Result<(), AppError> {
     validate_local_directory(&directory.path)?;
-    let path_identity = metadata_identity(
-        &std::fs::metadata(&directory.path)
-            .map_err(|_| local_access_error("The selected local directory is unavailable."))?,
-    );
-    let handle_identity = metadata_identity(
-        &directory
-            .handle
-            .metadata()
-            .map_err(|_| local_access_error("The selected directory handle is unavailable."))?,
-    );
+    let path_handle = open_directory_handle(&directory.path)?;
+    let path_metadata = path_handle
+        .metadata()
+        .map_err(|_| local_access_error("The selected local directory is unavailable."))?;
+    let path_identity = handle_identity(&path_handle, &path_metadata)?;
+    let selected_metadata = directory
+        .handle
+        .metadata()
+        .map_err(|_| local_access_error("The selected directory handle is unavailable."))?;
+    let selected_identity = handle_identity(&directory.handle, &selected_metadata)?;
     if !same_local_object(&path_identity, &directory.identity)
-        || !same_local_object(&handle_identity, &directory.identity)
+        || !same_local_object(&selected_identity, &directory.identity)
     {
         return Err(policy_error(
             "The selected local directory changed after selection.",
@@ -609,33 +710,21 @@ pub fn validate_local_directory_handle(directory: &LocalDirectory) -> Result<(),
 }
 
 fn same_local_object(left: &LocalIdentity, right: &LocalIdentity) -> bool {
-    match (left.file_id, right.file_id) {
-        (Some(left), Some(right)) => left == right,
-        _ => left == right,
-    }
+    left.object_id == right.object_id
 }
 
-fn metadata_identity(metadata: &std::fs::Metadata) -> LocalIdentity {
-    LocalIdentity {
+fn handle_identity(handle: &File, metadata: &std::fs::Metadata) -> Result<LocalIdentity, AppError> {
+    let id = fs_id::FileID::new(handle).map_err(|_| {
+        local_access_error("Strong local filesystem identity is unavailable for this object.")
+    })?;
+    Ok(LocalIdentity {
         size: metadata.len(),
         modified: metadata.modified().ok(),
-        file_id: platform_file_id(metadata),
-    }
-}
-
-#[cfg(windows)]
-fn platform_file_id(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
-    use std::os::windows::fs::MetadataExt;
-    Some((metadata.creation_time(), metadata.file_size()))
-}
-#[cfg(unix)]
-fn platform_file_id(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    Some((metadata.dev(), metadata.ino()))
-}
-#[cfg(not(any(unix, windows)))]
-fn platform_file_id(_: &std::fs::Metadata) -> Option<(u64, u64)> {
-    None
+        object_id: LocalObjectId {
+            storage_id: id.storage_id(),
+            file_id: id.internal_file_id(),
+        },
+    })
 }
 
 #[cfg(windows)]
@@ -660,8 +749,25 @@ fn open_source_handle(path: &std::path::Path) -> Result<File, AppError> {
     std::fs::OpenOptions::new()
         .read(true)
         .share_mode(0x0000_0001)
+        .custom_flags(0x0020_0000)
         .open(path)
         .map_err(|_| local_access_error("The selected local file could not be locked for reading."))
+}
+
+#[cfg(windows)]
+fn open_file_identity_handle(path: &std::path::Path) -> Result<File, AppError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x0000_0001)
+        .custom_flags(0x0020_0000)
+        .open(path)
+        .map_err(|_| local_access_error("The local filesystem object could not be identified."))
+}
+#[cfg(not(windows))]
+fn open_file_identity_handle(path: &std::path::Path) -> Result<File, AppError> {
+    File::open(path)
+        .map_err(|_| local_access_error("The local filesystem object could not be identified."))
 }
 #[cfg(not(windows))]
 fn open_source_handle(path: &std::path::Path) -> Result<File, AppError> {
@@ -1007,5 +1113,193 @@ mod tests {
             PlanPayload::Download { ref items, .. }
                 if items.len() == 1 && items[0].action == DestinationAction::CreateNew
         ));
+    }
+
+    #[tokio::test]
+    async fn download_approval_displays_full_final_destination() {
+        let client = PlanClient::new();
+        let store = FilePlanStore::default();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+
+        let first_plan = store
+            .plan_download(
+                client.clone(),
+                vec!["/home/test/remote-source.bin".into()],
+                open_local_directory(first.path().canonicalize().unwrap()).unwrap(),
+                ConflictPolicy::Skip,
+            )
+            .await
+            .unwrap();
+        let second_plan = store
+            .plan_download(
+                client.clone(),
+                vec!["/home/test/remote-source.bin".into()],
+                open_local_directory(second.path().canonicalize().unwrap()).unwrap(),
+                ConflictPolicy::Skip,
+            )
+            .await
+            .unwrap();
+        let first_display = &first_plan.items[0].destination_display;
+        let second_display = &second_plan.items[0].destination_display;
+        assert_ne!(first_display, second_display);
+        assert!(first_display.ends_with("remote-source.bin"));
+        assert!(second_display.ends_with("remote-source.bin"));
+
+        std::fs::write(first.path().join("remote-source.bin"), b"existing").unwrap();
+        let keep_both = store
+            .plan_download(
+                client,
+                vec!["/home/test/remote-source.bin".into()],
+                open_local_directory(first.path().canonicalize().unwrap()).unwrap(),
+                ConflictPolicy::KeepBoth,
+            )
+            .await
+            .unwrap();
+        assert!(
+            keep_both.items[0]
+                .destination_display
+                .ends_with("remote-source (1).bin")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_object_identity_uses_volume_and_full_file_id() {
+        use std::os::windows::fs::{FileTimesExt, MetadataExt};
+
+        let directory = tempfile::tempdir().unwrap();
+        let first_path = directory.path().join("first.bin");
+        let second_path = directory.path().join("second.bin");
+        std::fs::write(&first_path, b"same-size").unwrap();
+        std::fs::write(&second_path, b"same-size").unwrap();
+        let timestamp = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let times = std::fs::FileTimes::new()
+            .set_created(timestamp)
+            .set_modified(timestamp);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&first_path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&second_path)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        let first_metadata = std::fs::metadata(&first_path).unwrap();
+        let second_metadata = std::fs::metadata(&second_path).unwrap();
+        assert_eq!(
+            first_metadata.creation_time(),
+            second_metadata.creation_time()
+        );
+        assert_eq!(first_metadata.file_size(), second_metadata.file_size());
+
+        let first = local_identity(&first_path).unwrap().unwrap();
+        let second = local_identity(&second_path).unwrap().unwrap();
+        assert_eq!(first.size, second.size);
+        assert_ne!(first.object_id, second.object_id);
+
+        let first_again = local_identity(&first_path).unwrap().unwrap();
+        assert_eq!(first.object_id, first_again.object_id);
+
+        std::fs::write(&first_path, b"changed-size-and-content").unwrap();
+        let changed = local_identity(&first_path).unwrap().unwrap();
+        assert_eq!(first.object_id, changed.object_id);
+        assert_ne!(first, changed);
+
+        let first_directory =
+            open_local_directory(directory.path().canonicalize().unwrap()).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let second_directory = open_local_directory(other.path().canonicalize().unwrap()).unwrap();
+        assert_ne!(
+            first_directory.identity.object_id,
+            second_directory.identity.object_id
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(start_paused = true)]
+    async fn pending_plan_discard_and_idle_expiry_release_directory_handles() {
+        let client = PlanClient::new();
+        let parent = tempfile::tempdir().unwrap();
+
+        let discarded_path = parent.path().join("discarded");
+        std::fs::create_dir(&discarded_path).unwrap();
+        let discarded_store = FilePlanStore::default();
+        let discarded = discarded_store
+            .plan_download(
+                client.clone(),
+                vec!["/home/test/remote-source.bin".into()],
+                open_local_directory(discarded_path.canonicalize().unwrap()).unwrap(),
+                ConflictPolicy::Skip,
+            )
+            .await
+            .unwrap();
+        assert!(std::fs::rename(&discarded_path, parent.path().join("still-locked")).is_err());
+        discarded_store
+            .discard(
+                discarded.id,
+                discarded.host_id,
+                discarded.host_session_id,
+                discarded.sftp_session_id,
+            )
+            .unwrap();
+        std::fs::rename(&discarded_path, parent.path().join("discard-released")).unwrap();
+
+        let consumed_path = parent.path().join("consumed");
+        std::fs::create_dir(&consumed_path).unwrap();
+        let consumed_store = FilePlanStore::default();
+        let consumed_view = consumed_store
+            .plan_download(
+                client.clone(),
+                vec!["/home/test/remote-source.bin".into()],
+                open_local_directory(consumed_path.canonicalize().unwrap()).unwrap(),
+                ConflictPolicy::Skip,
+            )
+            .await
+            .unwrap();
+        let consumed = consumed_store
+            .consume(
+                consumed_view.id,
+                consumed_view.host_id,
+                consumed_view.host_session_id,
+                consumed_view.sftp_session_id,
+            )
+            .unwrap();
+        consumed_store
+            .discard(
+                consumed_view.id,
+                consumed_view.host_id,
+                consumed_view.host_session_id,
+                consumed_view.sftp_session_id,
+            )
+            .unwrap();
+        assert!(std::fs::rename(&consumed_path, parent.path().join("active-plan")).is_err());
+        drop(consumed);
+        std::fs::rename(&consumed_path, parent.path().join("consume-released")).unwrap();
+
+        let expiring_path = parent.path().join("expiring");
+        std::fs::create_dir(&expiring_path).unwrap();
+        let expiring_store = FilePlanStore {
+            plans: Arc::default(),
+            lifetime: Duration::from_secs(10),
+        };
+        expiring_store
+            .plan_download(
+                client,
+                vec!["/home/test/remote-source.bin".into()],
+                open_local_directory(expiring_path.canonicalize().unwrap()).unwrap(),
+                ConflictPolicy::Skip,
+            )
+            .await
+            .unwrap();
+        assert!(std::fs::rename(&expiring_path, parent.path().join("not-yet")).is_err());
+        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+        assert!(expiring_store.plans.lock().unwrap().is_empty());
+        std::fs::rename(&expiring_path, parent.path().join("expiry-released")).unwrap();
     }
 }
