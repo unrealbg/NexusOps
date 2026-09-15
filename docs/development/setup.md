@@ -18,12 +18,12 @@ Goal 02B pins `russh-sftp` 3.0.0 for SFTP v3 on the existing russh transport and
 npm ci
 npm run tauri -- dev
 # Compile a production executable without installers:
-npm run tauri -- build --no-bundle
+./node_modules/.bin/tauri build --no-bundle
 # Build native platform bundles, once signing/release settings are configured:
 npm run tauri -- build
 ```
 
-`npm run build` produces the frontend assets only. `cargo` commands that include the Tauri crate need those assets first. Browser-only development is `npm run dev`; it cannot access the desktop backend. No mock data is substituted.
+`npm run build` produces the frontend assets only. `cargo` commands that include the Tauri crate need those assets first. Invoke the local Tauri CLI directly for `--no-bundle`; some npm argument-forwarding combinations consume that flag and unexpectedly produce installers. Browser-only development is `npm run dev`; it cannot access the desktop backend. No mock data is substituted.
 
 ## Tests and quality gates
 
@@ -61,7 +61,7 @@ $fixture = .\tools\openssh-fixture\Setup-OpenSshFixture.ps1 -AllowedRoot $allowe
 .\tools\openssh-fixture\Cleanup-OpenSshFixture.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
 ```
 
-The combined run executes the existing authentication/trust phases, `openssh_terminal_pty_interoperability`, and `openssh_sftp_streaming_interoperability`. SFTP coverage includes negotiated extensions/limits, browse/stat, Unicode/binary/empty files, no-clobber and Replace, rename, cancel, a 256 MiB streamed round trip, SFTP while a PTY is open, and exact cleanup. The fixture installs `vim` and terminal definitions only inside its owned Alpine VM. Cleanup requires a strict child path, rejects reparse points, validates the versioned ownership record, and verifies both the WSL registry identity and installation path before unregistering a distribution. Run `tools/openssh-fixture/Test-FixtureSafety.ps1` for non-destructive negative coverage.
+The combined run executes the existing authentication/trust phases, `openssh_terminal_pty_interoperability`, and `openssh_sftp_streaming_interoperability`. SFTP coverage includes negotiated extensions/limits, browse/stat, Unicode/binary/empty files, no-clobber and Replace, rename, cancel, a bounded-memory 256 MiB round trip with a nonuniform offset-dependent pattern and independent streaming SHA-256, SFTP while a PTY is open, an actual 5,001-child directory capped at 5,000 entries, and exact cleanup. The fixture installs `vim` and terminal definitions only inside its owned Alpine VM. Cleanup requires a strict child path, rejects reparse points, validates the versioned ownership record, and verifies both the WSL registry identity and installation path before unregistering a distribution. Run `tools/openssh-fixture/Test-FixtureSafety.ps1` for non-destructive negative coverage.
 
 Ed25519 is the supported client-key type for the Windows alpha. Optional RSA support is disabled because its current transitive Rust implementation has an unfixed timing-side-channel advisory. Do not enable legacy or obsolete SSH algorithms to work around server compatibility.
 
