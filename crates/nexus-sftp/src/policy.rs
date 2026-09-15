@@ -713,6 +713,7 @@ fn same_local_object(left: &LocalIdentity, right: &LocalIdentity) -> bool {
     left.object_id == right.object_id
 }
 
+#[cfg(windows)]
 fn handle_identity(handle: &File, metadata: &std::fs::Metadata) -> Result<LocalIdentity, AppError> {
     let id = fs_id::FileID::new(handle).map_err(|_| {
         local_access_error("Strong local filesystem identity is unavailable for this object.")
@@ -723,6 +724,23 @@ fn handle_identity(handle: &File, metadata: &std::fs::Metadata) -> Result<LocalI
         object_id: LocalObjectId {
             storage_id: id.storage_id(),
             file_id: id.internal_file_id(),
+        },
+    })
+}
+
+#[cfg(unix)]
+fn handle_identity(
+    _handle: &File,
+    metadata: &std::fs::Metadata,
+) -> Result<LocalIdentity, AppError> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok(LocalIdentity {
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+        object_id: LocalObjectId {
+            storage_id: metadata.dev(),
+            file_id: u128::from(metadata.ino()),
         },
     })
 }

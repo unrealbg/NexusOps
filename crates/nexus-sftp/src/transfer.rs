@@ -1082,6 +1082,7 @@ mod tests {
         crate::open_local_source(path.canonicalize().unwrap(), "binary.dat".into()).unwrap()
     }
 
+    #[cfg(windows)]
     async fn wait_for_state(
         manager: &TransferManager,
         id: TransferJobId,
