@@ -1,0 +1,47 @@
+# SFTP files architecture
+
+Goal 02B adds an agentless file workspace over a real SFTP v3 subsystem on the already authenticated and host-key-verified SSH transport. It does not use a PTY, shell commands, SCP, or a second login. Failure to open SFTP is scoped to that subsystem; discovery and terminals can remain usable.
+
+```mermaid
+flowchart LR
+  UI[React Files workspace] --> IPC[Typed Tauri file commands]
+  IPC --> APP[nexus-core file service]
+  APP --> PLAN[One-shot typed file plan]
+  PLAN --> XFER[Bounded transfer manager]
+  XFER --> SFTP[nexus-sftp]
+  SFTP --> SSH[nexus-ssh verified session]
+  PICKER[Native Rust picker] --> GRANT[Opaque local grant]
+  GRANT --> PLAN
+```
+
+## Identity and approval
+
+Every subsystem and returned listing is bound to `HostId + HostSessionId + SftpSessionId`. Reconnect creates a different connection identity. Rust rejects stale IDs and revokes unapproved plans for a disconnected session. A picker returns only an opaque, typed, ten-minute grant plus display metadata; local paths stay in Rust. Planning consumes the grant and records exact local/remote sources, destinations, observed identities, conflict policy, connection, operation kind, risk, and a five-minute expiry. Execution consumes the immutable plan once. A compromised renderer can still invoke allowed commands and display a false prompt, so this lifecycle is policy enforcement rather than cryptographic proof of human intent.
+
+The existing `nexus-operations` engine remains restricted to private fixed `ReadOnlyCommand` plans. File writes use the adjacent `FilePlanStore`; no discovery write is mislabeled as read-only. Transfer acceptance is audited as `file.transfer.accepted`. Completion stays in the transient job state, so an accepted asynchronous transfer is never audited as already completed.
+
+## Protocol and limits
+
+`russh-sftp` 3.0.0 supplies the SFTP implementation and accepts the existing russh channel stream. NexusOps requires protocol version 3, records all advertised extension versions, queries `limits@openssh.com` v1 when advertised, and records the returned packet/read/write/open-handle limits. The client packet ceiling is 256 KiB. Payload chunks are capped at 64 KiB even when the server allows more; four reads or writes can be in flight inside the library. Individual SFTP requests have a 15-second timeout. Initialization, subsystem acknowledgement, and channel close are separately bounded.
+
+Directory results contain at most 5,000 validated children. The UI labels a capped result partial, and its sorting/filtering applies only to loaded entries. Remote child names are rejected if empty, traversal-like, absolute, slash-containing, NUL-containing, or longer than 255 UTF-8 bytes. Operational POSIX names remain unchanged. Display text escapes control and bidi controls. Metadata is optional and unknown values remain unknown. Directory handles close on success, cap, cancellation, malformed entries, and ordinary protocol errors.
+
+The transfer manager admits at most 100 nonterminal jobs, runs at most four globally and two per host, keeps at most 100 terminal history entries beyond that active bound, and serializes jobs with the same destination. Destination lock entries are removed after the last waiter. A transfer holds neither the global SSH handle mutex nor React component state for its lifetime. UI polling carries metadata only; payload bytes remain between Rust local I/O and SFTP. Rust counters use checked `u64`, while generated TypeScript uses decimal strings and the UI uses `BigInt`.
+
+## Staging and conflicts
+
+Uploads create a job-owned `.nexusops-<uuid>.part` regular file in the destination directory with mode `0600`, stream and optionally `fsync@openssh.com`, close the handle, revalidate the final target, then commit. Safe no-clobber and Keep both require `hardlink@openssh.com` v1; the hard-link creation is the no-clobber commit point. Safe remote Replace requires an existing regular file and `posix-rename@openssh.com` v1. The old destination is not deleted first. New files retain mode `0600`; Replace creates a new inode and does not promise preservation of ownership, ACLs, xattrs, timestamps, or hard-link relationships.
+
+Downloads create a unique OS-owned temporary file in the selected destination directory, stream and flush it, revalidate source and destination, then use `persist_noclobber` or the platform replacement primitive. The destination directory and final destination must be ordinary non-reparse objects at each check. Windows-invalid device names, ADS syntax, separators, controls, and trailing-dot/space aliases are rejected rather than sanitized. The picker supplies the directory and the file name comes only from the validated remote entry. Windows filesystem lookups catch case-insensitive existing-name collisions; final no-clobber remains authoritative.
+
+Stat/revalidation is not a universal compare-and-swap guarantee against a malicious server, filesystem driver, or another local/remote writer. A normal directory can also be replaced in a narrow interval between validation and an OS operation. Unique exclusive staging, non-following metadata, destination serialization, no-clobber commit primitives, and never deleting the old destination first constrain the impact of those races.
+
+Skip marks only entries that conflicted when the plan was made; nonconflicting entries in a Skip batch still transfer. Keep both searches at most 1,000 candidates and finalizes no-clobber, so a name that appears after planning becomes a conflict. Replace is unavailable when the required extension or target contract is absent. Rename is same-directory and no-overwrite. On SFTP v3/OpenSSH it is enabled for regular files with `hardlink@openssh.com`; directory and symlink rename are disabled because the negotiated primitives do not provide the required no-clobber contract. Delete uses non-following metadata, removes regular files or the symlink itself, and uses non-recursive `rmdir`, which rejects nonempty directories. Special files are not transferred or deleted.
+
+## Cancellation and failure
+
+Cancellation changes `Queued`, `Preparing`, or `Transferring` to `CancelRequested`. A queued cancellation acquires no transfer permit and starts no remote I/O. The job becomes `Cancelled` only after streaming stops and the handle is closed; a request observed before finalization removes that job's staging, while a request during finalization does not overwrite a confirmed completion. Disconnect and shutdown cancel active jobs and close the subsystem. Reconnect never resumes them. A retryable failure prepares a new one-shot plan and requires another approval; `OutcomeUnknown` is not retryable and requires refresh plus a new decision.
+
+A failed request before the commit point removes only that job's exact staging name. There is no wildcard cleanup. A lost reply after create, delete, rename, replacement, or final-file creation produces `OutcomeUnknown`; NexusOps does not blindly replay it. A process crash can leave a uniquely named staging file. Restart does not restore jobs or delete unfamiliar `.part` files. An operator may inspect and remove a confirmed orphan manually.
+
+SFTP success confirms protocol acknowledgements and handle closure. The OpenSSH test independently reads the round-tripped bytes, but the product does not run a remote hash command and does not claim crash durability, universal rollback, or preservation of all filesystem metadata.

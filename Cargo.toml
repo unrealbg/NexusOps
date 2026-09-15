@@ -32,6 +32,7 @@ nexus-discovery = { path = "crates/nexus-discovery" }
 nexus-operations = { path = "crates/nexus-operations" }
 nexus-audit = { path = "crates/nexus-audit" }
 nexus-terminal = { path = "crates/nexus-terminal" }
+nexus-sftp = { path = "crates/nexus-sftp" }
 
 [profile.dev]
 debug = 0

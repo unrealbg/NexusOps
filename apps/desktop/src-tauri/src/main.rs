@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod commands;
+mod local_access;
 use nexus_core::Application;
 use tauri::Manager;
 
@@ -34,14 +35,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_writer(writer).try_init().map_err(|_|"Cannot initialize local logging")?;
             app.manage(guard);
             app.manage(Application::open(&directory)?);
+            app.manage(local_access::LocalAccessService::default());
             tracing::info!(version=env!("CARGO_PKG_VERSION"),"NexusOps application ready");
             Ok(())
         })
         .plugin(tauri_plugin_clipboard_manager::init())
-        .invoke_handler(tauri::generate_handler![commands::list_hosts,commands::save_host,commands::delete_host,commands::connect_host,commands::disconnect_host,commands::reconnect_host,commands::get_session,commands::trust_host_key,commands::refresh_host,commands::list_terminals,commands::open_terminal,commands::poll_terminal,commands::write_terminal,commands::resize_terminal,commands::rename_terminal,commands::close_terminal])
+        .invoke_handler(tauri::generate_handler![commands::list_hosts,commands::save_host,commands::delete_host,commands::connect_host,commands::disconnect_host,commands::reconnect_host,commands::get_session,commands::trust_host_key,commands::refresh_host,commands::list_terminals,commands::open_terminal,commands::poll_terminal,commands::write_terminal,commands::resize_terminal,commands::rename_terminal,commands::close_terminal,commands::open_sftp,commands::list_remote_directory,commands::remote_properties,commands::choose_upload_files,commands::choose_download_directory,commands::plan_upload,commands::plan_download,commands::plan_create_directory,commands::plan_rename,commands::plan_delete,commands::execute_file_plan,commands::list_transfers,commands::cancel_transfer,commands::plan_retry_transfer])
         .build(tauri::generate_context!())?;
     application.run(|app, event| {
         if let tauri::RunEvent::Exit = event {
+            app.state::<local_access::LocalAccessService>().revoke_all();
             tauri::async_runtime::block_on(app.state::<Application>().shutdown());
         }
     });

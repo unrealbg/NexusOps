@@ -14,10 +14,11 @@ use std::{
 
 use nexus_model::{
     AuthenticationMethod, ErrorCode, Host, HostConnectionConfig, HostFingerprint, HostId,
-    HostKeyChallenge,
+    HostKeyChallenge, HostSessionId,
 };
 use nexus_operations::{ReadOnlyCommand, RemoteSession};
 use nexus_secrets::Credential;
+use nexus_sftp::SftpConnector;
 use nexus_ssh::{KnownHosts, SshProvider};
 use russh::{
     Channel, ChannelId,
@@ -84,6 +85,16 @@ impl server::Handler for FixtureHandler {
         _session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         self.channel_closes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        _name: &str,
+        session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_failure(channel)?;
         Ok(())
     }
 
@@ -215,6 +226,27 @@ fn password() -> Credential {
         private_key: None,
         passphrase: None,
     }
+}
+
+#[tokio::test]
+async fn rejected_sftp_subsystem_is_typed_and_leaves_ssh_usable() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    let error = session
+        .open_sftp(fixture.host.id, HostSessionId::new())
+        .await
+        .err()
+        .expect("fixture does not provide SFTP");
+    assert_eq!(error.code, ErrorCode::SftpDenied);
+    let hostname = session
+        .execute(ReadOnlyCommand::Hostname, CancellationToken::new())
+        .await
+        .expect("SSH discovery remains usable after SFTP rejection");
+    assert_eq!(hostname.trim(), "nexus-fixture");
 }
 
 #[tokio::test]

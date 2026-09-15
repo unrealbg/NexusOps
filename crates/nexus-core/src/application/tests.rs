@@ -83,6 +83,19 @@ impl TerminalConnector for TestSession {
         }))
     }
 }
+#[async_trait]
+impl nexus_sftp::SftpConnector for TestSession {
+    async fn open_sftp(
+        &self,
+        _: HostId,
+        _: HostSessionId,
+    ) -> Result<Arc<dyn nexus_sftp::SftpClient>, AppError> {
+        Err(AppError::new(
+            ErrorCode::SftpUnavailable,
+            "SFTP is unavailable in this test provider.",
+        ))
+    }
+}
 struct TestTerminalChannel {
     host_cancel: CancellationToken,
     terminal_cancel: CancellationToken,
@@ -127,6 +140,9 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         provider: provider.clone(),
         audit: Arc::new(AuditLog::open(dir.path().join("audit.jsonl")).expect("audit")),
         terminals: Arc::new(nexus_terminal::TerminalManager::new()),
+        sftp_sessions: Mutex::new(HashMap::new()),
+        file_plans: nexus_sftp::FilePlanStore::default(),
+        transfers: nexus_sftp::TransferManager::new(),
         mutation: Mutex::new(()),
         sessions: Mutex::new(HashMap::new()),
         _profile_lock: None,
@@ -505,6 +521,19 @@ impl TerminalConnector for SlowRefreshSession {
         Err(AppError::new(
             ErrorCode::TerminalUnavailable,
             "Test terminal unavailable.",
+        ))
+    }
+}
+#[async_trait]
+impl nexus_sftp::SftpConnector for SlowRefreshSession {
+    async fn open_sftp(
+        &self,
+        _: HostId,
+        _: HostSessionId,
+    ) -> Result<Arc<dyn nexus_sftp::SftpClient>, AppError> {
+        Err(AppError::new(
+            ErrorCode::SftpUnavailable,
+            "SFTP is unavailable in this test provider.",
         ))
     }
 }

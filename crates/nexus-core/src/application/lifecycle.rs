@@ -27,6 +27,7 @@ impl Application {
         let view = data.view.clone();
         drop(data);
         if let Some(connection_id) = closed_connection {
+            self.close_sftp(id, connection_id).await;
             self.terminals
                 .disconnect_connection(id, connection_id)
                 .await;
@@ -59,6 +60,7 @@ impl Application {
         }
         drop(data);
         if let Some(connection_id) = connection_id {
+            self.close_sftp(id, connection_id).await;
             self.terminals
                 .disconnect_connection(id, connection_id)
                 .await;

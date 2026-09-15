@@ -11,6 +11,7 @@ nexus-model = { path = "../nexus-model" }
 nexus-operations = { path = "../nexus-operations" }
 nexus-secrets = { path = "../nexus-secrets" }
 nexus-terminal.workspace = true
+nexus-sftp.workspace = true
 rusqlite.workspace = true
 russh = { version = "0.63.3", default-features = false, features = ["ring"] }
 tokio.workspace = true
@@ -23,6 +24,7 @@ nexus-discovery = { path = "../nexus-discovery" }
 rand = "0.10"
 serde_json.workspace = true
 tempfile.workspace = true
+uuid.workspace = true
 zeroize.workspace = true
 
 [lints]

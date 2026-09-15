@@ -9,6 +9,13 @@ import type {
   TerminalOutputBatch,
   TerminalSession,
   TerminalSize,
+  ConflictPolicy,
+  DirectoryListing,
+  FileOperationPlan,
+  LocalSelectionGrant,
+  RemoteEntry,
+  SftpSessionInfo,
+  TransferJob,
 } from '@nexusops/protocol';
 
 export function applicationError(error: unknown): AppError {
@@ -85,4 +92,27 @@ export const terminalApi = {
     request<TerminalSession>('rename_terminal', { ...ownershipArgs(session), label }),
   close: (session: TerminalOwnership) =>
     request<void>('close_terminal', ownershipArgs(session)),
+};
+
+type SftpOwnership = Pick<SftpSessionInfo, 'hostId' | 'hostSessionId' | 'id'>;
+function sftpArgs(session: SftpOwnership) {
+  return { hostId: session.hostId, hostSessionId: session.hostSessionId, sftpSessionId: session.id };
+}
+
+/** Narrow Files boundary: payload bytes and local paths never enter the renderer. */
+export const filesApi = {
+  open: (hostId: string) => request<SftpSessionInfo>('open_sftp', { hostId }),
+  list: (session: SftpOwnership, path: string) => request<DirectoryListing>('list_remote_directory', { ...sftpArgs(session), path }),
+  properties: (session: SftpOwnership, path: string) => request<RemoteEntry>('remote_properties', { ...sftpArgs(session), path }),
+  chooseUploadFiles: () => request<LocalSelectionGrant | null>('choose_upload_files'),
+  chooseDownloadDirectory: () => request<LocalSelectionGrant | null>('choose_download_directory'),
+  planUpload: (session: SftpOwnership, grantId: string, remoteDirectory: string, conflictPolicy: ConflictPolicy) => request<FileOperationPlan>('plan_upload', { request: { ...sftpArgs(session), grantId, remoteDirectory, conflictPolicy } }),
+  planDownload: (session: SftpOwnership, grantId: string, remotePaths: string[], conflictPolicy: ConflictPolicy) => request<FileOperationPlan>('plan_download', { request: { ...sftpArgs(session), grantId, remotePaths, conflictPolicy } }),
+  planCreateDirectory: (session: SftpOwnership, parent: string, name: string) => request<FileOperationPlan>('plan_create_directory', { ...sftpArgs(session), parent, name }),
+  planRename: (session: SftpOwnership, source: string, newName: string) => request<FileOperationPlan>('plan_rename', { ...sftpArgs(session), source, newName }),
+  planDelete: (session: SftpOwnership, path: string) => request<FileOperationPlan>('plan_delete', { ...sftpArgs(session), path }),
+  execute: (session: SftpOwnership, planId: string) => request<TransferJob[]>('execute_file_plan', { ...sftpArgs(session), planId }),
+  transfers: (hostId?: string) => request<TransferJob[]>('list_transfers', { hostId: hostId ?? null }),
+  cancel: (session: SftpOwnership, jobId: string) => request<void>('cancel_transfer', { ...sftpArgs(session), jobId }),
+  planRetry: (session: SftpOwnership, jobId: string) => request<FileOperationPlan>('plan_retry_transfer', { ...sftpArgs(session), jobId }),
 };

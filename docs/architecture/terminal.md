@@ -69,5 +69,5 @@ The renderer still necessarily receives active terminal bytes and clipboard text
 - No PTY resume. tmux or another remote persistent-session tool remains a user-managed remote concern.
 - No persisted tab names, scrollback, local input history, transcript export, terminal sharing, SSH agent forwarding, jump hosts, or remote file clipboard.
 - `TERM` is `xterm-256color`; `COLORTERM` is not asserted. xterm naturally handles true-color sequences, but this milestone claims tested ANSI styles and terminal TUI behavior rather than a negotiated TrueColor environment.
-- Clipboard support is plain text only. SFTP and remote file editing belong to Goal 02B.
+- Clipboard support is plain text only. File payloads use the separate SFTP subsystem and never pass through terminal input, output, or clipboard APIs; remote editing remains outside this milestone.
 - Accessibility includes named controls, keyboard tabs/actions, visible focus, contrast, ended-state announcements, and xterm screen-reader mode. Terminal screen readers still inherit xterm and platform WebView behavior.

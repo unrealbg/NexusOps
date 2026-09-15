@@ -50,10 +50,10 @@ describe('workspace flows', () => {
       'Network',
       'Security',
       'Logs',
-      'Files',
     ])
       expect(screen.getByRole('button', { name: `${label} (coming soon)` })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Terminal' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Files' })).toBeDisabled();
   });
   it('saves credentials without retaining them in query caches, UI store or browser storage', async () => {
     const localWrite = vi.spyOn(Storage.prototype, 'setItem');

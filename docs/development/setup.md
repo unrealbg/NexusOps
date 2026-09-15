@@ -10,6 +10,8 @@
 
 The frontend uses React 19, Vite 8, Query 5 and Zustand 5. TypeScript 6.0 is deliberately selected because the current typescript-eslint 8 release supports versions below 6.1; upgrading to TypeScript 7 without a compatible lint toolchain would violate mutual compatibility. Exact resolutions are committed in npm and Cargo lockfiles. Stable russh uses some prerelease cryptography dependencies internally; review the lockfile on updates.
 
+Goal 02B pins `russh-sftp` 3.0.0 for SFTP v3 on the existing russh transport and `rfd` 0.17.2 for native local file/directory selection. The renderer receives neither broad filesystem permission nor local paths.
+
 ## Run and build
 
 ```sh
@@ -59,7 +61,7 @@ $fixture = .\tools\openssh-fixture\Setup-OpenSshFixture.ps1 -AllowedRoot $allowe
 .\tools\openssh-fixture\Cleanup-OpenSshFixture.ps1 -AllowedRoot $allowed -RunRoot $fixture.RunRoot
 ```
 
-The combined run executes the existing authentication/trust phases plus `openssh_terminal_pty_interoperability`: shell output, UTF-8, ANSI styles, `stty size`, two independent PTYs, single-tab close, 2 MiB flow, `top`, and disconnect teardown. The fixture installs `vim` and terminal definitions only inside its owned Alpine VM. Cleanup requires a strict child path, rejects reparse points, validates the versioned ownership record, and verifies both the WSL registry identity and installation path before unregistering a distribution. Run `tools/openssh-fixture/Test-FixtureSafety.ps1` for non-destructive negative coverage.
+The combined run executes the existing authentication/trust phases, `openssh_terminal_pty_interoperability`, and `openssh_sftp_streaming_interoperability`. SFTP coverage includes negotiated extensions/limits, browse/stat, Unicode/binary/empty files, no-clobber and Replace, rename, cancel, a 256 MiB streamed round trip, SFTP while a PTY is open, and exact cleanup. The fixture installs `vim` and terminal definitions only inside its owned Alpine VM. Cleanup requires a strict child path, rejects reparse points, validates the versioned ownership record, and verifies both the WSL registry identity and installation path before unregistering a distribution. Run `tools/openssh-fixture/Test-FixtureSafety.ps1` for non-destructive negative coverage.
 
 Ed25519 is the supported client-key type for the Windows alpha. Optional RSA support is disabled because its current transitive Rust implementation has an unfixed timing-side-channel advisory. Do not enable legacy or obsolete SSH algorithms to work around server compatibility.
 

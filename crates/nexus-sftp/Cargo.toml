@@ -1,0 +1,19 @@
+[package]
+name = "nexus-sftp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+nexus-model.workspace = true
+russh-sftp = "=3.0.0"
+serde.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+tokio-util.workspace = true
+uuid.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

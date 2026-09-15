@@ -1,0 +1,13 @@
+# ADR 0005: SFTP provider, typed file plans, and local selection grants
+
+Status: Accepted
+
+Use [`russh-sftp` 3.0.0](https://docs.rs/crate/russh-sftp/3.0.0) on a separate subsystem channel from the existing authenticated `russh` session. The pinned release's published API/source was reviewed for the raw-session configuration, SFTP v3 operations, extension calls, packet limits, request timeouts, and handle lifecycle; `cargo audit` found no vulnerability advisory for it. Keep SFTP types in `nexus-sftp`, expose them through the transport provider, and bind every operation to host, SSH connection, and SFTP session identities. This reuses host-key verification and credentials without exposing an SSH library or second login to the application or renderer.
+
+Keep the fixed read-only discovery engine unchanged. Mutating remote files and local downloads use an adjacent, bounded store of immutable typed plans. Plans carry exact sources, destinations, observed identities, conflict policy, risk, connection ownership, and expiry, and are consumed once. This keeps write authority explicit without weakening `ReadOnlyCommand` validation.
+
+Use native [`rfd` 0.17.2](https://docs.rs/crate/rfd/0.17.2) dialogs only in a narrow Rust service. Its published platform implementation and dependency change were reviewed and the version is pinned. A selection creates an opaque, typed, expiring, one-use grant. Renderer DTOs contain display metadata and never local paths or file bytes. Planning immediately consumes the grant and embeds the selected resource in backend-only state.
+
+Stream in bounded chunks to exclusive staging files and finalize with negotiated primitives whose overwrite behavior matches the selected policy. Require OpenSSH hard-link v1 for no-clobber remote finalization and POSIX rename v1 for remote Replace. Disable an operation when SFTP v3 cannot provide its safety contract. Do not add shell, SCP, broad filesystem IPC, recursive operations, or automatic reconnect resume.
+
+This design retains narrow TOCTOU windows because SFTP v3 metadata checks are not compare-and-swap and path-based local APIs cannot pin every directory component across a native picker and later execution. The system documents those limits, revalidates at the commit boundary, serializes same-destination jobs, and preserves the old target until a supported commit primitive succeeds.
