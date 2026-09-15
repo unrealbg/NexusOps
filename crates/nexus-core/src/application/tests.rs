@@ -989,9 +989,10 @@ async fn core_retry_boundary_rejects_unknown_and_permanent_outcomes_without_io()
         .lock()
         .await
         .insert(host.id, client.clone());
-    let sources = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let sources = tempfile::tempdir().unwrap();
     let path = sources.path().join("retry.bin");
     std::fs::write(&path, b"retry payload").unwrap();
+    let path = path.canonicalize().unwrap();
 
     client.upload_failures.lock().unwrap().push_back(
         nexus_sftp::StagedUploadFailure::CreationOutcomeUnknown(AppError::new(

@@ -913,13 +913,16 @@ mod tests {
     async fn upload_plan_rejects_servers_without_safe_no_clobber_extension() {
         let client = PlanClient::new();
         let store = FilePlanStore::default();
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let source_path = directory.path().join("data.bin");
         std::fs::write(&source_path, [1_u8]).unwrap();
         let error = store
             .plan_upload(
                 client,
-                vec![open_local_source(source_path, "data.bin".into()).unwrap()],
+                vec![
+                    open_local_source(source_path.canonicalize().unwrap(), "data.bin".into())
+                        .unwrap(),
+                ],
                 "/home/test",
                 ConflictPolicy::Skip,
             )
@@ -931,10 +934,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn selected_directory_handle_blocks_parent_replacement() {
-        let parent = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let parent = tempfile::tempdir().unwrap();
         let destination = parent.path().join("destination");
         std::fs::create_dir(&destination).unwrap();
-        let selected = open_local_directory(destination.clone()).unwrap();
+        let selected = open_local_directory(destination.canonicalize().unwrap()).unwrap();
         assert!(std::fs::rename(&destination, parent.path().join("moved")).is_err());
         validate_local_directory_handle(&selected).unwrap();
     }
@@ -952,13 +955,16 @@ mod tests {
             },
         ]);
         let store = FilePlanStore::default();
-        let local = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let local = tempfile::tempdir().unwrap();
         let upload_path = local.path().join("upload.bin");
         std::fs::write(&upload_path, b"data").unwrap();
         let upload = store
             .plan_upload(
                 client.clone(),
-                vec![open_local_source(upload_path, "upload.bin".into()).unwrap()],
+                vec![
+                    open_local_source(upload_path.canonicalize().unwrap(), "upload.bin".into())
+                        .unwrap(),
+                ],
                 "/home/test",
                 ConflictPolicy::Replace,
             )
@@ -978,7 +984,7 @@ mod tests {
                 if items.len() == 1 && items[0].action == DestinationAction::CreateNew
         ));
 
-        let destination = open_local_directory(local.path().to_path_buf()).unwrap();
+        let destination = open_local_directory(local.path().canonicalize().unwrap()).unwrap();
         let download = store
             .plan_download(
                 client,

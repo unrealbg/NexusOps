@@ -1081,12 +1081,12 @@ mod tests {
     }
 
     fn local_item(path: &std::path::Path) -> crate::LocalItem {
-        crate::open_local_source(path.to_path_buf(), "binary.dat".into()).unwrap()
+        crate::open_local_source(path.canonicalize().unwrap(), "binary.dat".into()).unwrap()
     }
 
     #[tokio::test]
     async fn skip_policy_only_skips_items_that_actually_conflicted() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("binary.dat");
         std::fs::write(&path, [0_u8, 255, 1, 2, 3, 4, 5]).unwrap();
         let client = CountingClient::new();
@@ -1125,7 +1125,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_stream_never_reaches_finalization() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("binary.dat");
         std::fs::write(&path, [1_u8; 9]).unwrap();
         let client = CountingClient::new();
@@ -1157,7 +1157,7 @@ mod tests {
 
     #[tokio::test]
     async fn queued_cancellation_starts_no_remote_io() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("queued.dat");
         std::fs::write(&path, [7_u8; 32]).unwrap();
         let client = CountingClient::new();
@@ -1236,7 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn staging_cleanup_requires_confirmed_ownership() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.bin");
         std::fs::write(&path, b"owned bytes").unwrap();
         for failure in [
@@ -1277,7 +1277,7 @@ mod tests {
 
     #[tokio::test]
     async fn owned_staging_is_cleaned_on_post_stream_failures_and_caller_drop() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.bin");
         std::fs::write(&path, b"owned bytes").unwrap();
 
@@ -1382,7 +1382,7 @@ mod tests {
 
     #[tokio::test]
     async fn finalization_uses_the_per_item_approved_action() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("source.bin");
         std::fs::write(&path, b"new payload").unwrap();
         let client = CountingClient::new();
@@ -1447,8 +1447,9 @@ mod tests {
 
     #[tokio::test]
     async fn download_replace_preference_cannot_overwrite_a_new_target() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-        let selected = crate::open_local_directory(directory.path().to_path_buf()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let selected =
+            crate::open_local_directory(directory.path().canonicalize().unwrap()).unwrap();
         let destination = directory.path().join("download.bin");
         let source_identity = crate::EntryIdentity {
             kind: RemoteEntryKind::File,
@@ -1499,8 +1500,9 @@ mod tests {
 
     #[tokio::test]
     async fn changed_remote_source_blocks_download_finalization() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-        let selected = crate::open_local_directory(directory.path().to_path_buf()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let selected =
+            crate::open_local_directory(directory.path().canonicalize().unwrap()).unwrap();
         let approved = crate::EntryIdentity {
             kind: RemoteEntryKind::File,
             size: Some(14),
@@ -1583,7 +1585,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn selected_upload_handle_blocks_path_replacement_and_writes() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("locked.bin");
         std::fs::write(&path, b"approved").unwrap();
         let selected = local_item(&path);
@@ -1594,7 +1596,7 @@ mod tests {
 
     #[tokio::test]
     async fn retry_rejects_unknown_and_permanent_failures_but_replans_valid_work() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("retry.bin");
         std::fs::write(&path, b"retry payload").unwrap();
         let client = CountingClient::new();
@@ -1655,7 +1657,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_admission_is_atomic_at_capacity_and_under_parallel_submit() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("queued.bin");
         std::fs::write(&path, b"queued").unwrap();
         let client = CountingClient::new();
@@ -1752,7 +1754,7 @@ mod tests {
 
     #[tokio::test]
     async fn jobs_for_one_destination_are_serialized() {
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("same.bin");
         std::fs::write(&path, b"same destination").unwrap();
         let client = CountingClient::new();
@@ -1798,7 +1800,7 @@ mod tests {
     #[test]
     fn completed_history_is_strictly_bounded() {
         let client = CountingClient::new();
-        let directory = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("history.bin");
         std::fs::write(&path, b"history").unwrap();
         let manager = TransferManager::new();
