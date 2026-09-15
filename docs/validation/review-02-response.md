@@ -1,10 +1,10 @@
 # REVIEW-02 terminal integration response
 
-Date: 2026-09-15  
-Repository: <https://github.com/unrealbg/NexusOps>  
-Draft PR: <https://github.com/unrealbg/NexusOps/pull/1>  
-Reviewed base: `f4db3cb9346a90504b6844617214831a65b9774a`  
-Reviewed head: `dced1fe59477ebf931db0d3aea95620e94317cfa`  
+Date: 2026-09-15
+Repository: <https://github.com/unrealbg/NexusOps>
+Draft PR: <https://github.com/unrealbg/NexusOps/pull/1>
+Reviewed base: `f4db3cb9346a90504b6844617214831a65b9774a`
+Reviewed head: `dced1fe59477ebf931db0d3aea95620e94317cfa`
 Corrected implementation head before this evidence-only document: `cd1befad48dc4e9aef890e7a7007260945c7676c`
 
 The report commit necessarily follows the implementation commit named above. The exact immutable published branch head and hosted checks for that head are recorded in Draft PR #1 after the grouped push.
@@ -76,9 +76,9 @@ Ownership-safe cleanup then removed only the new run root and unregistered only 
 
 Status: **UNVERIFIED**.
 
-Candidate source SHA: `cd1befad48dc4e9aef890e7a7007260945c7676c`  
-Candidate executable SHA-256: `CB34FE3E133C7B0C38740DE44401157180ADF976F685FE50DEF9E8C80C7D54C8`  
-Candidate executable size: 16,474,112 bytes  
+Candidate source SHA: `cd1befad48dc4e9aef890e7a7007260945c7676c`
+Candidate executable SHA-256: `CB34FE3E133C7B0C38740DE44401157180ADF976F685FE50DEF9E8C80C7D54C8`
+Candidate executable size: 16,474,112 bytes
 Build environment: Windows 11 Pro, version 10.0.26200, build 26200; Node.js 24.19.0; disposable loopback Alpine/OpenSSH fixture.
 
 Computer Use was reset and initialized twice after the final product build. Both attempts failed before any application window could be observed or controlled:
