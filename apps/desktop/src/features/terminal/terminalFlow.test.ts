@@ -5,6 +5,7 @@ import {
   MAX_QUEUED_INPUT_BYTES,
   mergeTerminalSession,
   runTerminalPollLoop,
+  writeConsumed,
 } from './terminalFlow';
 
 function session(label = 'Terminal 1', state: TerminalSession['state'] = 'open'): TerminalSession {
@@ -21,6 +22,12 @@ function session(label = 'Terminal 1', state: TerminalSession['state'] = 'open')
 
 function encoded(value: string): string {
   return btoa(value);
+}
+
+function encodedBytes(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
 }
 
 async function eventually(assertion: () => void): Promise<void> {
@@ -73,6 +80,47 @@ describe('terminal renderer flow control', () => {
 
     const actual = writes.flatMap((bytes) => [...bytes]);
     expect(new TextDecoder().decode(new Uint8Array(actual))).toBe('first-second-final-marker');
+  });
+
+  test('accepts an irregular 64 KiB batch and its ordered one-byte carryover without loss', async () => {
+    const writes: Uint8Array[] = [];
+    const terminal = {
+      write(bytes: Uint8Array, callback: () => void) {
+        writes.push(bytes);
+        callback();
+      },
+    };
+    const finalChunk = new Uint8Array(16 * 1024).fill(69);
+    const marker = new TextEncoder().encode('NX010-FINAL-MARKER');
+    finalChunk.set(marker, finalChunk.length - marker.length);
+    const source = [
+      Uint8Array.of(65),
+      new Uint8Array(16 * 1024).fill(66),
+      new Uint8Array(16 * 1024).fill(67),
+      new Uint8Array(16 * 1024).fill(68),
+      finalChunk,
+    ];
+    const expected = Uint8Array.from(source.flatMap((chunk) => [...chunk]));
+    const firstBatch = [...source.slice(0, 4), finalChunk.slice(0, finalChunk.length - 1)];
+    const secondBatch = [finalChunk.slice(finalChunk.length - 1)];
+
+    await writeConsumed(
+      terminal,
+      firstBatch.map(encodedBytes),
+      new AbortController().signal,
+    );
+    await writeConsumed(
+      terminal,
+      secondBatch.map(encodedBytes),
+      new AbortController().signal,
+    );
+
+    const actual = Uint8Array.from(writes.flatMap((chunk) => [...chunk]));
+    expect(firstBatch.reduce((total, chunk) => total + chunk.length, 0)).toBe(64 * 1024);
+    expect(secondBatch).toHaveLength(1);
+    expect(secondBatch[0]).toHaveLength(1);
+    expect(actual).toEqual(expected);
+    expect(new TextDecoder().decode(actual.slice(-marker.length))).toBe('NX010-FINAL-MARKER');
   });
 
   test('cancellation releases a poll paused on a stalled emulator callback', async () => {

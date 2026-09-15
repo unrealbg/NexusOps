@@ -7,6 +7,7 @@ struct MockChannel {
     writes: Mutex<Vec<Vec<u8>>>,
     sizes: Mutex<Vec<TerminalSize>>,
     closes: AtomicUsize,
+    reads: AtomicUsize,
 }
 
 impl MockChannel {
@@ -21,6 +22,7 @@ impl MockChannel {
                 writes: Mutex::new(Vec::new()),
                 sizes: Mutex::new(Vec::new()),
                 closes: AtomicUsize::new(0),
+                reads: AtomicUsize::new(0),
             }),
             tx,
         )
@@ -30,12 +32,15 @@ impl MockChannel {
 #[async_trait]
 impl TerminalChannel for MockChannel {
     async fn read(&self) -> Result<TerminalRead, AppError> {
-        self.incoming
+        let event = self
+            .incoming
             .lock()
             .await
             .recv()
             .await
-            .unwrap_or(Ok(TerminalRead::Closed))
+            .unwrap_or(Ok(TerminalRead::Closed));
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        event
     }
 
     async fn write(&self, data: &[u8]) -> Result<(), AppError> {
@@ -81,6 +86,39 @@ fn size(columns: u32, rows: u32) -> TerminalSize {
         pixel_width: columns * 9,
         pixel_height: rows * 18,
     }
+}
+
+async fn wait_for_reads(channel: &MockChannel, minimum: usize) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while channel.reads.load(Ordering::SeqCst) < minimum {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal pump reads expected events");
+}
+
+fn decode_batch(batch: &TerminalOutputBatch) -> Vec<Vec<u8>> {
+    batch
+        .chunks_base64
+        .iter()
+        .map(|chunk| STANDARD.decode(chunk).expect("base64"))
+        .collect()
+}
+
+fn assert_bounded_batch(chunks: &[Vec<u8>]) -> usize {
+    assert!(
+        chunks
+            .iter()
+            .all(|chunk| !chunk.is_empty() && chunk.len() <= OUTPUT_CHUNK_BYTES),
+        "every returned chunk stays within the per-chunk limit"
+    );
+    let bytes = chunks.iter().map(Vec::len).sum::<usize>();
+    assert!(
+        bytes <= OUTPUT_BATCH_BYTES,
+        "poll returned {bytes} bytes; maximum is {OUTPUT_BATCH_BYTES}"
+    );
+    bytes
 }
 
 #[tokio::test]
@@ -254,7 +292,7 @@ async fn output_queue_stays_bounded_when_consumer_falls_behind() {
         .get(&terminal.id)
         .cloned()
         .expect("entry");
-    assert!(entry.output.lock().await.len() <= OUTPUT_QUEUE_CAPACITY);
+    assert!(entry.output.lock().await.receiver.len() <= OUTPUT_QUEUE_CAPACITY);
     let batch = manager
         .poll((host, connection, terminal.id))
         .await
@@ -265,6 +303,268 @@ async fn output_queue_stays_bounded_when_consumer_falls_behind() {
         .map(|chunk| STANDARD.decode(chunk).expect("base64").len())
         .sum();
     assert!(bytes <= OUTPUT_BATCH_BYTES);
+}
+
+#[tokio::test]
+async fn poll_keeps_irregular_chunks_within_the_batch_byte_limit() {
+    let manager = TerminalManager::new();
+    let host = HostId::new();
+    let connection = HostSessionId::new();
+    let (channel, incoming) = MockChannel::new();
+    let connector = MockConnector {
+        channel: channel.clone(),
+        stall: false,
+    };
+    let terminal = manager
+        .open(host, connection, &connector, size(80, 24))
+        .await
+        .expect("open");
+    let ownership = (host, connection, terminal.id);
+
+    let marker = b"--nx010-final-marker--";
+    let mut final_chunk = vec![b'e'; OUTPUT_CHUNK_BYTES];
+    final_chunk[OUTPUT_CHUNK_BYTES - marker.len()..].copy_from_slice(marker);
+    let source = vec![
+        vec![b'a'],
+        vec![b'b'; OUTPUT_CHUNK_BYTES],
+        vec![b'c'; OUTPUT_CHUNK_BYTES],
+        vec![b'd'; OUTPUT_CHUNK_BYTES],
+        final_chunk,
+    ];
+    let expected: Vec<u8> = source.iter().flatten().copied().collect();
+    for chunk in source {
+        incoming
+            .send(Ok(TerminalRead::Data(chunk)))
+            .expect("produce irregular output");
+    }
+    incoming
+        .send(Ok(TerminalRead::Closed))
+        .expect("complete remote stream");
+    wait_for_reads(&channel, 6).await;
+
+    let mut actual = Vec::new();
+    let mut batch_sizes = Vec::new();
+    loop {
+        let batch = manager.poll(ownership).await.expect("poll output");
+        let chunks = decode_batch(&batch);
+        batch_sizes.push(assert_bounded_batch(&chunks));
+        actual.extend(chunks.into_iter().flatten());
+        if batch.output_drained {
+            assert_eq!(batch.session.state, TerminalState::Closed);
+            break;
+        }
+        assert_eq!(batch.session.state, TerminalState::Closed);
+        assert!(batch_sizes.len() < 4, "polling must terminate");
+    }
+
+    assert_eq!(batch_sizes, [OUTPUT_BATCH_BYTES, 1]);
+    assert_eq!(
+        actual, expected,
+        "all bytes arrive exactly once and in order"
+    );
+    assert!(actual.ends_with(marker));
+}
+
+#[tokio::test]
+async fn poll_reports_drained_on_an_exact_64_kib_irregular_batch() {
+    let manager = TerminalManager::new();
+    let host = HostId::new();
+    let connection = HostSessionId::new();
+    let (channel, incoming) = MockChannel::new();
+    let terminal = manager
+        .open(
+            host,
+            connection,
+            &MockConnector {
+                channel: channel.clone(),
+                stall: false,
+            },
+            size(80, 24),
+        )
+        .await
+        .expect("open");
+    let ownership = (host, connection, terminal.id);
+    let source = [
+        vec![1],
+        vec![2; OUTPUT_CHUNK_BYTES],
+        vec![3; OUTPUT_CHUNK_BYTES],
+        vec![4; OUTPUT_CHUNK_BYTES],
+        vec![5; OUTPUT_CHUNK_BYTES - 1],
+    ];
+    let expected: Vec<u8> = source.iter().flatten().copied().collect();
+    for chunk in source {
+        incoming
+            .send(Ok(TerminalRead::Data(chunk)))
+            .expect("output");
+    }
+    incoming.send(Ok(TerminalRead::Closed)).expect("EOF");
+    wait_for_reads(&channel, 6).await;
+
+    let batch = manager.poll(ownership).await.expect("poll output");
+    let chunks = decode_batch(&batch);
+    assert_eq!(assert_bounded_batch(&chunks), OUTPUT_BATCH_BYTES);
+    assert_eq!(chunks.into_iter().flatten().collect::<Vec<_>>(), expected);
+    assert!(batch.output_drained);
+    assert_eq!(batch.session.state, TerminalState::Closed);
+}
+
+#[tokio::test]
+async fn carryover_precedes_newer_output_across_several_bounded_batches() {
+    let manager = TerminalManager::new();
+    let host = HostId::new();
+    let connection = HostSessionId::new();
+    let (channel, incoming) = MockChannel::new();
+    let terminal = manager
+        .open(
+            host,
+            connection,
+            &MockConnector {
+                channel: channel.clone(),
+                stall: false,
+            },
+            size(80, 24),
+        )
+        .await
+        .expect("open");
+    let ownership = (host, connection, terminal.id);
+    let initial = [
+        vec![b'a'],
+        vec![b'b'; OUTPUT_CHUNK_BYTES],
+        vec![b'c'; OUTPUT_CHUNK_BYTES],
+        vec![b'd'; OUTPUT_CHUNK_BYTES],
+        vec![b'e'; OUTPUT_CHUNK_BYTES],
+    ];
+    for chunk in initial.clone() {
+        incoming
+            .send(Ok(TerminalRead::Data(chunk)))
+            .expect("initial output");
+    }
+    wait_for_reads(&channel, initial.len()).await;
+
+    let first = manager.poll(ownership).await.expect("first poll");
+    let first_chunks = decode_batch(&first);
+    assert_eq!(assert_bounded_batch(&first_chunks), OUTPUT_BATCH_BYTES);
+    assert!(!first.output_drained);
+    let entry = manager
+        .inner
+        .lock()
+        .await
+        .sessions
+        .get(&terminal.id)
+        .cloned()
+        .expect("entry");
+    assert_eq!(
+        entry.output.lock().await.carryover.as_ref().map(Vec::len),
+        Some(1),
+        "only the one-byte suffix is retained"
+    );
+
+    let newer = [
+        b"--newer-small--".to_vec(),
+        vec![b'f'; OUTPUT_CHUNK_BYTES],
+        vec![b'g'; OUTPUT_CHUNK_BYTES],
+        vec![b'h'; OUTPUT_CHUNK_BYTES],
+        vec![b'i'; OUTPUT_CHUNK_BYTES],
+        vec![b'j'; OUTPUT_CHUNK_BYTES],
+    ];
+    for chunk in newer.clone() {
+        incoming
+            .send(Ok(TerminalRead::Data(chunk)))
+            .expect("new output");
+    }
+    incoming.send(Ok(TerminalRead::Closed)).expect("EOF");
+    wait_for_reads(&channel, initial.len() + newer.len() + 1).await;
+
+    let mut actual = first_chunks.into_iter().flatten().collect::<Vec<_>>();
+    let expected: Vec<u8> = initial
+        .iter()
+        .chain(newer.iter())
+        .flatten()
+        .copied()
+        .collect();
+    let mut polls = 1;
+    loop {
+        let batch = manager.poll(ownership).await.expect("subsequent poll");
+        let chunks = decode_batch(&batch);
+        assert_bounded_batch(&chunks);
+        actual.extend(chunks.into_iter().flatten());
+        polls += 1;
+        if batch.output_drained {
+            break;
+        }
+        assert!(polls < 6, "polling must terminate");
+    }
+
+    assert!(polls >= 3, "the scenario must span several batches");
+    assert_eq!(actual, expected, "carryover stays ahead of newer output");
+}
+
+#[tokio::test]
+async fn close_and_disconnect_discard_held_carryover() {
+    for disconnect in [false, true] {
+        let manager = TerminalManager::new();
+        let host = HostId::new();
+        let connection = HostSessionId::new();
+        let (channel, incoming) = MockChannel::new();
+        let terminal = manager
+            .open(
+                host,
+                connection,
+                &MockConnector {
+                    channel: channel.clone(),
+                    stall: false,
+                },
+                size(80, 24),
+            )
+            .await
+            .expect("open");
+        let ownership = (host, connection, terminal.id);
+        for chunk in [
+            vec![1],
+            vec![2; OUTPUT_CHUNK_BYTES],
+            vec![3; OUTPUT_CHUNK_BYTES],
+            vec![4; OUTPUT_CHUNK_BYTES],
+            vec![5; OUTPUT_CHUNK_BYTES],
+        ] {
+            incoming
+                .send(Ok(TerminalRead::Data(chunk)))
+                .expect("output");
+        }
+        wait_for_reads(&channel, 5).await;
+        let first = manager.poll(ownership).await.expect("first poll");
+        assert_eq!(
+            assert_bounded_batch(&decode_batch(&first)),
+            OUTPUT_BATCH_BYTES
+        );
+        assert!(!first.output_drained);
+
+        if disconnect {
+            manager.disconnect_connection(host, connection).await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let batch = manager.poll(ownership).await.expect("poll disconnected");
+                    assert!(batch.chunks_base64.is_empty());
+                    if batch.output_drained {
+                        assert_eq!(batch.session.state, TerminalState::Disconnected);
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("disconnect drains discarded output");
+        } else {
+            manager.close(ownership).await.expect("close");
+            assert_eq!(
+                manager
+                    .poll(ownership)
+                    .await
+                    .expect_err("closed entry removed")
+                    .code,
+                ErrorCode::NotFound
+            );
+        }
+    }
 }
 
 #[tokio::test]

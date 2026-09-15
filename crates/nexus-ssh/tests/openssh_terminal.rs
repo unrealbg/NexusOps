@@ -9,7 +9,7 @@ use nexus_model::{
 use nexus_operations::RemoteSession;
 use nexus_secrets::Credential;
 use nexus_ssh::{KnownHosts, SshProvider};
-use nexus_terminal::TerminalManager;
+use nexus_terminal::{OUTPUT_BATCH_BYTES, OUTPUT_CHUNK_BYTES, TerminalManager};
 use std::{env, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -84,9 +84,20 @@ async fn collect_until(
                 .poll((terminal.host_id, terminal.host_session_id, terminal.id))
                 .await
                 .expect("terminal poll");
+            let mut batch_bytes = 0usize;
             for chunk in batch.chunks_base64 {
-                output.extend(STANDARD.decode(chunk).expect("base64 output"));
+                let decoded = STANDARD.decode(chunk).expect("base64 output");
+                assert!(
+                    decoded.len() <= OUTPUT_CHUNK_BYTES,
+                    "real OpenSSH output chunk exceeded the terminal limit"
+                );
+                batch_bytes += decoded.len();
+                output.extend(decoded);
             }
+            assert!(
+                batch_bytes <= OUTPUT_BATCH_BYTES,
+                "real OpenSSH output batch exceeded the renderer limit"
+            );
             if output.windows(marker.len()).any(|window| window == marker)
                 && output.len() >= minimum_bytes
             {

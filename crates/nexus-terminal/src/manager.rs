@@ -49,9 +49,14 @@ pub trait TerminalConnector: Send + Sync {
 struct Entry {
     view: RwLock<TerminalSession>,
     channel: Mutex<Option<Arc<dyn TerminalChannel>>>,
-    output: Mutex<mpsc::Receiver<Vec<u8>>>,
+    output: Mutex<OutputBuffer>,
     cancel: CancellationToken,
     resize_gate: Mutex<()>,
+}
+
+struct OutputBuffer {
+    receiver: mpsc::Receiver<Vec<u8>>,
+    carryover: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -135,7 +140,10 @@ impl TerminalManager {
             let entry = Arc::new(Entry {
                 view: RwLock::new(view.clone()),
                 channel: Mutex::new(None),
-                output: Mutex::new(output_rx),
+                output: Mutex::new(OutputBuffer {
+                    receiver: output_rx,
+                    carryover: None,
+                }),
                 cancel: CancellationToken::new(),
                 resize_gate: Mutex::new(()),
             });
@@ -235,21 +243,25 @@ impl TerminalManager {
         ownership: (HostId, HostSessionId, TerminalSessionId),
     ) -> Result<TerminalOutputBatch, AppError> {
         let entry = self.entry(ownership).await?;
-        let mut receiver = entry.output.lock().await;
+        let mut output = entry.output.lock().await;
         let mut chunks = Vec::new();
         let mut total = 0usize;
+
+        if let Some(chunk) = output.carryover.take() {
+            append_output_chunk(chunk, &mut chunks, &mut total, &mut output.carryover);
+        }
         while total < OUTPUT_BATCH_BYTES {
-            match receiver.try_recv() {
+            match output.receiver.try_recv() {
                 Ok(chunk) => {
-                    total += chunk.len();
-                    chunks.push(STANDARD.encode(chunk));
+                    append_output_chunk(chunk, &mut chunks, &mut total, &mut output.carryover);
                 }
                 Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
                     break;
                 }
             }
         }
-        let output_drained = receiver.is_closed() && receiver.is_empty();
+        let output_drained =
+            output.carryover.is_none() && output.receiver.is_closed() && output.receiver.is_empty();
         Ok(TerminalOutputBatch {
             session: entry.snapshot(),
             chunks_base64: chunks,
@@ -427,6 +439,24 @@ impl TerminalManager {
     }
 }
 
+fn append_output_chunk(
+    mut chunk: Vec<u8>,
+    chunks: &mut Vec<String>,
+    total: &mut usize,
+    carryover: &mut Option<Vec<u8>>,
+) {
+    debug_assert!(chunk.len() <= OUTPUT_CHUNK_BYTES);
+    let remaining = OUTPUT_BATCH_BYTES - *total;
+    if chunk.len() > remaining {
+        let deferred = chunk.split_off(remaining);
+        *carryover = Some(deferred);
+    }
+    *total += chunk.len();
+    if !chunk.is_empty() {
+        chunks.push(STANDARD.encode(chunk));
+    }
+}
+
 impl Entry {
     fn snapshot(&self) -> TerminalSession {
         self.view.read().expect("terminal view poisoned").clone()
@@ -538,7 +568,9 @@ async fn close_entry(entry: &Entry, final_state: TerminalState) {
     if let Some(channel) = entry.channel.lock().await.take() {
         let _ = tokio::time::timeout(CLOSE_TIMEOUT, channel.close()).await;
     }
-    while entry.output.lock().await.try_recv().is_ok() {}
+    let mut output = entry.output.lock().await;
+    output.carryover = None;
+    while output.receiver.try_recv().is_ok() {}
     entry.view.write().expect("terminal view poisoned").state = final_state;
 }
 
