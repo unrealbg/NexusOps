@@ -23,6 +23,7 @@ base64.workspace = true
 nexus-discovery = { path = "../nexus-discovery" }
 rand = "0.10"
 serde_json.workspace = true
+sha2 = "0.10"
 tempfile.workspace = true
 uuid.workspace = true
 zeroize.workspace = true

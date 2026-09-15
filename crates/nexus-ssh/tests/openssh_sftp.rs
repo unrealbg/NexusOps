@@ -8,6 +8,7 @@ use nexus_secrets::Credential;
 use nexus_sftp::{SftpConnector, join_remote};
 use nexus_ssh::{KnownHosts, SshProvider};
 use nexus_terminal::TerminalConnector;
+use sha2::{Digest, Sha256};
 use std::{env, fs, sync::Arc};
 use tempfile::tempdir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -129,6 +130,7 @@ async fn openssh_sftp_streaming_interoperability() {
     let final_path = join_remote(&root, name).expect("unicode path");
     let staging = join_remote(&root, ".nexusops-small.part").expect("staging");
     let original = b"\0\xffbinary\ncontent\r\n".to_vec();
+    let original_hash = Sha256::digest(&original);
     let mut source = std::io::Cursor::new(original.clone());
     let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let progress_copy = progress.clone();
@@ -149,7 +151,9 @@ async fn openssh_sftp_streaming_interoperability() {
         .commit_new(&staging, &final_path)
         .await
         .expect("no-clobber finalize");
-    assert_eq!(download_bytes(client.as_ref(), &final_path).await, original);
+    let downloaded_original = download_bytes(client.as_ref(), &final_path).await;
+    assert_eq!(Sha256::digest(&downloaded_original), original_hash);
+    assert_eq!(downloaded_original, original);
 
     let empty = join_remote(&root, "empty").expect("empty path");
     let empty_stage = join_remote(&root, ".nexusops-empty.part").expect("empty staging");
@@ -304,15 +308,23 @@ async fn openssh_sftp_streaming_interoperability() {
         .expect("reopen for verification");
     let mut checked = 0_u64;
     let mut block = vec![0_u8; 64 * 1024];
+    let mut actual_hash = Sha256::new();
     loop {
         let count = local_file.read(&mut block).await.expect("read back");
         if count == 0 {
             break;
         }
         assert!(block[..count].iter().all(|byte| *byte == 0xa5));
+        actual_hash.update(&block[..count]);
         checked += count as u64;
     }
     assert_eq!(checked, large_bytes);
+    let mut expected_hash = Sha256::new();
+    let expected_block = [0xa5_u8; 64 * 1024];
+    for _ in 0..(large_bytes / expected_block.len() as u64) {
+        expected_hash.update(expected_block);
+    }
+    assert_eq!(actual_hash.finalize(), expected_hash.finalize());
 
     let terminal = transport
         .open_terminal(
