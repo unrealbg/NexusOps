@@ -67,6 +67,41 @@ async fn download_bytes(client: &dyn nexus_sftp::SftpClient, path: &str) -> Vec<
     output
 }
 
+fn pattern_byte(offset: u64) -> u8 {
+    let mixed = offset
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .rotate_left((offset % 63) as u32)
+        ^ (offset >> 7)
+        ^ (offset >> 23);
+    (mixed ^ (mixed >> 32)) as u8
+}
+
+async fn apply_directories(
+    client: Arc<dyn nexus_sftp::SftpClient>,
+    paths: &[String],
+    create: bool,
+) {
+    for batch in paths.chunks(32) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for path in batch {
+            let client = client.clone();
+            let path = path.clone();
+            tasks.spawn(async move {
+                if create {
+                    client.create_dir(&path).await
+                } else {
+                    client.remove_dir(&path).await
+                }
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result
+                .expect("directory task")
+                .expect("directory operation");
+        }
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires tools/openssh-fixture disposable real OpenSSH server"]
 async fn openssh_sftp_streaming_interoperability() {
@@ -138,6 +173,7 @@ async fn openssh_sftp_streaming_interoperability() {
         .upload_staged(
             &mut source,
             &staging,
+            nexus_sftp::StagingOwnership::new(),
             CancellationToken::new(),
             Arc::new(move |value| {
                 progress_copy.store(value, std::sync::atomic::Ordering::SeqCst);
@@ -161,6 +197,7 @@ async fn openssh_sftp_streaming_interoperability() {
         .upload_staged(
             &mut std::io::Cursor::new(Vec::<u8>::new()),
             &empty_stage,
+            nexus_sftp::StagingOwnership::new(),
             CancellationToken::new(),
             Arc::new(|_| {}),
         )
@@ -178,6 +215,7 @@ async fn openssh_sftp_streaming_interoperability() {
         .upload_staged(
             &mut std::io::Cursor::new(b"replacement".to_vec()),
             &conflicting_stage,
+            nexus_sftp::StagingOwnership::new(),
             CancellationToken::new(),
             Arc::new(|_| {}),
         )
@@ -231,6 +269,7 @@ async fn openssh_sftp_streaming_interoperability() {
             .upload_staged(
                 &mut tokio::io::repeat(0x5a),
                 &cancelled_stage,
+                nexus_sftp::StagingOwnership::new(),
                 cancelled,
                 Arc::new(|_| {})
             )
@@ -250,6 +289,7 @@ async fn openssh_sftp_streaming_interoperability() {
             .upload_staged(
                 &mut tokio::io::repeat(0x3c),
                 &midstream_stage,
+                nexus_sftp::StagingOwnership::new(),
                 midstream_cancel,
                 Arc::new(move |confirmed| {
                     if confirmed >= 1024 * 1024 {
@@ -267,12 +307,32 @@ async fn openssh_sftp_streaming_interoperability() {
     let large_bytes = 256_u64 * 1024 * 1024;
     let large = join_remote(&root, "streamed-256m.bin").expect("large path");
     let large_stage = join_remote(&root, ".nexusops-large.part").expect("large staging");
-    let mut generated = tokio::io::repeat(0xa5).take(large_bytes);
+    let (mut generator_writer, mut generated) = tokio::io::duplex(128 * 1024);
+    let generator = tokio::spawn(async move {
+        let mut offset = 0_u64;
+        let mut hash = Sha256::new();
+        while offset < large_bytes {
+            let uneven = 17_003 + ((offset / 65_537) % 41_113) as usize;
+            let count = uneven.min((large_bytes - offset) as usize);
+            let block = (0..count)
+                .map(|index| pattern_byte(offset + index as u64))
+                .collect::<Vec<_>>();
+            generator_writer
+                .write_all(&block)
+                .await
+                .expect("pattern source write");
+            hash.update(&block);
+            offset += count as u64;
+        }
+        drop(generator_writer);
+        hash.finalize()
+    });
     assert_eq!(
         client
             .upload_staged(
                 &mut generated,
                 &large_stage,
+                nexus_sftp::StagingOwnership::new(),
                 CancellationToken::new(),
                 Arc::new(|_| {})
             )
@@ -280,6 +340,7 @@ async fn openssh_sftp_streaming_interoperability() {
             .expect("large streamed upload"),
         large_bytes
     );
+    let expected_hash = generator.await.expect("pattern generator");
     client
         .commit_new(&large_stage, &large)
         .await
@@ -309,22 +370,21 @@ async fn openssh_sftp_streaming_interoperability() {
     let mut checked = 0_u64;
     let mut block = vec![0_u8; 64 * 1024];
     let mut actual_hash = Sha256::new();
+    let mut pattern_offset = 0_u64;
     loop {
         let count = local_file.read(&mut block).await.expect("read back");
         if count == 0 {
             break;
         }
-        assert!(block[..count].iter().all(|byte| *byte == 0xa5));
+        for (index, byte) in block[..count].iter().enumerate() {
+            assert_eq!(*byte, pattern_byte(pattern_offset + index as u64));
+        }
         actual_hash.update(&block[..count]);
         checked += count as u64;
+        pattern_offset += count as u64;
     }
     assert_eq!(checked, large_bytes);
-    let mut expected_hash = Sha256::new();
-    let expected_block = [0xa5_u8; 64 * 1024];
-    for _ in 0..(large_bytes / expected_block.len() as u64) {
-        expected_hash.update(expected_block);
-    }
-    assert_eq!(actual_hash.finalize(), expected_hash.finalize());
+    assert_eq!(actual_hash.finalize(), expected_hash);
 
     let terminal = transport
         .open_terminal(
@@ -347,6 +407,27 @@ async fn openssh_sftp_streaming_interoperability() {
             .is_empty()
     );
     terminal.close().await.expect("terminal close");
+
+    let large_directory = join_remote(&root, "large-listing").expect("large directory");
+    client
+        .create_dir(&large_directory)
+        .await
+        .expect("large mkdir");
+    let large_children = (0..=nexus_sftp::LISTING_ENTRY_CAP)
+        .map(|index| join_remote(&large_directory, &format!("entry-{index:05}")).unwrap())
+        .collect::<Vec<_>>();
+    apply_directories(client.clone(), &large_children, true).await;
+    let capped = client
+        .list(&large_directory, CancellationToken::new())
+        .await
+        .expect("capped real listing");
+    assert_eq!(capped.entries.len(), 5_000);
+    assert!(capped.partial);
+    apply_directories(client.clone(), &large_children, false).await;
+    client
+        .remove_dir(&large_directory)
+        .await
+        .expect("large rmdir");
 
     for path in [&renamed, &empty, &large] {
         client.remove_file(path).await.expect("remove file");

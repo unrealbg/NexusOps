@@ -55,11 +55,21 @@ pub async fn connect_host(app: State<'_, Application>, host_id: HostId) -> Resul
     app.connect_host(host_id).await
 }
 #[tauri::command]
-pub async fn disconnect_host(app: State<'_, Application>, host_id: HostId) -> Result<(), AppError> {
+pub async fn disconnect_host(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    host_id: HostId,
+) -> Result<(), AppError> {
+    local.revoke_host(host_id);
     app.disconnect_host(host_id).await
 }
 #[tauri::command]
-pub async fn reconnect_host(app: State<'_, Application>, host_id: HostId) -> Result<(), AppError> {
+pub async fn reconnect_host(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    host_id: HostId,
+) -> Result<(), AppError> {
+    local.revoke_host(host_id);
     app.reconnect_host(host_id).await
 }
 #[tauri::command]
@@ -188,15 +198,53 @@ pub async fn remote_properties(
 }
 #[tauri::command]
 pub async fn choose_upload_files(
+    app: State<'_, Application>,
     local: State<'_, LocalAccessService>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
 ) -> Result<Option<LocalSelectionGrant>, AppError> {
-    local.choose_upload_files().await
+    let scope = crate::local_access::GrantScope {
+        host_id,
+        host_session_id,
+        sftp_session_id,
+    };
+    app.validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await?;
+    let grant = local.choose_upload_files(scope).await?;
+    if let Err(error) = app
+        .validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await
+    {
+        local.revoke_session(host_id, host_session_id);
+        return Err(error);
+    }
+    Ok(grant)
 }
 #[tauri::command]
 pub async fn choose_download_directory(
+    app: State<'_, Application>,
     local: State<'_, LocalAccessService>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
 ) -> Result<Option<LocalSelectionGrant>, AppError> {
-    local.choose_download_directory().await
+    let scope = crate::local_access::GrantScope {
+        host_id,
+        host_session_id,
+        sftp_session_id,
+    };
+    app.validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await?;
+    let grant = local.choose_download_directory(scope).await?;
+    if let Err(error) = app
+        .validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await
+    {
+        local.revoke_session(host_id, host_session_id);
+        return Err(error);
+    }
+    Ok(grant)
 }
 #[tauri::command]
 pub async fn plan_upload(
@@ -204,7 +252,12 @@ pub async fn plan_upload(
     local: State<'_, LocalAccessService>,
     request: PlanUploadRequest,
 ) -> Result<FileOperationPlan, AppError> {
-    let sources = local.consume_upload(request.grant_id)?;
+    let scope = crate::local_access::GrantScope {
+        host_id: request.host_id,
+        host_session_id: request.host_session_id,
+        sftp_session_id: request.sftp_session_id,
+    };
+    let sources = local.consume_upload(request.grant_id, scope)?;
     app.plan_upload(
         request.host_id,
         request.host_session_id,
@@ -221,7 +274,12 @@ pub async fn plan_download(
     local: State<'_, LocalAccessService>,
     request: PlanDownloadRequest,
 ) -> Result<FileOperationPlan, AppError> {
-    let directory = local.consume_download_directory(request.grant_id)?;
+    let scope = crate::local_access::GrantScope {
+        host_id: request.host_id,
+        host_session_id: request.host_session_id,
+        sftp_session_id: request.sftp_session_id,
+    };
+    let directory = local.consume_download_directory(request.grant_id, scope)?;
     app.plan_download(
         request.host_id,
         request.host_session_id,

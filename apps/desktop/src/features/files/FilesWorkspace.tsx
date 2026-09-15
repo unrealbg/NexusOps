@@ -114,13 +114,13 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   async function upload() {
     const session = owner(); const target = listing?.path; if (!target) return;
     setError(null);
-    try { const grant = await filesApi.chooseUploadFiles(); if (!grant) return; setPlans([await filesApi.planUpload(session, grant.id, target, conflictPolicy)]); }
+    try { const grant = await filesApi.chooseUploadFiles(session); if (!grant) return; setPlans([await filesApi.planUpload(session, grant.id, target, conflictPolicy)]); }
     catch (reason) { setError(applicationError(reason).message); }
   }
   async function download() {
     const session = owner(); const paths = selectedEntries.filter((entry) => entry.kind === 'file').map((entry) => entry.path); if (!paths.length) return;
     setError(null);
-    try { const grant = await filesApi.chooseDownloadDirectory(); if (!grant) return; setPlans([await filesApi.planDownload(session, grant.id, paths, conflictPolicy)]); }
+    try { const grant = await filesApi.chooseDownloadDirectory(session); if (!grant) return; setPlans([await filesApi.planDownload(session, grant.id, paths, conflictPolicy)]); }
     catch (reason) { setError(applicationError(reason).message); }
   }
   async function prepareDelete() {

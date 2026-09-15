@@ -9,7 +9,13 @@ use russh_sftp::{
     client::{Config, RawSftpSession, error::Error as SftpError},
     protocol::{FileAttributes, OpenFlags, Packet, StatusCode},
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::sync::CancellationToken;
 
@@ -24,6 +30,44 @@ pub struct EntryIdentity {
 }
 
 pub type Progress = Arc<dyn Fn(u64) + Send + Sync>;
+
+#[derive(Debug, Clone)]
+pub enum StagedUploadFailure {
+    NotCreated(AppError),
+    OwnedFailure(AppError),
+    CreationOutcomeUnknown(AppError),
+}
+pub type StagedUploadResult = Result<u64, StagedUploadFailure>;
+
+impl std::ops::Deref for StagedUploadFailure {
+    type Target = AppError;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::NotCreated(error)
+            | Self::OwnedFailure(error)
+            | Self::CreationOutcomeUnknown(error) => error,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct StagingOwnership(Arc<AtomicBool>);
+
+impl StagingOwnership {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Confirms that the server created the exact exclusive staging path.
+    ///
+    /// Implementations of [`SftpClient::upload_staged`] must call this as soon
+    /// as exclusive creation succeeds, before streaming any bytes.
+    pub fn mark_owned(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+    pub fn is_owned(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
 
 #[async_trait]
 pub trait SftpClient: Send + Sync {
@@ -43,9 +87,10 @@ pub trait SftpClient: Send + Sync {
         &self,
         reader: &mut (dyn AsyncRead + Unpin + Send),
         staging: &str,
+        ownership: StagingOwnership,
         cancel: CancellationToken,
         progress: Progress,
-    ) -> Result<u64, AppError>;
+    ) -> StagedUploadResult;
     async fn download(
         &self,
         remote: &str,
@@ -380,15 +425,18 @@ impl SftpClient for RawSftpClient {
         &self,
         reader: &mut (dyn AsyncRead + Unpin + Send),
         staging: &str,
+        ownership: StagingOwnership,
         cancel: CancellationToken,
         progress: Progress,
-    ) -> Result<u64, AppError> {
-        validate_remote_path(staging)?;
+    ) -> StagedUploadResult {
+        if let Err(error) = validate_remote_path(staging) {
+            return Err(StagedUploadFailure::NotCreated(error));
+        }
         let attrs = FileAttributes {
             permissions: Some(0o100600),
             ..FileAttributes::default()
         };
-        let handle = self
+        let handle = match self
             .raw
             .open(
                 staging,
@@ -396,8 +444,21 @@ impl SftpClient for RawSftpClient {
                 attrs,
             )
             .await
-            .map_err(map_error)?
-            .handle;
+        {
+            Ok(value) => value.handle,
+            Err(SftpError::Status(status)) => {
+                return Err(StagedUploadFailure::NotCreated(map_status(
+                    status.status_code,
+                )));
+            }
+            Err(_) => {
+                return Err(StagedUploadFailure::CreationOutcomeUnknown(AppError::new(
+                    ErrorCode::OutcomeUnknown,
+                    "The staging-file create reply was lost; ownership cannot be established.",
+                )));
+            }
+        };
+        ownership.mark_owned();
         let mut confirmed = 0u64;
         let mut buffer = vec![0u8; self.write_chunk];
         let stream_result = async {
@@ -412,9 +473,10 @@ impl SftpClient for RawSftpClient {
             Ok(confirmed)
         }.await;
         let close = self.close_handle(handle).await;
-        stream_result?;
-        close?;
-        Ok(confirmed)
+        match (stream_result, close) {
+            (Ok(_), Ok(())) => Ok(confirmed),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(StagedUploadFailure::OwnedFailure(error)),
+        }
     }
 
     async fn download(

@@ -1,10 +1,18 @@
 use super::*;
-use nexus_sftp::{LocalItem, MutationSpec, SftpClient};
-use std::{path::PathBuf, sync::Arc};
+use nexus_sftp::{LocalDirectory, LocalItem, MutationSpec, SftpClient};
+use std::sync::Arc;
 
 impl Application {
     pub async fn open_sftp(&self, host_id: HostId) -> Result<SftpSessionInfo, AppError> {
         self.repository.get(host_id)?;
+        let startup = self
+            .sftp_startups
+            .lock()
+            .await
+            .entry(host_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _startup_guard = startup.lock().await;
         let slot = self.slot(host_id).await;
         let (transport, connection_id, generation) = {
             let data = slot.data.lock().await;
@@ -43,12 +51,12 @@ impl Application {
             return Err(cancelled());
         }
         drop(data);
-        if let Some(old) = self
+        let old = self
             .sftp_sessions
             .lock()
             .await
-            .insert(host_id, client.clone())
-        {
+            .insert(host_id, client.clone());
+        if let Some(old) = old {
             old.close().await;
         }
         Ok(client.info())
@@ -103,13 +111,13 @@ impl Application {
         host_session_id: HostSessionId,
         sftp_session_id: SftpSessionId,
         remote_paths: Vec<String>,
-        local_directory: PathBuf,
+        local_directory: LocalDirectory,
         policy: ConflictPolicy,
     ) -> Result<FileOperationPlan, AppError> {
         let client = self
             .owned_sftp(host_id, host_session_id, sftp_session_id)
             .await?;
-        nexus_sftp::validate_local_directory(&local_directory)?;
+        nexus_sftp::validate_local_directory_handle(&local_directory)?;
         self.file_plans
             .plan_download(client, remote_paths, local_directory, policy)
             .await
@@ -175,6 +183,7 @@ impl Application {
             MutationSpec::Rename {
                 source,
                 destination,
+                expected_source: identity,
             },
         )
     }
@@ -269,21 +278,51 @@ impl Application {
     ) -> Result<FileOperationPlan, AppError> {
         self.owned_sftp(host_id, host_session_id, sftp_session_id)
             .await?;
-        self.transfers.retry_plan(
-            &self.file_plans,
-            job_id,
-            host_id,
-            host_session_id,
-            sftp_session_id,
-        )
+        self.transfers
+            .retry_plan(
+                &self.file_plans,
+                job_id,
+                host_id,
+                host_session_id,
+                sftp_session_id,
+            )
+            .await
     }
 
     pub(crate) async fn close_sftp(&self, host_id: HostId, host_session_id: HostSessionId) {
+        let startup = self
+            .sftp_startups
+            .lock()
+            .await
+            .entry(host_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _startup_guard = startup.lock().await;
         self.transfers.disconnect(host_id, host_session_id);
         self.file_plans.revoke_session(host_id, host_session_id);
-        if let Some(session) = self.sftp_sessions.lock().await.remove(&host_id) {
+        let session = {
+            let mut sessions = self.sftp_sessions.lock().await;
+            match sessions.get(&host_id) {
+                Some(value) if value.info().host_session_id == host_session_id => {
+                    sessions.remove(&host_id)
+                }
+                _ => None,
+            }
+        };
+        if let Some(session) = session {
             session.close().await;
         }
+    }
+
+    pub async fn validate_sftp_session(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+        sftp_session_id: SftpSessionId,
+    ) -> Result<(), AppError> {
+        self.owned_sftp(host_id, host_session_id, sftp_session_id)
+            .await
+            .map(|_| ())
     }
 
     async fn owned_sftp(

@@ -3,14 +3,18 @@ mod path;
 mod policy;
 mod transfer;
 
-pub use client::{EntryIdentity, Progress, RawSftpClient, SftpClient};
+pub use client::{
+    EntryIdentity, LISTING_ENTRY_CAP, Progress, RawSftpClient, SftpClient, StagedUploadFailure,
+    StagedUploadResult, StagingOwnership,
+};
 pub use path::{
     display_name, join_remote, parent_remote, validate_child_name, validate_remote_path,
     validate_windows_file_name,
 };
 pub use policy::{
-    FilePlanStore, InternalPlan, LocalItem, MutationSpec, PlanPayload, PlannedDownload,
-    PlannedUpload, RemoteSource, validate_local_directory,
+    DestinationAction, FilePlanStore, InternalPlan, LocalDirectory, LocalItem, MutationSpec,
+    PlanPayload, PlannedDownload, PlannedUpload, RemoteSource, open_local_directory,
+    open_local_source, validate_local_directory, validate_local_directory_handle,
 };
 pub use transfer::TransferManager;
 

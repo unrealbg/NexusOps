@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use nexus_operations::{ReadOnlyCommand, RemoteSession};
 use nexus_secrets::{Credential, KeyProvider};
 use nexus_terminal::{TerminalChannel, TerminalConnector, TerminalRead};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
@@ -141,6 +142,7 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         audit: Arc::new(AuditLog::open(dir.path().join("audit.jsonl")).expect("audit")),
         terminals: Arc::new(nexus_terminal::TerminalManager::new()),
         sftp_sessions: Mutex::new(HashMap::new()),
+        sftp_startups: Mutex::new(HashMap::new()),
         file_plans: nexus_sftp::FilePlanStore::default(),
         transfers: nexus_sftp::TransferManager::new(),
         mutation: Mutex::new(()),
@@ -692,4 +694,402 @@ async fn terminals_bind_to_one_connection_and_reconnect_never_reuses_them() {
         app.list_terminals(host.id).await.expect("sessions").len(),
         2
     );
+}
+
+struct LifecycleSftpClient {
+    info: SftpSessionInfo,
+    closes: AtomicUsize,
+    identity_calls: AtomicUsize,
+    upload_failures: std::sync::Mutex<std::collections::VecDeque<nexus_sftp::StagedUploadFailure>>,
+}
+
+impl LifecycleSftpClient {
+    fn new(host_id: HostId, host_session_id: HostSessionId) -> Arc<Self> {
+        Arc::new(Self {
+            info: SftpSessionInfo {
+                id: SftpSessionId::new(),
+                host_id,
+                host_session_id,
+                protocol_version: 3,
+                extensions: vec![SftpExtension {
+                    name: "hardlink@openssh.com".into(),
+                    version: "1".into(),
+                }],
+                limits: SftpLimits {
+                    max_packet_bytes: None,
+                    max_read_bytes: None,
+                    max_write_bytes: None,
+                    max_open_handles: None,
+                    client_chunk_bytes: "65536".into(),
+                    listing_entry_cap: 5_000,
+                },
+                root_path: "/tmp".into(),
+            },
+            closes: AtomicUsize::new(0),
+            identity_calls: AtomicUsize::new(0),
+            upload_failures: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        })
+    }
+}
+
+fn unused_sftp() -> AppError {
+    AppError::new(ErrorCode::SftpProtocol, "Unused lifecycle-test operation.")
+}
+
+#[async_trait]
+impl nexus_sftp::SftpClient for LifecycleSftpClient {
+    fn info(&self) -> SftpSessionInfo {
+        self.info.clone()
+    }
+    async fn list(&self, _: &str, _: CancellationToken) -> Result<DirectoryListing, AppError> {
+        Err(unused_sftp())
+    }
+    async fn stat(&self, _: &str) -> Result<RemoteEntry, AppError> {
+        Err(unused_sftp())
+    }
+    async fn identity(&self, _: &str) -> Result<Option<nexus_sftp::EntryIdentity>, AppError> {
+        self.identity_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(None)
+    }
+    async fn create_dir(&self, _: &str) -> Result<(), AppError> {
+        Err(unused_sftp())
+    }
+    async fn remove_file(&self, _: &str) -> Result<(), AppError> {
+        Err(unused_sftp())
+    }
+    async fn remove_dir(&self, _: &str) -> Result<(), AppError> {
+        Err(unused_sftp())
+    }
+    async fn rename_noclobber(&self, _: &str, _: &str) -> Result<(), AppError> {
+        Err(unused_sftp())
+    }
+    async fn upload_staged(
+        &self,
+        _: &mut (dyn AsyncRead + Unpin + Send),
+        _: &str,
+        ownership: nexus_sftp::StagingOwnership,
+        _: CancellationToken,
+        _: nexus_sftp::Progress,
+    ) -> nexus_sftp::StagedUploadResult {
+        let failure = self
+            .upload_failures
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| nexus_sftp::StagedUploadFailure::NotCreated(unused_sftp()));
+        if matches!(failure, nexus_sftp::StagedUploadFailure::OwnedFailure(_)) {
+            ownership.mark_owned();
+        }
+        Err(failure)
+    }
+    async fn download(
+        &self,
+        _: &str,
+        _: &mut (dyn AsyncWrite + Unpin + Send),
+        _: CancellationToken,
+        _: nexus_sftp::Progress,
+    ) -> Result<u64, AppError> {
+        Err(unused_sftp())
+    }
+    async fn commit_new(&self, _: &str, _: &str) -> Result<(), AppError> {
+        Err(unused_sftp())
+    }
+    async fn commit_replace(&self, _: &str, _: &str) -> Result<(), AppError> {
+        Err(unused_sftp())
+    }
+    async fn remove_owned_staging(&self, _: &str) {}
+    async fn close(&self) {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+struct LifecycleTransport {
+    cancel: CancellationToken,
+    opens: AtomicUsize,
+    open_started: Notify,
+    release_open: Notify,
+    clients: std::sync::Mutex<Vec<Arc<LifecycleSftpClient>>>,
+}
+
+impl LifecycleTransport {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            cancel: CancellationToken::new(),
+            opens: AtomicUsize::new(0),
+            open_started: Notify::new(),
+            release_open: Notify::new(),
+            clients: std::sync::Mutex::new(vec![]),
+        })
+    }
+}
+
+#[async_trait]
+impl RemoteSession for LifecycleTransport {
+    async fn execute(&self, _: ReadOnlyCommand, _: CancellationToken) -> Result<String, AppError> {
+        Ok(String::new())
+    }
+    async fn disconnect(&self) -> Result<(), AppError> {
+        self.cancel.cancel();
+        Ok(())
+    }
+    fn is_closed(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+}
+
+#[async_trait]
+impl TerminalConnector for LifecycleTransport {
+    async fn open_terminal(
+        &self,
+        _: TerminalSize,
+        _: CancellationToken,
+    ) -> Result<Arc<dyn TerminalChannel>, AppError> {
+        Err(AppError::new(
+            ErrorCode::TerminalUnavailable,
+            "Unused lifecycle terminal.",
+        ))
+    }
+}
+
+#[async_trait]
+impl nexus_sftp::SftpConnector for LifecycleTransport {
+    async fn open_sftp(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+    ) -> Result<Arc<dyn nexus_sftp::SftpClient>, AppError> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
+        self.open_started.notify_one();
+        self.release_open.notified().await;
+        let client = LifecycleSftpClient::new(host_id, host_session_id);
+        self.clients.lock().unwrap().push(client.clone());
+        Ok(client)
+    }
+}
+
+async fn install_lifecycle_transport(
+    app: &Application,
+    host_id: HostId,
+    transport: Arc<LifecycleTransport>,
+) -> HostSessionId {
+    let slot = app.slot(host_id).await;
+    let mut data = slot.data.lock().await;
+    let connection_id = data.connection_id.expect("connected session identity");
+    data.transport = Some(transport);
+    connection_id
+}
+
+#[tokio::test]
+async fn concurrent_sftp_open_is_coalesced_for_one_connection() {
+    let (_directory, app, _) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let transport = LifecycleTransport::new();
+    install_lifecycle_transport(&app, host.id, transport.clone()).await;
+
+    let first_app = app.clone();
+    let second_app = app.clone();
+    let first = tokio::spawn(async move { first_app.open_sftp(host.id).await });
+    transport.open_started.notified().await;
+    let second = tokio::spawn(async move { second_app.open_sftp(host.id).await });
+    tokio::task::yield_now().await;
+    assert_eq!(transport.opens.load(Ordering::SeqCst), 1);
+    transport.release_open.notify_one();
+    let first_info = first.await.unwrap().unwrap();
+    let second_info = second.await.unwrap().unwrap();
+    assert_eq!(first_info.id, second_info.id);
+    assert_eq!(transport.opens.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        transport.clients.lock().unwrap()[0]
+            .closes
+            .load(Ordering::SeqCst),
+        0
+    );
+}
+
+#[tokio::test]
+async fn disconnect_during_sftp_startup_cannot_publish_or_close_a_new_session() {
+    let (_directory, app, _) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let transport = LifecycleTransport::new();
+    let old_connection = install_lifecycle_transport(&app, host.id, transport.clone()).await;
+
+    let open_app = app.clone();
+    let opening = tokio::spawn(async move { open_app.open_sftp(host.id).await });
+    transport.open_started.notified().await;
+    let disconnect_app = app.clone();
+    let disconnecting = tokio::spawn(async move { disconnect_app.disconnect_host(host.id).await });
+    tokio::task::yield_now().await;
+    transport.release_open.notify_one();
+    assert_eq!(
+        opening.await.unwrap().unwrap_err().code,
+        ErrorCode::Cancelled
+    );
+    disconnecting.await.unwrap().unwrap();
+    assert!(app.sftp_sessions.lock().await.get(&host.id).is_none());
+    assert_eq!(
+        transport.clients.lock().unwrap()[0]
+            .closes
+            .load(Ordering::SeqCst),
+        1
+    );
+
+    let new_connection = HostSessionId::new();
+    let new_client = LifecycleSftpClient::new(host.id, new_connection);
+    app.sftp_sessions
+        .lock()
+        .await
+        .insert(host.id, new_client.clone());
+    app.close_sftp(host.id, old_connection).await;
+    assert_eq!(
+        app.sftp_sessions
+            .lock()
+            .await
+            .get(&host.id)
+            .unwrap()
+            .info()
+            .id,
+        new_client.info.id
+    );
+    assert_eq!(new_client.closes.load(Ordering::SeqCst), 0);
+}
+
+async fn wait_for_transfer(app: &Application, id: TransferJobId) -> TransferJob {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if let Some(job) = app.list_transfers(None).into_iter().find(|job| {
+                job.id == id
+                    && matches!(
+                        job.state,
+                        TransferState::Failed
+                            | TransferState::Cancelled
+                            | TransferState::OutcomeUnknown
+                    )
+            }) {
+                return job;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("transfer completion watchdog")
+}
+
+#[tokio::test]
+async fn core_retry_boundary_rejects_unknown_and_permanent_outcomes_without_io() {
+    let (_profile, app, _) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let slot = app.slot(host.id).await;
+    let host_session_id = slot.data.lock().await.connection_id.unwrap();
+    let client = LifecycleSftpClient::new(host.id, host_session_id);
+    let sftp_session_id = client.info.id;
+    app.sftp_sessions
+        .lock()
+        .await
+        .insert(host.id, client.clone());
+    let sources = tempfile::tempdir().unwrap();
+    let path = sources.path().join("retry.bin");
+    std::fs::write(&path, b"retry payload").unwrap();
+
+    client.upload_failures.lock().unwrap().push_back(
+        nexus_sftp::StagedUploadFailure::CreationOutcomeUnknown(AppError::new(
+            ErrorCode::OutcomeUnknown,
+            "Create reply lost.",
+        )),
+    );
+    let plan = app
+        .plan_upload(
+            host.id,
+            host_session_id,
+            sftp_session_id,
+            vec![nexus_sftp::open_local_source(path.clone(), "retry.bin".into()).unwrap()],
+            "/tmp".into(),
+            ConflictPolicy::Replace,
+        )
+        .await
+        .unwrap();
+    let job = app
+        .execute_file_plan(host.id, host_session_id, sftp_session_id, plan.id)
+        .await
+        .unwrap()[0]
+        .clone();
+    assert_eq!(
+        wait_for_transfer(&app, job.id).await.state,
+        TransferState::OutcomeUnknown
+    );
+    let before_retry = client.identity_calls.load(Ordering::SeqCst);
+    assert_eq!(
+        app.plan_retry_transfer(host.id, host_session_id, sftp_session_id, job.id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Policy
+    );
+    assert_eq!(client.identity_calls.load(Ordering::SeqCst), before_retry);
+
+    client
+        .upload_failures
+        .lock()
+        .unwrap()
+        .push_back(nexus_sftp::StagedUploadFailure::NotCreated(AppError::new(
+            ErrorCode::Conflict,
+            "Exclusive create refused.",
+        )));
+    let plan = app
+        .plan_upload(
+            host.id,
+            host_session_id,
+            sftp_session_id,
+            vec![nexus_sftp::open_local_source(path.clone(), "retry.bin".into()).unwrap()],
+            "/tmp".into(),
+            ConflictPolicy::Replace,
+        )
+        .await
+        .unwrap();
+    let job = app
+        .execute_file_plan(host.id, host_session_id, sftp_session_id, plan.id)
+        .await
+        .unwrap()[0]
+        .clone();
+    let failed = wait_for_transfer(&app, job.id).await;
+    assert_eq!(failed.state, TransferState::Failed);
+    assert!(!failed.retryable);
+    assert_eq!(
+        app.plan_retry_transfer(host.id, host_session_id, sftp_session_id, job.id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Policy
+    );
+
+    client.upload_failures.lock().unwrap().push_back(
+        nexus_sftp::StagedUploadFailure::OwnedFailure(AppError::new(
+            ErrorCode::Transfer,
+            "Retryable stream failure.",
+        )),
+    );
+    let plan = app
+        .plan_upload(
+            host.id,
+            host_session_id,
+            sftp_session_id,
+            vec![nexus_sftp::open_local_source(path, "retry.bin".into()).unwrap()],
+            "/tmp".into(),
+            ConflictPolicy::Replace,
+        )
+        .await
+        .unwrap();
+    let job = app
+        .execute_file_plan(host.id, host_session_id, sftp_session_id, plan.id)
+        .await
+        .unwrap()[0]
+        .clone();
+    assert!(wait_for_transfer(&app, job.id).await.retryable);
+    let retry = app
+        .plan_retry_transfer(host.id, host_session_id, sftp_session_id, job.id)
+        .await
+        .unwrap();
+    assert_ne!(retry.id, plan.id);
 }

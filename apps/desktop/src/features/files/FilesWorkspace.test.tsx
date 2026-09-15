@@ -65,6 +65,7 @@ describe('Files workspace boundaries', () => {
     renderFiles();
     expect(await screen.findByRole('button', { name: /данни\.bin/ })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    expect(filesApi.chooseUploadFiles).toHaveBeenCalledWith(session);
     const address = screen.getByLabelText('Remote path');
     await userEvent.clear(address);
     await userEvent.type(address, '/home/other{Enter}');
