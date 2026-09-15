@@ -101,6 +101,8 @@ pub struct TerminalOutputBatch {
     pub session: TerminalSession,
     /// Base64 preserves arbitrary PTY bytes across JSON IPC. Chunks remain distinct.
     pub chunks_base64: Vec<String>,
+    /// True only after the producer has ended and every queued byte has been returned.
+    pub output_drained: bool,
 }
 
 #[cfg(test)]

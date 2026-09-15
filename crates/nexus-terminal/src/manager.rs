@@ -85,6 +85,18 @@ impl TerminalManager {
         connector: &C,
         size: TerminalSize,
     ) -> Result<TerminalSession, AppError> {
+        self.open_with_timeout(host_id, host_session_id, connector, size, STARTUP_TIMEOUT)
+            .await
+    }
+
+    async fn open_with_timeout<C: TerminalConnector + ?Sized>(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+        connector: &C,
+        size: TerminalSize,
+        startup_timeout: Duration,
+    ) -> Result<TerminalSession, AppError> {
         let size = size.validate()?;
         let (entry, output_tx) = {
             let mut manager = self.inner.lock().await;
@@ -131,16 +143,21 @@ impl TerminalManager {
             (entry, output_tx)
         };
 
+        let mut startup_guard = StartupGuard::new(&self.inner, entry.clone());
+
         let open_result = tokio::select! {
             biased;
             _ = entry.cancel.cancelled() => Err(cancelled()),
             result = tokio::time::timeout(
-                STARTUP_TIMEOUT,
+                startup_timeout,
                 connector.open_terminal(size, entry.cancel.child_token()),
-            ) => result.map_err(|_| AppError::new(
-                ErrorCode::TerminalStartup,
-                "The remote terminal did not start within ten seconds.",
-            ))?,
+            ) => match result {
+                Ok(result) => result,
+                Err(_) => Err(AppError::new(
+                    ErrorCode::TerminalStartup,
+                    "The remote terminal did not start within ten seconds.",
+                )),
+            },
         };
 
         let channel = match open_result {
@@ -148,15 +165,26 @@ impl TerminalManager {
             Ok(channel) => {
                 let _ = tokio::time::timeout(CLOSE_TIMEOUT, channel.close()).await;
                 self.fail_entry(&entry, cancelled(), TerminalState::Disconnected);
+                startup_guard.disarm();
                 return Err(cancelled());
             }
             Err(error) => {
-                let state = if error.code == ErrorCode::Cancelled {
-                    TerminalState::Disconnected
-                } else {
-                    TerminalState::Failed
-                };
-                self.fail_entry(&entry, error.clone(), state);
+                let externally_finalized = entry.snapshot().state != TerminalState::Creating;
+                entry.cancel.cancel();
+                if !externally_finalized {
+                    let state = if error.code == ErrorCode::Cancelled {
+                        TerminalState::Disconnected
+                    } else {
+                        TerminalState::Failed
+                    };
+                    self.fail_entry(&entry, error.clone(), state);
+                    self.inner
+                        .lock()
+                        .await
+                        .sessions
+                        .remove(&entry.snapshot().id);
+                }
+                startup_guard.disarm();
                 return Err(error);
             }
         };
@@ -174,6 +202,7 @@ impl TerminalManager {
         };
         if !accepted {
             let _ = tokio::time::timeout(CLOSE_TIMEOUT, channel.close()).await;
+            startup_guard.disarm();
             return Err(cancelled());
         }
         let output_entry = entry.clone();
@@ -185,6 +214,7 @@ impl TerminalManager {
             terminal_id = %entry.snapshot().id,
             "terminal session created"
         );
+        startup_guard.disarm();
         Ok(entry.snapshot())
     }
 
@@ -219,9 +249,11 @@ impl TerminalManager {
                 }
             }
         }
+        let output_drained = receiver.is_closed() && receiver.is_empty();
         Ok(TerminalOutputBatch {
             session: entry.snapshot(),
             chunks_base64: chunks,
+            output_drained,
         })
     }
 
@@ -398,6 +430,47 @@ impl TerminalManager {
 impl Entry {
     fn snapshot(&self) -> TerminalSession {
         self.view.read().expect("terminal view poisoned").clone()
+    }
+}
+
+/// Makes cancellation of the caller future after insertion observable and
+/// capacity-safe even though async cleanup cannot run from `Drop`.
+struct StartupGuard<'a> {
+    manager: &'a Mutex<ManagerState>,
+    entry: Arc<Entry>,
+    armed: bool,
+}
+
+impl<'a> StartupGuard<'a> {
+    fn new(manager: &'a Mutex<ManagerState>, entry: Arc<Entry>) -> Self {
+        Self {
+            manager,
+            entry,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartupGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.entry.cancel.cancel();
+        let mut view = self.entry.view.write().expect("terminal view poisoned");
+        if view.state == TerminalState::Creating {
+            view.state = TerminalState::Disconnected;
+            view.error = Some(cancelled());
+        }
+        let terminal_id = view.id;
+        drop(view);
+        if let Ok(mut manager) = self.manager.try_lock() {
+            manager.sessions.remove(&terminal_id);
+        }
     }
 }
 

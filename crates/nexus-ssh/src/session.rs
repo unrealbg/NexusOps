@@ -21,6 +21,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const OUTPUT_LIMIT: usize = 64 * 1024;
+pub(crate) const STARTUP_OUTPUT_LIMIT: usize = 64 * 1024;
 pub struct SshSession {
     pub(crate) handle: Mutex<client::Handle<Client>>,
     pub(crate) lifetime: CancellationToken,
@@ -61,52 +62,63 @@ impl TerminalConnector for SshSession {
                 )
             })?
         };
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => return Err(cancelled()),
-            _ = self.lifetime.cancelled() => return Err(terminal_unavailable()),
-            result = channel.request_pty(
-                true,
-                "xterm-256color",
-                size.columns,
-                size.rows,
-                size.pixel_width,
-                size.pixel_height,
-                &[],
-            ) => result.map_err(|_| terminal_failure(
-                ErrorCode::TerminalPty,
-                "The server rejected the terminal PTY allocation.",
-                "terminal_pty_request",
-            ))?,
-        }
-        let mut pending = wait_for_request_reply(
-            &mut channel,
-            &cancellation,
-            &self.lifetime,
-            ErrorCode::TerminalPty,
-            "The server rejected the terminal PTY allocation.",
-        )
-        .await?;
-        tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => return Err(cancelled()),
-            _ = self.lifetime.cancelled() => return Err(terminal_unavailable()),
-            result = channel.request_shell(true) => result.map_err(|_| terminal_failure(
-                ErrorCode::TerminalShell,
-                "The server rejected the interactive shell request.",
-                "terminal_shell_request",
-            ))?,
-        }
-        pending.extend(
+        let mut pending = VecDeque::new();
+        let mut pending_bytes = 0;
+        let startup = async {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(cancelled()),
+                _ = self.lifetime.cancelled() => return Err(terminal_unavailable()),
+                result = channel.request_pty(
+                    true,
+                    "xterm-256color",
+                    size.columns,
+                    size.rows,
+                    size.pixel_width,
+                    size.pixel_height,
+                    &[],
+                ) => result.map_err(|_| terminal_failure(
+                    ErrorCode::TerminalPty,
+                    "The server rejected the terminal PTY allocation.",
+                    "terminal_pty_request",
+                ))?,
+            }
             wait_for_request_reply(
                 &mut channel,
                 &cancellation,
                 &self.lifetime,
+                &mut pending,
+                &mut pending_bytes,
+                ErrorCode::TerminalPty,
+                "The server rejected the terminal PTY allocation.",
+            )
+            .await?;
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(cancelled()),
+                _ = self.lifetime.cancelled() => return Err(terminal_unavailable()),
+                result = channel.request_shell(true) => result.map_err(|_| terminal_failure(
+                    ErrorCode::TerminalShell,
+                    "The server rejected the interactive shell request.",
+                    "terminal_shell_request",
+                ))?,
+            }
+            wait_for_request_reply(
+                &mut channel,
+                &cancellation,
+                &self.lifetime,
+                &mut pending,
+                &mut pending_bytes,
                 ErrorCode::TerminalShell,
                 "The server rejected the interactive shell request.",
             )
-            .await?,
-        );
+            .await
+        }
+        .await;
+        if let Err(error) = startup {
+            let _ = timeout(CLOSE_TIMEOUT, channel.close()).await;
+            return Err(error);
+        }
         let (reader, writer) = channel.split();
         Ok(Arc::new(RusshTerminalChannel {
             reader: Mutex::new(TerminalReader {
@@ -204,23 +216,44 @@ impl TerminalChannel for RusshTerminalChannel {
     }
 }
 
-async fn wait_for_request_reply(
-    channel: &mut russh::Channel<client::Msg>,
+#[async_trait]
+trait RequestReplyMessages: Send {
+    async fn next_message(&mut self) -> Option<ChannelMsg>;
+}
+
+#[async_trait]
+impl RequestReplyMessages for russh::Channel<client::Msg> {
+    async fn next_message(&mut self) -> Option<ChannelMsg> {
+        self.wait().await
+    }
+}
+
+async fn wait_for_request_reply<C: RequestReplyMessages>(
+    channel: &mut C,
     cancellation: &CancellationToken,
     transport_lifetime: &CancellationToken,
+    pending: &mut VecDeque<Vec<u8>>,
+    pending_bytes: &mut usize,
     code: ErrorCode,
     message: &'static str,
-) -> Result<VecDeque<Vec<u8>>, AppError> {
+) -> Result<(), AppError> {
     let reply = async {
-        let mut pending = VecDeque::new();
         loop {
-            match channel.wait().await {
-                Some(ChannelMsg::Success) => return Ok(pending),
+            match channel.next_message().await {
+                Some(ChannelMsg::Success) => return Ok(()),
                 Some(ChannelMsg::Failure) | Some(ChannelMsg::Close) | None => {
                     return Err(terminal_failure(code, message, "terminal_request_reply"));
                 }
                 Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                    pending.push_back(data.to_vec())
+                    *pending_bytes = pending_bytes.saturating_add(data.len());
+                    if *pending_bytes > STARTUP_OUTPUT_LIMIT {
+                        return Err(terminal_failure(
+                            ErrorCode::TerminalStartup,
+                            "Terminal startup output exceeded the 64 KiB limit.",
+                            "terminal_startup_output_limit",
+                        ));
+                    }
+                    pending.push_back(data.to_vec());
                 }
                 Some(_) => {}
             }
@@ -429,6 +462,37 @@ fn count_output(total: &mut usize, length: usize) -> Result<(), AppError> {
 mod tests {
     use super::*;
 
+    struct TestMessages {
+        messages: VecDeque<ChannelMsg>,
+        stall: bool,
+    }
+
+    #[async_trait]
+    impl RequestReplyMessages for TestMessages {
+        async fn next_message(&mut self) -> Option<ChannelMsg> {
+            if let Some(message) = self.messages.pop_front() {
+                Some(message)
+            } else if self.stall {
+                std::future::pending().await
+            } else {
+                None
+            }
+        }
+    }
+
+    fn data(length: usize) -> ChannelMsg {
+        ChannelMsg::Data {
+            data: vec![b'x'; length].into(),
+        }
+    }
+
+    fn extended_data(length: usize) -> ChannelMsg {
+        ChannelMsg::ExtendedData {
+            data: vec![b'e'; length].into(),
+            ext: 1,
+        }
+    }
+
     #[test]
     fn combined_stdout_and_stderr_is_bounded() {
         let mut total = 0;
@@ -437,6 +501,121 @@ mod tests {
             count_output(&mut total, 1).expect_err("over limit").code,
             ErrorCode::Discovery
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_startup_output_budget_is_aggregate_across_pty_and_shell() {
+        let cancellation = CancellationToken::new();
+        let lifetime = CancellationToken::new();
+        let mut pending = VecDeque::new();
+        let mut pending_bytes = 0;
+        let mut pty = TestMessages {
+            messages: VecDeque::from([data(6), extended_data(6), ChannelMsg::Success]),
+            stall: false,
+        };
+        wait_for_request_reply(
+            &mut pty,
+            &cancellation,
+            &lifetime,
+            &mut pending,
+            &mut pending_bytes,
+            ErrorCode::TerminalPty,
+            "pty rejected",
+        )
+        .await
+        .expect("legitimate early prompt");
+        assert_eq!(pending_bytes, 12);
+
+        let mut shell = TestMessages {
+            messages: VecDeque::from([
+                data(STARTUP_OUTPUT_LIMIT - pending_bytes),
+                ChannelMsg::Success,
+            ]),
+            stall: false,
+        };
+        wait_for_request_reply(
+            &mut shell,
+            &cancellation,
+            &lifetime,
+            &mut pending,
+            &mut pending_bytes,
+            ErrorCode::TerminalShell,
+            "shell rejected",
+        )
+        .await
+        .expect("exact aggregate limit");
+        assert_eq!(pending_bytes, STARTUP_OUTPUT_LIMIT);
+        assert_eq!(
+            pending.iter().map(Vec::len).sum::<usize>(),
+            STARTUP_OUTPUT_LIMIT
+        );
+
+        let mut excess = TestMessages {
+            messages: VecDeque::from([data(1), ChannelMsg::Success]),
+            stall: false,
+        };
+        let error = wait_for_request_reply(
+            &mut excess,
+            &cancellation,
+            &lifetime,
+            &mut pending,
+            &mut pending_bytes,
+            ErrorCode::TerminalShell,
+            "shell rejected",
+        )
+        .await
+        .expect_err("continuing data without acknowledgement exceeds the budget");
+        assert_eq!(error.code, ErrorCode::TerminalStartup);
+        assert_eq!(
+            pending.iter().map(Vec::len).sum::<usize>(),
+            STARTUP_OUTPUT_LIMIT
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_startup_wait_honours_cancellation_and_protocol_failure() {
+        let lifetime = CancellationToken::new();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let mut stalled = TestMessages {
+            messages: VecDeque::new(),
+            stall: true,
+        };
+        let mut pending = VecDeque::new();
+        let mut pending_bytes = 0;
+        assert_eq!(
+            wait_for_request_reply(
+                &mut stalled,
+                &cancellation,
+                &lifetime,
+                &mut pending,
+                &mut pending_bytes,
+                ErrorCode::TerminalPty,
+                "pty rejected",
+            )
+            .await
+            .expect_err("cancelled wait")
+            .code,
+            ErrorCode::Cancelled
+        );
+
+        let mut failed = TestMessages {
+            messages: VecDeque::from([data(16), ChannelMsg::Failure]),
+            stall: false,
+        };
+        let error = wait_for_request_reply(
+            &mut failed,
+            &CancellationToken::new(),
+            &lifetime,
+            &mut pending,
+            &mut pending_bytes,
+            ErrorCode::TerminalShell,
+            "shell rejected",
+        )
+        .await
+        .expect_err("protocol failure");
+        assert_eq!(error.code, ErrorCode::TerminalShell);
+        assert_eq!(pending_bytes, 16);
     }
 
     #[tokio::test]

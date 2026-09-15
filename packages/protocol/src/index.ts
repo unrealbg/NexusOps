@@ -23,6 +23,10 @@ export type TerminalOutputBatch = { session: TerminalSession,
 /**
  * Base64 preserves arbitrary PTY bytes across JSON IPC. Chunks remain distinct.
  */
-chunksBase64: Array<string>, };
+chunksBase64: Array<string>, 
+/**
+ * True only after the producer has ended and every queued byte has been returned.
+ */
+outputDrained: boolean, };
 export type OperationRisk = "readOnly" | "low" | "moderate" | "high" | "destructive";
 export type Operation = { id: string, kind: string, risk: OperationRisk, };
