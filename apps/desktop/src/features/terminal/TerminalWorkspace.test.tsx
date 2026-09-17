@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Host, TerminalSession } from '@nexusops/protocol';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
@@ -15,6 +15,12 @@ const mocks = vi.hoisted(() => ({
   searchNext: vi.fn(),
   searchPrevious: vi.fn(),
   focus: vi.fn(),
+  paste: vi.fn(),
+  selectAll: vi.fn(),
+  clear: vi.fn(),
+  readText: vi.fn(),
+  writeText: vi.fn(),
+  selectionAvailable: false,
   xtermWrites: [] as Uint8Array[],
   xtermWriteCallbacks: [] as Array<() => void>,
   xtermDataHandlers: [] as Array<(data: string) => void>,
@@ -47,8 +53,8 @@ vi.mock('../../api/client', () => ({
 }));
 
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
-  readText: vi.fn(() => Promise.resolve('clipboard')),
-  writeText: vi.fn(() => Promise.resolve()),
+  readText: mocks.readText,
+  writeText: mocks.writeText,
 }));
 
 vi.mock('@xterm/addon-fit', () => ({
@@ -71,6 +77,8 @@ vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     cols: number;
     rows: number;
+    textarea: HTMLTextAreaElement | null = null;
+    keyHandler: ((event: KeyboardEvent) => boolean) | null = null;
     constructor(options: { cols: number; rows: number }) {
       this.cols = options.cols;
       this.rows = options.rows;
@@ -80,6 +88,13 @@ vi.mock('@xterm/xterm', () => ({
       const terminal = document.createElement('div');
       terminal.className = 'xterm';
       const textarea = document.createElement('textarea');
+      this.textarea = textarea;
+      textarea.addEventListener('keydown', (event) => {
+        if (this.keyHandler?.(event) === false) return;
+        if (event.key === 'Escape') {
+          for (const handler of mocks.xtermDataHandlers) handler('\x1b');
+        }
+      });
       terminal.append(textarea);
       element.append(terminal);
     }
@@ -90,24 +105,35 @@ vi.mock('@xterm/xterm', () => ({
     onBinary() {
       return { dispose() {} };
     }
-    attachCustomKeyEventHandler() {}
+    attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
+      this.keyHandler = handler;
+    }
     write(data: Uint8Array, callback: () => void) {
       mocks.xtermWrites.push(data.slice());
       mocks.xtermWriteCallbacks.push(callback);
     }
-    focus = mocks.focus;
-    clear() {}
+    focus() {
+      mocks.focus();
+      this.textarea?.focus();
+    }
+    clear() {
+      mocks.clear();
+    }
     dispose() {
       mocks.xtermDisposals += 1;
     }
     hasSelection() {
-      return false;
+      return mocks.selectionAvailable;
     }
     getSelection() {
-      return '';
+      return '[selection]';
     }
-    paste() {}
-    selectAll() {}
+    paste(text: string) {
+      mocks.paste(text);
+    }
+    selectAll() {
+      mocks.selectAll();
+    }
   },
 }));
 
@@ -165,6 +191,12 @@ beforeEach(() => {
   mocks.searchNext.mockReset();
   mocks.searchPrevious.mockReset();
   mocks.focus.mockReset();
+  mocks.paste.mockReset();
+  mocks.selectAll.mockReset();
+  mocks.clear.mockReset();
+  mocks.readText.mockReset().mockResolvedValue('[clipboard]');
+  mocks.writeText.mockReset().mockResolvedValue(undefined);
+  mocks.selectionAvailable = false;
   mocks.xtermWrites.length = 0;
   mocks.xtermWriteCallbacks.length = 0;
   mocks.xtermDataHandlers.length = 0;
@@ -172,6 +204,129 @@ beforeEach(() => {
 });
 
 describe('TerminalWorkspace', () => {
+  function openContextMenu() {
+    const canvas = document.querySelector('.terminal-canvas');
+    if (!canvas) throw new Error('Terminal canvas missing');
+    fireEvent.contextMenu(canvas, { clientX: 40, clientY: 40 });
+    return screen.getByRole('menu');
+  }
+
+  function activeTerminalInput() {
+    const input = document.querySelector('.terminal-pane:not([hidden]) .xterm textarea');
+    if (!(input instanceof HTMLTextAreaElement)) throw new Error('Active terminal input missing');
+    return input;
+  }
+
+  test('dismisses each enabled context action exactly once and moves focus to its destination', async () => {
+    const user = userEvent.setup();
+    mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Shell')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    mocks.selectionAvailable = true;
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    await screen.findByRole('tab', { name: /Shell/ });
+    const input = activeTerminalInput();
+
+    openContextMenu();
+    await user.dblClick(screen.getByRole('menuitem', { name: 'Copy' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(mocks.writeText).toHaveBeenCalledTimes(1);
+    expect(input).toHaveFocus();
+
+    openContextMenu();
+    await user.dblClick(screen.getByRole('menuitem', { name: 'Paste' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(mocks.readText).toHaveBeenCalledTimes(1);
+    expect(mocks.paste).toHaveBeenCalledTimes(1);
+    expect(input).toHaveFocus();
+
+    openContextMenu();
+    await user.click(screen.getByRole('menuitem', { name: 'Select all' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(mocks.selectAll).toHaveBeenCalledTimes(1);
+    expect(input).toHaveFocus();
+
+    openContextMenu();
+    await user.click(screen.getByRole('menuitem', { name: 'Clear' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(mocks.clear).toHaveBeenCalledTimes(1);
+    expect(input).toHaveFocus();
+
+    openContextMenu();
+    await user.click(screen.getByRole('menuitem', { name: 'Search' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(screen.getByLabelText('Search terminal scrollback')).toHaveFocus();
+    expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  test('dismisses failed clipboard actions without replay and leaves the error visible', async () => {
+    const user = userEvent.setup();
+    mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Shell')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    mocks.selectionAvailable = true;
+    mocks.writeText.mockRejectedValueOnce(new Error('copy failed'));
+    mocks.readText.mockRejectedValueOnce(new Error('paste failed'));
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    await screen.findByRole('tab', { name: /Shell/ });
+    const input = activeTerminalInput();
+
+    openContextMenu();
+    await user.click(screen.getByRole('menuitem', { name: 'Copy' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(await screen.findByText('The selected text could not be copied.')).toBeVisible();
+    expect(mocks.writeText).toHaveBeenCalledTimes(1);
+    expect(input).toHaveFocus();
+
+    openContextMenu();
+    await user.click(screen.getByRole('menuitem', { name: 'Paste' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(await screen.findByText('Clipboard text could not be pasted.')).toBeVisible();
+    expect(mocks.readText).toHaveBeenCalledTimes(1);
+    expect(mocks.paste).not.toHaveBeenCalled();
+    expect(input).toHaveFocus();
+  });
+
+  test('Escape closes only the open menu and outside pointerdown still dismisses it', async () => {
+    const user = userEvent.setup();
+    mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Shell')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    await screen.findByRole('tab', { name: /Shell/ });
+    const input = activeTerminalInput();
+    input.focus();
+
+    openContextMenu();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(mocks.write).not.toHaveBeenCalled();
+    expect(input).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(mocks.write).toHaveBeenCalledTimes(1));
+    expect(mocks.write).toHaveBeenCalledWith(expect.any(Object), bytesToBase64(new Uint8Array([27])));
+
+    openContextMenu();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  test('disabled Copy and Paste do not run clipboard operations', async () => {
+    const user = userEvent.setup();
+    mocks.sessions.set('host-a', [terminal('host-a', 'ended-terminal', 'Ended shell', 'disconnected')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    await screen.findByRole('tab', { name: /Ended shell/ });
+    openContextMenu();
+    const copy = screen.getByRole('menuitem', { name: 'Copy' });
+    const paste = screen.getByRole('menuitem', { name: 'Paste' });
+    expect(copy).toBeDisabled();
+    expect(paste).toBeDisabled();
+    await user.click(copy);
+    await user.click(paste);
+    expect(mocks.readText).not.toHaveBeenCalled();
+    expect(mocks.writeText).not.toHaveBeenCalled();
+    expect(screen.getByRole('menu')).toBeVisible();
+  });
+
   test('creates, switches, renames, and closes distinct terminal tabs', async () => {
     const user = userEvent.setup();
     render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
