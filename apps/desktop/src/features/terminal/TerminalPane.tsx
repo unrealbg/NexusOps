@@ -314,7 +314,13 @@ export function TerminalPane({
   }, [active, search]);
 
   useEffect(() => {
+    if (!active || !visible) return;
+    return () => setContextMenu(null);
+  }, [active, visible]);
+
+  useEffect(() => {
     if (!contextMenu) return;
+    if (!active || !visible) return;
     const close = () => setContextMenu(null);
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
@@ -329,7 +335,7 @@ export function TerminalPane({
       window.removeEventListener('pointerdown', close);
       window.removeEventListener('keydown', closeOnEscape, true);
     };
-  }, [contextMenu]);
+  }, [active, contextMenu, visible]);
 
   const ended = ['closed', 'failed', 'disconnected'].includes(session.state);
   return (
@@ -342,7 +348,7 @@ export function TerminalPane({
           <button onClick={onNew}>Open new terminal</button>
         </div>
       )}
-      {contextMenu && (
+      {contextMenu && active && visible && (
         <div
           className="terminal-context-menu"
           role="menu"

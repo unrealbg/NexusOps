@@ -79,6 +79,7 @@ vi.mock('@xterm/xterm', () => ({
     rows: number;
     textarea: HTMLTextAreaElement | null = null;
     keyHandler: ((event: KeyboardEvent) => boolean) | null = null;
+    dataHandler: ((data: string) => void) | null = null;
     constructor(options: { cols: number; rows: number }) {
       this.cols = options.cols;
       this.rows = options.rows;
@@ -92,13 +93,14 @@ vi.mock('@xterm/xterm', () => ({
       textarea.addEventListener('keydown', (event) => {
         if (this.keyHandler?.(event) === false) return;
         if (event.key === 'Escape') {
-          for (const handler of mocks.xtermDataHandlers) handler('\x1b');
+          this.dataHandler?.('\x1b');
         }
       });
       terminal.append(textarea);
       element.append(terminal);
     }
     onData(handler: (data: string) => void) {
+      this.dataHandler = handler;
       mocks.xtermDataHandlers.push(handler);
       return { dispose() {} };
     }
@@ -309,6 +311,70 @@ describe('TerminalWorkspace', () => {
     openContextMenu();
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  test('releases A menu when keyboard shortcut opens B and sends Escape only to B', async () => {
+    const user = userEvent.setup();
+    mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Terminal A')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    await screen.findByRole('tab', { name: /Terminal A/ });
+    const inputA = await activeTerminalInput();
+    inputA.focus();
+    openContextMenu();
+
+    await user.keyboard('{Control>}{Shift>}t{/Shift}{/Control}');
+    const tabB = await screen.findByRole('tab', { name: /Terminal 1/ });
+    expect(tabB).toHaveAttribute('aria-selected', 'true');
+    const inputB = await activeTerminalInput();
+    expect(inputB).not.toBe(inputA);
+    await user.tab();
+    expect(inputB).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(mocks.write).toHaveBeenCalledTimes(1));
+    expect(mocks.write).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'terminal-1' }),
+      bytesToBase64(new Uint8Array([27])),
+    );
+    expect(inputB).toHaveFocus();
+    expect(document.querySelector('.terminal-context-menu')).toBeNull();
+
+    const tabA = screen.getByRole('tab', { name: /Terminal A/ });
+    for (let step = 0; step < 8 && document.activeElement !== tabA; step += 1) {
+      await user.tab({ shift: true });
+    }
+    expect(tabA).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(tabA).toHaveAttribute('aria-selected', 'true');
+    expect(document.querySelector('.terminal-context-menu')).toBeNull();
+    expect(mocks.xtermDisposals).toBe(0);
+  });
+
+  test('releases menu listeners when the workspace becomes invisible', async () => {
+    const user = userEvent.setup();
+    mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Terminal A')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    const view = render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    await screen.findByRole('tab', { name: /Terminal A/ });
+    await activeTerminalInput();
+    openContextMenu();
+
+    view.rerender(<TerminalWorkspace host={host('host-a', 'Alpha')} visible={false} onShowOverview={() => {}} />);
+    await waitFor(() => expect(document.querySelector('.terminal-context-menu')).toBeNull());
+    const outside = document.createElement('button');
+    document.body.append(outside);
+    const outsideKeydown = vi.fn();
+    outside.addEventListener('keydown', outsideKeydown);
+    outside.focus();
+    await user.keyboard('{Escape}');
+    expect(outsideKeydown).toHaveBeenCalledTimes(1);
+    expect(outside).toHaveFocus();
+    expect(mocks.write).not.toHaveBeenCalled();
+    outside.remove();
+
+    view.rerender(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    expect(document.querySelector('.terminal-context-menu')).toBeNull();
   });
 
   test('disabled Copy and Paste do not run clipboard operations', async () => {
