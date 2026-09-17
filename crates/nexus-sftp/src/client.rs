@@ -1429,10 +1429,11 @@ mod fault_tests {
     ) {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let calls_clone = calls.clone();
-        let files = Arc::new(Mutex::new(HashMap::from([
-            ("/fixture/final".into(), b"old-final".to_vec()),
-            ("/fixture/staging".into(), b"new-final".to_vec()),
-        ])));
+        let mut initial_files = HashMap::from([("/fixture/final".into(), b"old-final".to_vec())]);
+        if matches!(mode, LostReply::Replace) {
+            initial_files.insert("/fixture/staging".into(), b"new-final".to_vec());
+        }
+        let files = Arc::new(Mutex::new(initial_files));
         let files_clone = files.clone();
         let (client_stream, mut server_stream) = tokio::io::duplex(128 * 1024);
         tokio::spawn(async move {
@@ -1459,10 +1460,13 @@ mod fault_tests {
             match (mode, mutation) {
                 (LostReply::Create, Packet::Open(open)) => {
                     assert!(open.pflags.contains(OpenFlags::CREATE | OpenFlags::EXCLUDE));
-                    files_clone
-                        .lock()
-                        .unwrap()
-                        .insert(open.filename, Vec::new());
+                    assert!(
+                        files_clone
+                            .lock()
+                            .unwrap()
+                            .insert(open.filename, Vec::new())
+                            .is_none()
+                    );
                     calls_clone
                         .lock()
                         .unwrap()
