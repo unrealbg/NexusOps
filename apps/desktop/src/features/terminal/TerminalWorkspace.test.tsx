@@ -206,8 +206,9 @@ beforeEach(() => {
 });
 
 describe('TerminalWorkspace', () => {
-  function openContextMenu() {
-    const canvas = document.querySelector('.terminal-canvas');
+  async function openContextMenu() {
+    const input = await activeTerminalInput();
+    const canvas = input.closest('.terminal-canvas');
     if (!canvas) throw new Error('Terminal canvas missing');
     fireEvent.contextMenu(canvas, { clientX: 40, clientY: 40 });
     return screen.getByRole('menu');
@@ -230,32 +231,32 @@ describe('TerminalWorkspace', () => {
     await screen.findByRole('tab', { name: /Shell/ });
     const input = await activeTerminalInput();
 
-    openContextMenu();
+    await openContextMenu();
     await user.dblClick(screen.getByRole('menuitem', { name: 'Copy' }));
     expect(screen.queryByRole('menu')).toBeNull();
     expect(mocks.writeText).toHaveBeenCalledTimes(1);
     expect(input).toHaveFocus();
 
-    openContextMenu();
+    await openContextMenu();
     await user.dblClick(screen.getByRole('menuitem', { name: 'Paste' }));
     expect(screen.queryByRole('menu')).toBeNull();
     expect(mocks.readText).toHaveBeenCalledTimes(1);
     expect(mocks.paste).toHaveBeenCalledTimes(1);
     expect(input).toHaveFocus();
 
-    openContextMenu();
+    await openContextMenu();
     await user.click(screen.getByRole('menuitem', { name: 'Select all' }));
     expect(screen.queryByRole('menu')).toBeNull();
     expect(mocks.selectAll).toHaveBeenCalledTimes(1);
     expect(input).toHaveFocus();
 
-    openContextMenu();
+    await openContextMenu();
     await user.click(screen.getByRole('menuitem', { name: 'Clear' }));
     expect(screen.queryByRole('menu')).toBeNull();
     expect(mocks.clear).toHaveBeenCalledTimes(1);
     expect(input).toHaveFocus();
 
-    openContextMenu();
+    await openContextMenu();
     await user.click(screen.getByRole('menuitem', { name: 'Search' }));
     expect(screen.queryByRole('menu')).toBeNull();
     expect(screen.getByLabelText('Search terminal scrollback')).toHaveFocus();
@@ -273,14 +274,14 @@ describe('TerminalWorkspace', () => {
     await screen.findByRole('tab', { name: /Shell/ });
     const input = await activeTerminalInput();
 
-    openContextMenu();
+    await openContextMenu();
     await user.click(screen.getByRole('menuitem', { name: 'Copy' }));
     expect(screen.queryByRole('menu')).toBeNull();
     expect(await screen.findByText('The selected text could not be copied.')).toBeVisible();
     expect(mocks.writeText).toHaveBeenCalledTimes(1);
     expect(input).toHaveFocus();
 
-    openContextMenu();
+    await openContextMenu();
     await user.click(screen.getByRole('menuitem', { name: 'Paste' }));
     expect(screen.queryByRole('menu')).toBeNull();
     expect(await screen.findByText('Clipboard text could not be pasted.')).toBeVisible();
@@ -298,7 +299,7 @@ describe('TerminalWorkspace', () => {
     const input = await activeTerminalInput();
     input.focus();
 
-    openContextMenu();
+    await openContextMenu();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('menu')).toBeNull();
     expect(mocks.write).not.toHaveBeenCalled();
@@ -308,7 +309,7 @@ describe('TerminalWorkspace', () => {
     await waitFor(() => expect(mocks.write).toHaveBeenCalledTimes(1));
     expect(mocks.write).toHaveBeenCalledWith(expect.any(Object), bytesToBase64(new Uint8Array([27])));
 
-    openContextMenu();
+    await openContextMenu();
     fireEvent.pointerDown(document.body);
     expect(screen.queryByRole('menu')).toBeNull();
   });
@@ -321,7 +322,7 @@ describe('TerminalWorkspace', () => {
     await screen.findByRole('tab', { name: /Terminal A/ });
     const inputA = await activeTerminalInput();
     inputA.focus();
-    openContextMenu();
+    await openContextMenu();
 
     await user.keyboard('{Control>}{Shift>}t{/Shift}{/Control}');
     const tabB = await screen.findByRole('tab', { name: /Terminal 1/ });
@@ -358,7 +359,7 @@ describe('TerminalWorkspace', () => {
     const view = render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
     await screen.findByRole('tab', { name: /Terminal A/ });
     await activeTerminalInput();
-    openContextMenu();
+    await openContextMenu();
 
     view.rerender(<TerminalWorkspace host={host('host-a', 'Alpha')} visible={false} onShowOverview={() => {}} />);
     await waitFor(() => expect(document.querySelector('.terminal-context-menu')).toBeNull());
@@ -383,7 +384,7 @@ describe('TerminalWorkspace', () => {
     mocks.poll.mockImplementation(() => new Promise(() => {}));
     render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
     await screen.findByRole('tab', { name: /Ended shell/ });
-    openContextMenu();
+    await openContextMenu();
     const copy = screen.getByRole('menuitem', { name: 'Copy' });
     const paste = screen.getByRole('menuitem', { name: 'Paste' });
     expect(copy).toBeDisabled();
