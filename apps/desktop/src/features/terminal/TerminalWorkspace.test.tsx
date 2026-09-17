@@ -211,10 +211,12 @@ describe('TerminalWorkspace', () => {
     return screen.getByRole('menu');
   }
 
-  function activeTerminalInput() {
-    const input = document.querySelector('.terminal-pane:not([hidden]) .xterm textarea');
-    if (!(input instanceof HTMLTextAreaElement)) throw new Error('Active terminal input missing');
-    return input;
+  async function activeTerminalInput() {
+    return waitFor(() => {
+      const input = document.querySelector('.terminal-pane:not([hidden]) .xterm textarea');
+      if (!(input instanceof HTMLTextAreaElement)) throw new Error('Active terminal input missing');
+      return input;
+    });
   }
 
   test('dismisses each enabled context action exactly once and moves focus to its destination', async () => {
@@ -224,7 +226,7 @@ describe('TerminalWorkspace', () => {
     mocks.selectionAvailable = true;
     render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
     await screen.findByRole('tab', { name: /Shell/ });
-    const input = activeTerminalInput();
+    const input = await activeTerminalInput();
 
     openContextMenu();
     await user.dblClick(screen.getByRole('menuitem', { name: 'Copy' }));
@@ -267,7 +269,7 @@ describe('TerminalWorkspace', () => {
     mocks.readText.mockRejectedValueOnce(new Error('paste failed'));
     render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
     await screen.findByRole('tab', { name: /Shell/ });
-    const input = activeTerminalInput();
+    const input = await activeTerminalInput();
 
     openContextMenu();
     await user.click(screen.getByRole('menuitem', { name: 'Copy' }));
@@ -291,7 +293,7 @@ describe('TerminalWorkspace', () => {
     mocks.poll.mockImplementation(() => new Promise(() => {}));
     render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
     await screen.findByRole('tab', { name: /Shell/ });
-    const input = activeTerminalInput();
+    const input = await activeTerminalInput();
     input.focus();
 
     openContextMenu();
