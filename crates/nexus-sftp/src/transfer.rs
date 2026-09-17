@@ -690,6 +690,27 @@ async fn run_download(
     destination: &Destination,
     cancel: CancellationToken,
 ) -> Result<(), AppError> {
+    run_download_with_staging(state, id, spec, source, destination, cancel, |path| {
+        Builder::new()
+            .prefix(".nexusops-")
+            .suffix(".part")
+            .tempfile_in(path)
+    })
+    .await
+}
+
+async fn run_download_with_staging<F>(
+    state: &Arc<Mutex<ManagerState>>,
+    id: TransferJobId,
+    spec: &JobSpec,
+    source: &crate::policy::RemoteSource,
+    destination: &Destination,
+    cancel: CancellationToken,
+    create_staging: F,
+) -> Result<(), AppError>
+where
+    F: FnOnce(&std::path::Path) -> std::io::Result<tempfile::NamedTempFile>,
+{
     let Destination::Local {
         directory,
         file_name,
@@ -707,16 +728,12 @@ async fn run_download(
     }
     validate_local_directory_handle(directory)?;
     let destination = directory.path.join(file_name);
-    let named = Builder::new()
-        .prefix(".nexusops-")
-        .suffix(".part")
-        .tempfile_in(&directory.path)
-        .map_err(|_| {
-            AppError::new(
-                ErrorCode::LocalAccess,
-                "A local staging file could not be created.",
-            )
-        })?;
+    let named = create_staging(&directory.path).map_err(|_| {
+        AppError::new(
+            ErrorCode::LocalAccess,
+            "A local staging file could not be created.",
+        )
+    })?;
     let (staging_file, temp) = named.into_parts();
     let mut file = tokio::fs::File::from_std(staging_file);
     set_state(state, id, TransferState::Transferring);
@@ -896,6 +913,7 @@ mod tests {
     struct CountingClient {
         info: SftpSessionInfo,
         upload_calls: AtomicUsize,
+        download_calls: AtomicUsize,
         remove_calls: AtomicUsize,
         commit_new_calls: AtomicUsize,
         commit_replace_calls: AtomicUsize,
@@ -907,6 +925,9 @@ mod tests {
         block_upload: AtomicBool,
         upload_started: Notify,
         upload_release: Notify,
+        block_commit: AtomicBool,
+        commit_started: Notify,
+        commit_release: Notify,
         download_bytes: Mutex<Vec<u8>>,
         competing_local_path: Mutex<Option<std::path::PathBuf>>,
         remove_local_path: Mutex<Option<std::path::PathBuf>>,
@@ -941,6 +962,7 @@ mod tests {
                     root_path: "/tmp".into(),
                 },
                 upload_calls: AtomicUsize::new(0),
+                download_calls: AtomicUsize::new(0),
                 remove_calls: AtomicUsize::new(0),
                 commit_new_calls: AtomicUsize::new(0),
                 commit_replace_calls: AtomicUsize::new(0),
@@ -952,6 +974,9 @@ mod tests {
                 block_upload: AtomicBool::new(false),
                 upload_started: Notify::new(),
                 upload_release: Notify::new(),
+                block_commit: AtomicBool::new(false),
+                commit_started: Notify::new(),
+                commit_release: Notify::new(),
                 download_bytes: Mutex::new(b"remote payload".to_vec()),
                 competing_local_path: Mutex::new(None),
                 remove_local_path: Mutex::new(None),
@@ -1050,6 +1075,7 @@ mod tests {
             _: CancellationToken,
             progress: Progress,
         ) -> Result<u64, AppError> {
+            self.download_calls.fetch_add(1, Ordering::SeqCst);
             let bytes = self.download_bytes.lock().unwrap().clone();
             tokio::io::AsyncWriteExt::write_all(writer, &bytes)
                 .await
@@ -1062,6 +1088,10 @@ mod tests {
         }
         async fn commit_new(&self, _: &str, _: &str) -> Result<(), AppError> {
             self.commit_new_calls.fetch_add(1, Ordering::SeqCst);
+            if self.block_commit.load(Ordering::SeqCst) {
+                self.commit_started.notify_one();
+                self.commit_release.notified().await;
+            }
             self.commit_new_result
                 .lock()
                 .unwrap()
@@ -1571,6 +1601,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_local_staging_creation_starts_no_remote_read_or_final_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let selected =
+            crate::open_local_directory(directory.path().canonicalize().unwrap()).unwrap();
+        let approved = crate::EntryIdentity {
+            kind: RemoteEntryKind::File,
+            size: Some(14),
+            modified: Some(11),
+        };
+        let client = CountingClient::new();
+        client
+            .identities
+            .lock()
+            .unwrap()
+            .push_back(Ok(Some(approved.clone())));
+        let spec = download_spec(
+            client.clone(),
+            ConflictPolicy::Replace,
+            PlannedDownload {
+                source: crate::RemoteSource {
+                    path: "/tmp/source.bin".into(),
+                    name: "source.bin".into(),
+                    size: Some(14),
+                    identity: approved.clone(),
+                },
+                destination: selected,
+                file_name: "final.bin".into(),
+                action: DestinationAction::CreateNew,
+            },
+        )
+        .unwrap();
+        let Source::Remote(source) = &spec.source else {
+            unreachable!()
+        };
+        let error = run_download_with_staging(
+            &Arc::new(Mutex::new(ManagerState::default())),
+            TransferJobId::new(),
+            &spec,
+            source,
+            &spec.destination,
+            CancellationToken::new(),
+            |_| Err(std::io::Error::from(std::io::ErrorKind::StorageFull)),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::LocalAccess);
+        assert_eq!(client.identity_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.download_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
     async fn rename_requires_the_approved_source_identity() {
         let client = CountingClient::new();
         let approved = crate::EntryIdentity {
@@ -1855,6 +1937,111 @@ mod tests {
         .await
         .expect("destination serialization watchdog");
         assert_eq!(client.upload_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cancel_after_finalization_starts_cannot_erase_confirmed_commit_or_other_host() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.bin");
+        std::fs::write(&source, b"payload").unwrap();
+        let committing = CountingClient::new();
+        committing.block_commit.store(true, Ordering::SeqCst);
+        let other_host = CountingClient::new();
+        let manager = TransferManager::new();
+        let first = manager
+            .enqueue(
+                upload_spec(
+                    committing.clone(),
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&source),
+                        destination: "/tmp/first.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            committing.commit_started.notified(),
+        )
+        .await
+        .expect("commit-start watchdog");
+        let second = manager
+            .enqueue(
+                upload_spec(
+                    other_host.clone(),
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&source),
+                        destination: "/tmp/second.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        manager
+            .cancel(
+                first.id,
+                first.host_id,
+                first.host_session_id,
+                first.sftp_session_id,
+            )
+            .unwrap();
+        manager.disconnect(first.host_id, first.host_session_id);
+        assert_eq!(
+            manager
+                .list(None)
+                .iter()
+                .find(|job| job.id == first.id)
+                .unwrap()
+                .state,
+            TransferState::Finalizing
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if manager
+                    .list(None)
+                    .iter()
+                    .any(|job| job.id == second.id && job.state == TransferState::Completed)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("other-host completion watchdog");
+        committing.commit_release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if manager
+                    .list(None)
+                    .iter()
+                    .any(|job| job.id == first.id && job.state == TransferState::Completed)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finalization completion watchdog");
+        assert_eq!(committing.commit_new_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(committing.remove_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(other_host.commit_new_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(manager.global.available_permits(), GLOBAL_ACTIVE);
+        assert_eq!(
+            manager.hosts.lock().unwrap()[&first.host_id].available_permits(),
+            HOST_ACTIVE
+        );
+        let state = manager.state.lock().unwrap();
+        assert!(state.jobs[&first.id].active_spec.is_none());
+        assert!(state.jobs[&second.id].active_spec.is_none());
     }
 
     #[test]

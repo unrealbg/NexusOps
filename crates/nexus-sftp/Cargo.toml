@@ -19,6 +19,7 @@ tempfile.workspace = true
 fs-id.workspace = true
 
 [dev-dependencies]
+bytes = "1.12"
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

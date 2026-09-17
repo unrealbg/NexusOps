@@ -3034,6 +3034,7 @@ name = "nexus-sftp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "fs-id",
  "nexus-model",

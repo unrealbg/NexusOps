@@ -708,3 +708,765 @@ fn encode_string(output: &mut Vec<u8>, value: &str) -> Result<(), AppError> {
     output.extend_from_slice(value.as_bytes());
     Ok(())
 }
+
+#[cfg(test)]
+mod fault_tests {
+    use super::*;
+    use russh_sftp::{
+        protocol::{Attrs, Data, File, Handle, Name, Status, Version},
+        server::{self, Handler},
+    };
+    use std::{
+        io,
+        pin::Pin,
+        sync::Mutex,
+        task::{Context, Poll},
+    };
+
+    #[derive(Default)]
+    struct Trace {
+        close: usize,
+        reads: usize,
+    }
+
+    struct Fixture(Arc<Mutex<Trace>>);
+
+    impl Handler for Fixture {
+        type Error = StatusCode;
+
+        fn unimplemented(&self) -> Self::Error {
+            StatusCode::OpUnsupported
+        }
+
+        async fn init(
+            &mut self,
+            _: u32,
+            _: HashMap<String, String>,
+        ) -> Result<Version, Self::Error> {
+            Ok(Version::new())
+        }
+
+        async fn realpath(&mut self, id: u32, _: String) -> Result<Name, Self::Error> {
+            Ok(Name {
+                id,
+                files: vec![File::dummy("/fixture")],
+            })
+        }
+
+        async fn lstat(&mut self, id: u32, _: String) -> Result<Attrs, Self::Error> {
+            Ok(Attrs {
+                id,
+                attrs: FileAttributes {
+                    permissions: Some(0o100600),
+                    size: Some(12),
+                    ..FileAttributes::default()
+                },
+            })
+        }
+
+        async fn open(
+            &mut self,
+            id: u32,
+            _: String,
+            _: OpenFlags,
+            _: FileAttributes,
+        ) -> Result<Handle, Self::Error> {
+            Ok(Handle {
+                id,
+                handle: "fixture-handle".into(),
+            })
+        }
+
+        async fn read(&mut self, id: u32, _: String, _: u64, _: u32) -> Result<Data, Self::Error> {
+            let mut trace = self.0.lock().unwrap();
+            trace.reads += 1;
+            Ok(Data {
+                id,
+                data: if trace.reads == 1 {
+                    b"first-".to_vec()
+                } else if trace.reads == 2 {
+                    b"second".to_vec()
+                } else {
+                    return Err(StatusCode::Eof);
+                },
+            })
+        }
+
+        async fn close(&mut self, id: u32, _: String) -> Result<Status, Self::Error> {
+            self.0.lock().unwrap().close += 1;
+            Ok(Status {
+                id,
+                status_code: StatusCode::Ok,
+                error_message: String::new(),
+                language_tag: String::new(),
+            })
+        }
+    }
+
+    struct FullWriter {
+        accepted: usize,
+    }
+
+    impl AsyncWrite for FullWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            if self.accepted >= 6 {
+                Poll::Ready(Err(io::Error::from(io::ErrorKind::StorageFull)))
+            } else {
+                let count = buf.len().min(6 - self.accepted);
+                self.accepted += count;
+                Poll::Ready(Ok(count))
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn download_closes_remote_handle_after_partial_local_disk_full() {
+        let trace = Arc::new(Mutex::new(Trace::default()));
+        let (client_stream, server_stream) = tokio::io::duplex(128 * 1024);
+        server::run(server_stream, Fixture(trace.clone())).await;
+        let client = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            RawSftpClient::connect(client_stream, HostId::new(), HostSessionId::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut writer = FullWriter { accepted: 0 };
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let progress_clone = progress.clone();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.download(
+                "/fixture/source",
+                &mut writer,
+                CancellationToken::new(),
+                Arc::new(move |bytes| progress_clone.lock().unwrap().push(bytes)),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().code, ErrorCode::LocalAccess);
+        assert_eq!(writer.accepted, 6);
+        assert_eq!(*progress.lock().unwrap(), vec![6]);
+        assert_eq!(trace.lock().unwrap().close, 1);
+        assert_eq!(trace.lock().unwrap().reads, 2);
+    }
+
+    struct FlushFailWriter(Vec<u8>);
+
+    impl AsyncWrite for FlushFailWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            self.0.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::from(io::ErrorKind::StorageFull)))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn download_flush_failure_after_all_bytes_is_not_success() {
+        let trace = Arc::new(Mutex::new(Trace::default()));
+        let (client_stream, server_stream) = tokio::io::duplex(128 * 1024);
+        server::run(server_stream, Fixture(trace.clone())).await;
+        let client = RawSftpClient::connect(client_stream, HostId::new(), HostSessionId::new())
+            .await
+            .unwrap();
+        let mut writer = FlushFailWriter(Vec::new());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.download(
+                "/fixture/source",
+                &mut writer,
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().code, ErrorCode::LocalAccess);
+        assert_eq!(writer.0, b"first-second");
+        assert_eq!(trace.lock().unwrap().close, 1);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Fault {
+        OpenDenied,
+        WriteDenied,
+        ReadDenied,
+        FsyncDenied,
+        CloseDenied,
+        CommitDenied,
+        CommitRace,
+        CleanupDenied,
+    }
+
+    struct MatrixState {
+        fault: Fault,
+        files: HashMap<String, Vec<u8>>,
+        calls: Vec<String>,
+        writes: usize,
+        reads: usize,
+    }
+
+    struct MatrixFixture(Arc<Mutex<MatrixState>>);
+
+    fn ok(id: u32) -> Status {
+        Status {
+            id,
+            status_code: StatusCode::Ok,
+            error_message: String::new(),
+            language_tag: String::new(),
+        }
+    }
+
+    impl Handler for MatrixFixture {
+        type Error = StatusCode;
+
+        fn unimplemented(&self) -> Self::Error {
+            StatusCode::OpUnsupported
+        }
+
+        async fn init(
+            &mut self,
+            _: u32,
+            _: HashMap<String, String>,
+        ) -> Result<Version, Self::Error> {
+            let mut version = Version::new();
+            version
+                .extensions
+                .insert("fsync@openssh.com".into(), "1".into());
+            version
+                .extensions
+                .insert("hardlink@openssh.com".into(), "1".into());
+            version
+                .extensions
+                .insert("posix-rename@openssh.com".into(), "1".into());
+            Ok(version)
+        }
+
+        async fn realpath(&mut self, id: u32, _: String) -> Result<Name, Self::Error> {
+            Ok(Name {
+                id,
+                files: vec![File::dummy("/fixture")],
+            })
+        }
+
+        async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("LSTAT {path}"));
+            if state.fault == Fault::CommitRace && path == "/fixture/new-final" {
+                state.files.insert(path, b"competitor".to_vec());
+                return Err(StatusCode::NoSuchFile);
+            }
+            let bytes = state.files.get(&path).ok_or(StatusCode::NoSuchFile)?;
+            Ok(Attrs {
+                id,
+                attrs: FileAttributes {
+                    permissions: Some(0o100600),
+                    size: Some(bytes.len() as u64),
+                    ..FileAttributes::default()
+                },
+            })
+        }
+
+        async fn open(
+            &mut self,
+            id: u32,
+            path: String,
+            flags: OpenFlags,
+            _: FileAttributes,
+        ) -> Result<Handle, Self::Error> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("OPEN {path}"));
+            if flags.contains(OpenFlags::CREATE) {
+                if state.fault == Fault::OpenDenied {
+                    return Err(StatusCode::PermissionDenied);
+                }
+                if state.files.contains_key(&path) {
+                    return Err(StatusCode::Failure);
+                }
+                state.files.insert(path.clone(), Vec::new());
+            } else if !state.files.contains_key(&path) {
+                return Err(StatusCode::NoSuchFile);
+            }
+            Ok(Handle { id, handle: path })
+        }
+
+        async fn write(
+            &mut self,
+            id: u32,
+            handle: String,
+            offset: u64,
+            data: Vec<u8>,
+        ) -> Result<Status, Self::Error> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("WRITE {offset}"));
+            state.writes += 1;
+            if state.fault == Fault::WriteDenied && state.writes == 2 {
+                return Err(StatusCode::PermissionDenied);
+            }
+            let file = state.files.get_mut(&handle).ok_or(StatusCode::NoSuchFile)?;
+            if file.len() != offset as usize {
+                return Err(StatusCode::Failure);
+            }
+            file.extend_from_slice(&data);
+            Ok(ok(id))
+        }
+
+        async fn read(
+            &mut self,
+            id: u32,
+            handle: String,
+            offset: u64,
+            _: u32,
+        ) -> Result<Data, Self::Error> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("READ {offset}"));
+            state.reads += 1;
+            if state.fault == Fault::ReadDenied && state.reads == 2 {
+                return Err(StatusCode::PermissionDenied);
+            }
+            let bytes = state.files.get(&handle).ok_or(StatusCode::NoSuchFile)?;
+            let start = offset as usize;
+            if start >= bytes.len() {
+                return Err(StatusCode::Eof);
+            }
+            Ok(Data {
+                id,
+                data: bytes[start..bytes.len().min(start + 6)].to_vec(),
+            })
+        }
+
+        async fn close(&mut self, id: u32, _: String) -> Result<Status, Self::Error> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push("CLOSE".into());
+            if state.fault == Fault::CloseDenied {
+                Err(StatusCode::PermissionDenied)
+            } else {
+                Ok(ok(id))
+            }
+        }
+
+        async fn remove(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("REMOVE {path}"));
+            if state.fault == Fault::CleanupDenied {
+                return Err(StatusCode::PermissionDenied);
+            }
+            state.files.remove(&path).ok_or(StatusCode::NoSuchFile)?;
+            Ok(ok(id))
+        }
+
+        async fn extended(
+            &mut self,
+            id: u32,
+            request: String,
+            data: Vec<u8>,
+        ) -> Result<Packet, Self::Error> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("EXTENDED {request}"));
+            if request == "fsync@openssh.com" {
+                if state.fault == Fault::FsyncDenied {
+                    return Err(StatusCode::PermissionDenied);
+                }
+                return Ok(Packet::Status(ok(id)));
+            }
+            if request == "hardlink@openssh.com" || request == "posix-rename@openssh.com" {
+                if state.fault == Fault::CommitDenied {
+                    return Err(StatusCode::PermissionDenied);
+                }
+                let mut cursor = data.as_slice();
+                let parse = |cursor: &mut &[u8]| -> Option<String> {
+                    let len = u32::from_be_bytes(cursor.get(..4)?.try_into().ok()?) as usize;
+                    *cursor = cursor.get(4..)?;
+                    let value = String::from_utf8(cursor.get(..len)?.to_vec()).ok()?;
+                    *cursor = cursor.get(len..)?;
+                    Some(value)
+                };
+                let source = parse(&mut cursor).ok_or(StatusCode::BadMessage)?;
+                let destination = parse(&mut cursor).ok_or(StatusCode::BadMessage)?;
+                if request == "hardlink@openssh.com" && state.files.contains_key(&destination) {
+                    return Err(StatusCode::Failure);
+                }
+                let content = state
+                    .files
+                    .get(&source)
+                    .ok_or(StatusCode::NoSuchFile)?
+                    .clone();
+                state.files.insert(destination, content);
+                if request == "posix-rename@openssh.com" {
+                    state.files.remove(&source);
+                }
+                return Ok(Packet::Status(ok(id)));
+            }
+            Err(StatusCode::OpUnsupported)
+        }
+    }
+
+    async fn matrix_client(fault: Fault) -> (Arc<dyn SftpClient>, Arc<Mutex<MatrixState>>) {
+        let state = Arc::new(Mutex::new(MatrixState {
+            fault,
+            files: HashMap::from([
+                ("/fixture/final".into(), b"old-final".to_vec()),
+                ("/fixture/source".into(), b"first-second".to_vec()),
+                ("/fixture/staging".into(), b"old-staging".to_vec()),
+            ]),
+            calls: Vec::new(),
+            writes: 0,
+            reads: 0,
+        }));
+        let (client_stream, server_stream) = tokio::io::duplex(256 * 1024);
+        server::run(server_stream, MatrixFixture(state.clone())).await;
+        let client = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            RawSftpClient::connect(client_stream, HostId::new(), HostSessionId::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        (client, state)
+    }
+
+    #[tokio::test]
+    async fn denied_exclusive_open_preserves_preexisting_staging_and_final() {
+        let (client, state) = matrix_client(Fault::OpenDenied).await;
+        let ownership = StagingOwnership::new();
+        let mut reader = std::io::Cursor::new(b"new-payload".to_vec());
+        let result = client
+            .upload_staged(
+                &mut reader,
+                "/fixture/staging",
+                ownership.clone(),
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(StagedUploadFailure::NotCreated(error)) if error.code == ErrorCode::SftpDenied)
+        );
+        assert!(!ownership.is_owned());
+        let state = state.lock().unwrap();
+        assert_eq!(state.files["/fixture/staging"], b"old-staging");
+        assert_eq!(state.files["/fixture/final"], b"old-final");
+        assert_eq!(state.calls, ["OPEN /fixture/staging"]);
+    }
+
+    #[tokio::test]
+    async fn denied_second_write_keeps_confirmed_progress_below_payload() {
+        let (client, state) = matrix_client(Fault::WriteDenied).await;
+        let ownership = StagingOwnership::new();
+        let mut reader = std::io::Cursor::new(vec![7; CLIENT_CHUNK_BYTES + 17]);
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let progress_clone = progress.clone();
+        let result = client
+            .upload_staged(
+                &mut reader,
+                "/fixture/new-staging",
+                ownership.clone(),
+                CancellationToken::new(),
+                Arc::new(move |bytes| progress_clone.lock().unwrap().push(bytes)),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(StagedUploadFailure::OwnedFailure(error)) if error.code == ErrorCode::SftpDenied)
+        );
+        assert!(ownership.is_owned());
+        assert_eq!(*progress.lock().unwrap(), vec![CLIENT_CHUNK_BYTES as u64]);
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.files["/fixture/new-staging"].len(),
+            CLIENT_CHUNK_BYTES
+        );
+        assert_eq!(state.files["/fixture/final"], b"old-final");
+        assert_eq!(
+            state.calls.iter().filter(|call| *call == "CLOSE").count(),
+            1
+        );
+        assert!(!state.calls.iter().any(|call| call.contains("hardlink")));
+    }
+
+    #[tokio::test]
+    async fn denied_second_remote_read_closes_handle_after_nonzero_bytes() {
+        let (client, state) = matrix_client(Fault::ReadDenied).await;
+        let mut writer = Vec::new();
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let progress_clone = progress.clone();
+        let result = client
+            .download(
+                "/fixture/source",
+                &mut writer,
+                CancellationToken::new(),
+                Arc::new(move |bytes| progress_clone.lock().unwrap().push(bytes)),
+            )
+            .await;
+        assert_eq!(result.unwrap_err().code, ErrorCode::SftpDenied);
+        assert_eq!(writer, b"first-");
+        assert_eq!(*progress.lock().unwrap(), vec![6]);
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.calls.iter().filter(|call| *call == "CLOSE").count(),
+            1
+        );
+        assert_eq!(state.files["/fixture/final"], b"old-final");
+    }
+
+    #[tokio::test]
+    async fn fsync_and_close_denials_do_not_commit_complete_payload() {
+        for fault in [Fault::FsyncDenied, Fault::CloseDenied] {
+            let (client, state) = matrix_client(fault).await;
+            let ownership = StagingOwnership::new();
+            let mut reader = std::io::Cursor::new(b"all-bytes".to_vec());
+            let progress = Arc::new(Mutex::new(Vec::new()));
+            let progress_clone = progress.clone();
+            let result = client
+                .upload_staged(
+                    &mut reader,
+                    "/fixture/new-staging",
+                    ownership.clone(),
+                    CancellationToken::new(),
+                    Arc::new(move |bytes| progress_clone.lock().unwrap().push(bytes)),
+                )
+                .await;
+            assert!(
+                matches!(result, Err(StagedUploadFailure::OwnedFailure(error)) if error.code == ErrorCode::SftpDenied)
+            );
+            assert!(ownership.is_owned());
+            assert_eq!(*progress.lock().unwrap(), vec![9]);
+            let state = state.lock().unwrap();
+            assert_eq!(state.files["/fixture/new-staging"], b"all-bytes");
+            assert_eq!(state.files["/fixture/final"], b"old-final");
+            assert_eq!(
+                state.calls.iter().filter(|call| *call == "CLOSE").count(),
+                1
+            );
+            assert!(!state.calls.iter().any(|call| call.contains("hardlink")));
+        }
+    }
+
+    #[tokio::test]
+    async fn known_commit_denial_preserves_final_and_confirmed_commit_cleanup_error_preserves_result()
+     {
+        let (denied, denied_state) = matrix_client(Fault::CommitDenied).await;
+        assert_eq!(
+            denied
+                .commit_replace("/fixture/staging", "/fixture/final")
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SftpDenied
+        );
+        {
+            let denied_state = denied_state.lock().unwrap();
+            assert_eq!(denied_state.files["/fixture/final"], b"old-final");
+            assert_eq!(denied_state.files["/fixture/staging"], b"old-staging");
+        }
+
+        let (confirmed, confirmed_state) = matrix_client(Fault::CleanupDenied).await;
+        confirmed_state
+            .lock()
+            .unwrap()
+            .files
+            .remove("/fixture/final");
+        let error = confirmed
+            .commit_new("/fixture/staging", "/fixture/final")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::OutcomeUnknown);
+        assert!(error.message.contains("final file exists"));
+        let confirmed_state = confirmed_state.lock().unwrap();
+        assert_eq!(confirmed_state.files["/fixture/final"], b"old-staging");
+        assert_eq!(confirmed_state.files["/fixture/staging"], b"old-staging");
+        assert_eq!(
+            confirmed_state
+                .calls
+                .iter()
+                .filter(|call| call.starts_with("REMOVE"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn create_new_competitor_between_identity_and_hardlink_is_preserved() {
+        let (client, state) = matrix_client(Fault::CommitRace).await;
+        let error = client
+            .commit_new("/fixture/staging", "/fixture/new-final")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::SftpProtocol);
+        let state = state.lock().unwrap();
+        assert_eq!(state.files["/fixture/new-final"], b"competitor");
+        assert_eq!(state.files["/fixture/staging"], b"old-staging");
+        assert_eq!(
+            state
+                .calls
+                .iter()
+                .filter(|call| call.starts_with("REMOVE"))
+                .count(),
+            0
+        );
+        assert_eq!(
+            state
+                .calls
+                .iter()
+                .filter(|call| call.contains("hardlink"))
+                .count(),
+            1
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum LostReply {
+        Create,
+        Replace,
+    }
+
+    async fn recv_packet(stream: &mut tokio::io::DuplexStream) -> Packet {
+        use tokio::io::AsyncReadExt;
+        let len = stream.read_u32().await.unwrap() as usize;
+        let mut payload = vec![0; len];
+        stream.read_exact(&mut payload).await.unwrap();
+        Packet::try_from(&mut bytes::Bytes::from(payload)).unwrap()
+    }
+
+    async fn send_packet(stream: &mut tokio::io::DuplexStream, packet: Packet) {
+        use tokio::io::AsyncWriteExt;
+        let bytes = bytes::Bytes::try_from(packet).unwrap();
+        stream.write_all(&bytes).await.unwrap();
+    }
+
+    async fn lost_reply_client(
+        mode: LostReply,
+    ) -> (
+        Arc<dyn SftpClient>,
+        Arc<Mutex<Vec<String>>>,
+        Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    ) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls_clone = calls.clone();
+        let files = Arc::new(Mutex::new(HashMap::from([
+            ("/fixture/final".into(), b"old-final".to_vec()),
+            ("/fixture/staging".into(), b"new-final".to_vec()),
+        ])));
+        let files_clone = files.clone();
+        let (client_stream, mut server_stream) = tokio::io::duplex(128 * 1024);
+        tokio::spawn(async move {
+            assert!(matches!(
+                recv_packet(&mut server_stream).await,
+                Packet::Init(_)
+            ));
+            let mut version = Version::new();
+            version
+                .extensions
+                .insert("posix-rename@openssh.com".into(), "1".into());
+            send_packet(&mut server_stream, Packet::Version(version)).await;
+            let realpath = recv_packet(&mut server_stream).await;
+            assert!(matches!(realpath, Packet::RealPath(_)));
+            send_packet(
+                &mut server_stream,
+                Packet::Name(Name {
+                    id: realpath.get_request_id(),
+                    files: vec![File::dummy("/fixture")],
+                }),
+            )
+            .await;
+            let mutation = recv_packet(&mut server_stream).await;
+            match (mode, mutation) {
+                (LostReply::Create, Packet::Open(open)) => {
+                    assert!(open.pflags.contains(OpenFlags::CREATE | OpenFlags::EXCLUDE));
+                    files_clone
+                        .lock()
+                        .unwrap()
+                        .insert(open.filename, Vec::new());
+                    calls_clone
+                        .lock()
+                        .unwrap()
+                        .push("OPEN executed; reply lost".into());
+                }
+                (LostReply::Replace, Packet::Extended(extended)) => {
+                    assert_eq!(extended.request, "posix-rename@openssh.com");
+                    let mut files = files_clone.lock().unwrap();
+                    let payload = files.remove("/fixture/staging").unwrap();
+                    files.insert("/fixture/final".into(), payload);
+                    calls_clone
+                        .lock()
+                        .unwrap()
+                        .push("REPLACE executed; reply lost".into());
+                }
+                _ => panic!("unexpected protocol request"),
+            }
+            // Dropping the stream after executing the mutation is a real lost reply.
+        });
+        let client = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            RawSftpClient::connect(client_stream, HostId::new(), HostSessionId::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        (client, calls, files)
+    }
+
+    #[tokio::test]
+    async fn lost_exclusive_create_reply_never_establishes_ownership_or_removes_staging() {
+        let (client, calls, files) = lost_reply_client(LostReply::Create).await;
+        let ownership = StagingOwnership::new();
+        let mut reader = std::io::Cursor::new(b"new-payload".to_vec());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.upload_staged(
+                &mut reader,
+                "/fixture/staging",
+                ownership.clone(),
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(StagedUploadFailure::CreationOutcomeUnknown(error)) if error.code == ErrorCode::OutcomeUnknown)
+        );
+        assert!(!ownership.is_owned());
+        assert_eq!(*calls.lock().unwrap(), ["OPEN executed; reply lost"]);
+        assert_eq!(files.lock().unwrap()["/fixture/final"], b"old-final");
+        assert!(files.lock().unwrap().contains_key("/fixture/staging"));
+    }
+
+    #[tokio::test]
+    async fn executed_replace_with_lost_reply_is_outcome_unknown_without_replay() {
+        let (client, calls, files) = lost_reply_client(LostReply::Replace).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.commit_replace("/fixture/staging", "/fixture/final"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err().code, ErrorCode::OutcomeUnknown);
+        assert_eq!(*calls.lock().unwrap(), ["REPLACE executed; reply lost"]);
+        assert_eq!(files.lock().unwrap()["/fixture/final"], b"new-final");
+        assert!(!files.lock().unwrap().contains_key("/fixture/staging"));
+    }
+}
