@@ -1208,6 +1208,69 @@ mod fault_tests {
     }
 
     #[tokio::test]
+    async fn plan_and_manager_fail_mid_upload_clean_owned_staging_without_commit() {
+        use nexus_model::{ConflictPolicy, TransferState};
+
+        let (client, state) = matrix_client(Fault::WriteDenied).await;
+        let local = tempfile::tempdir().unwrap();
+        let source = local.path().join("final");
+        std::fs::write(&source, vec![7; CLIENT_CHUNK_BYTES + 17]).unwrap();
+        let selected =
+            crate::open_local_source(source.canonicalize().unwrap(), "final".into()).unwrap();
+        let store = crate::FilePlanStore::default();
+        let plan = store
+            .plan_upload(client, vec![selected], "/fixture", ConflictPolicy::Replace)
+            .await
+            .unwrap();
+        let manager = crate::TransferManager::new();
+        let jobs = manager
+            .execute(
+                store
+                    .consume(
+                        plan.id,
+                        plan.host_id,
+                        plan.host_session_id,
+                        plan.sftp_session_id,
+                    )
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 1);
+        let job = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let job = manager
+                    .list(None)
+                    .into_iter()
+                    .find(|job| job.id == jobs[0].id)
+                    .unwrap();
+                if job.state == TransferState::Failed {
+                    break job;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("manager failure watchdog");
+        assert_eq!(job.confirmed_bytes, CLIENT_CHUNK_BYTES.to_string());
+        assert_eq!(job.error.unwrap().code, ErrorCode::SftpDenied);
+        assert!(!job.retryable);
+        let state = state.lock().unwrap();
+        assert_eq!(state.files["/fixture/final"], b"old-final");
+        assert_eq!(state.files["/fixture/staging"], b"old-staging");
+        assert_eq!(state.files.len(), 3);
+        assert_eq!(
+            state
+                .calls
+                .iter()
+                .filter(|call| call.starts_with("REMOVE"))
+                .count(),
+            1
+        );
+        assert!(!state.calls.iter().any(|call| call.contains("rename")));
+    }
+
+    #[tokio::test]
     async fn denied_second_remote_read_closes_handle_after_nonzero_bytes() {
         let (client, state) = matrix_client(Fault::ReadDenied).await;
         let mut writer = Vec::new();
