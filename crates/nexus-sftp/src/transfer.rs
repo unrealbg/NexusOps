@@ -10,8 +10,9 @@ use nexus_model::{
     SftpSessionId, TransferDirection, TransferJob, TransferJobId, TransferState,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tempfile::Builder;
 use tokio::sync::Semaphore;
@@ -21,6 +22,7 @@ const GLOBAL_ACTIVE: usize = 4;
 const HOST_ACTIVE: usize = 2;
 const JOB_CAP: usize = 100;
 const HISTORY_CAP: usize = 100;
+const QUIESCE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 struct JobSpec {
@@ -52,28 +54,59 @@ struct JobRecord {
     /// Present only while the job is active. Terminal history never retains
     /// selected local handles or remote clients.
     active_spec: Option<JobSpec>,
+    done: CancellationToken,
+    cleanup_unconfirmed: bool,
+}
+struct CompletionGuard(CancellationToken);
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 struct RemoteStagingGuard {
     client: Arc<dyn SftpClient>,
     path: String,
     ownership: StagingOwnership,
     armed: bool,
+    state: Arc<Mutex<ManagerState>>,
+    job_id: TransferJobId,
 }
 
 impl RemoteStagingGuard {
-    fn new(client: Arc<dyn SftpClient>, path: String, ownership: StagingOwnership) -> Self {
+    fn new(
+        client: Arc<dyn SftpClient>,
+        path: String,
+        ownership: StagingOwnership,
+        state: Arc<Mutex<ManagerState>>,
+        job_id: TransferJobId,
+    ) -> Self {
         Self {
             client,
             path,
             ownership,
             armed: true,
+            state,
+            job_id,
         }
     }
-    async fn cleanup(&mut self) {
+    async fn cleanup(&mut self) -> Result<(), AppError> {
         if self.armed && self.ownership.is_owned() {
-            self.client.remove_owned_staging(&self.path).await;
+            let result = self.client.remove_owned_staging(&self.path).await;
+            self.armed = false;
+            if let Err(error) = result {
+                if let Ok(mut state) = self.state.lock()
+                    && let Some(job) = state.jobs.get_mut(&self.job_id)
+                {
+                    job.cleanup_unconfirmed = true;
+                }
+                return Err(AppError::new(
+                    error.code,
+                    "Owned staging cleanup could not be confirmed; inspect the remote directory.",
+                ));
+            }
         }
         self.armed = false;
+        Ok(())
     }
     fn disarm(&mut self) {
         self.armed = false;
@@ -87,17 +120,49 @@ impl Drop for RemoteStagingGuard {
         }
         let client = self.client.clone();
         let path = self.path.clone();
+        let state = self.state.clone();
+        let job_id = self.job_id;
+        let done = CancellationToken::new();
+        if let Ok(mut value) = state.lock() {
+            value.cleanup_tasks.insert(job_id, done.clone());
+        }
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                client.remove_owned_staging(&path).await;
+                let error = match client.remove_owned_staging(&path).await {
+                    Ok(_) => transfer_error("The transfer stopped unexpectedly after owned staging was removed."),
+                    Err(_) => {
+                        if let Ok(mut value) = state.lock()
+                            && let Some(job) = value.jobs.get_mut(&job_id)
+                        {
+                            job.cleanup_unconfirmed = true;
+                        }
+                        transfer_error("The transfer stopped and owned staging cleanup could not be confirmed.")
+                    },
+                };
+                finish_error(&state, job_id, error);
+                done.cancel();
+                if let Ok(mut value) = state.lock() {
+                    value.cleanup_tasks.remove(&job_id);
+                }
             });
+        } else {
+            finish_error(
+                &state,
+                job_id,
+                transfer_error("Owned staging cleanup could not run."),
+            );
+            done.cancel();
         }
     }
 }
+
 #[derive(Default)]
 struct ManagerState {
     jobs: HashMap<TransferJobId, JobRecord>,
     order: VecDeque<TransferJobId>,
+    disconnecting: HashSet<(HostId, HostSessionId)>,
+    cleanup_tasks: HashMap<TransferJobId, CancellationToken>,
+    shutting_down: bool,
 }
 
 pub struct TransferManager {
@@ -247,6 +312,7 @@ impl TransferManager {
 
     pub fn disconnect(&self, host: HostId, host_session: HostSessionId) {
         if let Ok(mut state) = self.state.lock() {
+            state.disconnecting.insert((host, host_session));
             for job in state
                 .jobs
                 .values_mut()
@@ -254,10 +320,7 @@ impl TransferManager {
             {
                 if matches!(
                     job.view.state,
-                    TransferState::Queued
-                        | TransferState::Preparing
-                        | TransferState::Transferring
-                        | TransferState::CancelRequested
+                    TransferState::Queued | TransferState::Preparing | TransferState::Transferring
                 ) {
                     job.view.state = TransferState::CancelRequested;
                     job.cancel.cancel();
@@ -265,15 +328,116 @@ impl TransferManager {
             }
         }
     }
+    /// Keeps the session usable until every task from this exact connection has
+    /// released its handles and completed owned staging cleanup. A timeout leaves
+    /// the session sealed and must prevent its caller from closing the client.
+    pub async fn quiesce_session(
+        &self,
+        host: HostId,
+        host_session: HostSessionId,
+    ) -> Result<(), AppError> {
+        self.disconnect(host, host_session);
+        let pending = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| transfer_error("The transfer manager is unavailable."))?;
+            state
+                .jobs
+                .values()
+                .filter(|job| {
+                    job.view.host_id == host
+                        && job.view.host_session_id == host_session
+                        && !terminal(&job.view.state)
+                })
+                .map(|job| job.done.clone())
+                .collect::<Vec<_>>()
+        };
+        let deadline = tokio::time::Instant::now() + QUIESCE_TIMEOUT;
+        for done in pending {
+            tokio::time::timeout_at(deadline, done.cancelled()).await.map_err(|_| {
+                transfer_error("Transfer cleanup did not finish before the connection timeout; the SFTP session remains open.")
+            })?;
+        }
+        let cleanup = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| transfer_error("The transfer manager is unavailable."))?;
+            state
+                .jobs
+                .iter()
+                .filter(|(_, job)| {
+                    job.view.host_id == host && job.view.host_session_id == host_session
+                })
+                .filter_map(|(id, _)| state.cleanup_tasks.get(id).cloned())
+                .collect::<Vec<_>>()
+        };
+        for done in cleanup {
+            tokio::time::timeout_at(deadline, done.cancelled()).await.map_err(|_| {
+                transfer_error("Owned staging cleanup did not finish before the connection timeout; the SFTP session remains open.")
+            })?;
+        }
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| transfer_error("The transfer manager is unavailable."))?;
+        if state.jobs.values().any(|job| {
+            job.view.host_id == host
+                && job.view.host_session_id == host_session
+                && job.cleanup_unconfirmed
+        }) {
+            return Err(transfer_error(
+                "Owned staging cleanup could not be confirmed; the SFTP session remains open.",
+            ));
+        }
+        if state.jobs.values().any(|job| {
+            job.view.host_id == host
+                && job.view.host_session_id == host_session
+                && !terminal(&job.view.state)
+        }) {
+            return Err(transfer_error(
+                "A transfer stopped before cleanup could be confirmed; the SFTP session remains open.",
+            ));
+        }
+        Ok(())
+    }
+    pub async fn quiesce_all(&self) -> Result<(), AppError> {
+        let sessions = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| transfer_error("The transfer manager is unavailable."))?;
+            state
+                .jobs
+                .iter()
+                .filter(|(id, job)| {
+                    !terminal(&job.view.state)
+                        || job.cleanup_unconfirmed
+                        || state.cleanup_tasks.contains_key(id)
+                })
+                .map(|(_, job)| (job.view.host_id, job.view.host_session_id))
+                .collect::<HashSet<_>>()
+        };
+        for (host, session) in sessions {
+            self.quiesce_session(host, session).await?;
+        }
+        Ok(())
+    }
     pub fn shutdown(&self) {
         if let Ok(mut state) = self.state.lock() {
+            state.shutting_down = true;
+            let sessions = state
+                .jobs
+                .values()
+                .filter(|job| !terminal(&job.view.state))
+                .map(|job| (job.view.host_id, job.view.host_session_id))
+                .collect::<HashSet<_>>();
+            state.disconnecting.extend(sessions);
             for job in state.jobs.values_mut() {
-                if !matches!(
+                if matches!(
                     job.view.state,
-                    TransferState::Completed
-                        | TransferState::Failed
-                        | TransferState::Cancelled
-                        | TransferState::OutcomeUnknown
+                    TransferState::Queued | TransferState::Preparing | TransferState::Transferring
                 ) {
                     job.view.state = TransferState::CancelRequested;
                     job.cancel.cancel();
@@ -339,6 +503,18 @@ impl TransferManager {
                 .state
                 .lock()
                 .map_err(|_| transfer_error("The transfer manager is unavailable."))?;
+            if state.shutting_down
+                || prepared.iter().any(|(_, view, _, _, _)| {
+                    state
+                        .disconnecting
+                        .contains(&(view.host_id, view.host_session_id))
+                })
+            {
+                return Err(AppError::new(
+                    ErrorCode::Cancelled,
+                    "This SFTP session is disconnecting.",
+                ));
+            }
             trim_history_locked(&mut state);
             let nonterminal = state
                 .jobs
@@ -358,6 +534,8 @@ impl TransferManager {
                         view: view.clone(),
                         cancel: cancel.clone(),
                         active_spec: Some(spec.clone()),
+                        done: CancellationToken::new(),
+                        cleanup_unconfirmed: false,
                     },
                 );
             }
@@ -367,7 +545,14 @@ impl TransferManager {
             .map(|(_, view, _, _, _)| view.clone())
             .collect();
         for (id, _, cancel, spec, host_sem) in prepared {
-            self.spawn_job(id, cancel, spec, host_sem);
+            let done = {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| transfer_error("The transfer manager is unavailable."))?;
+                state.jobs.get(&id).expect("enqueued job").done.clone()
+            };
+            self.spawn_job(id, cancel, done, spec, host_sem);
         }
         Ok(views)
     }
@@ -376,6 +561,7 @@ impl TransferManager {
         &self,
         id: TransferJobId,
         cancel: CancellationToken,
+        done: CancellationToken,
         spec: JobSpec,
         host_sem: Arc<Semaphore>,
     ) {
@@ -383,6 +569,7 @@ impl TransferManager {
         let state = self.state.clone();
         let destinations = self.destinations.clone();
         tokio::spawn(async move {
+            let _completion = CompletionGuard(done);
             let host_permit = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
@@ -473,7 +660,8 @@ fn trim_history_locked(state: &mut ManagerState) {
             state
                 .jobs
                 .get(id)
-                .is_some_and(|job| terminal(&job.view.state))
+                .is_some_and(|job| terminal(&job.view.state) && !job.cleanup_unconfirmed)
+                && !state.cleanup_tasks.contains_key(id)
         }) else {
             break;
         };
@@ -616,8 +804,13 @@ async fn run_upload(
     let parent = crate::parent_remote(destination)?;
     let staging = crate::join_remote(&parent, &format!(".nexusops-{}.part", id.0.simple()))?;
     let ownership = StagingOwnership::new();
-    let mut staging_guard =
-        RemoteStagingGuard::new(client.clone(), staging.clone(), ownership.clone());
+    let mut staging_guard = RemoteStagingGuard::new(
+        client.clone(),
+        staging.clone(),
+        ownership.clone(),
+        state.clone(),
+        id,
+    );
     let progress = progress(state.clone(), id);
     set_state(state, id, TransferState::Transferring);
     let streamed = match client
@@ -628,32 +821,41 @@ async fn run_upload(
         Err(StagedUploadFailure::NotCreated(error)) => return Err(error),
         Err(StagedUploadFailure::CreationOutcomeUnknown(error)) => return Err(error),
         Err(StagedUploadFailure::OwnedFailure(error)) => {
-            staging_guard.cleanup().await;
+            staging_guard.cleanup().await?;
+            if cancel.is_cancelled() && error.code != ErrorCode::OutcomeUnknown {
+                return Err(AppError::new(
+                    ErrorCode::Cancelled,
+                    "The transfer was cancelled before finalization.",
+                ));
+            }
             return Err(error);
         }
     };
     if streamed != source.size {
-        staging_guard.cleanup().await;
+        staging_guard.cleanup().await?;
         return Err(transfer_error(
             "The local source size changed during transfer.",
         ));
     }
     if let Err(error) = validate_local_source(source) {
-        staging_guard.cleanup().await;
+        staging_guard.cleanup().await?;
         return Err(error);
     }
     if cancel.is_cancelled() {
-        staging_guard.cleanup().await;
+        staging_guard.cleanup().await?;
         return Err(AppError::new(
             ErrorCode::Cancelled,
             "The transfer was cancelled before finalization.",
         ));
     }
-    set_state(state, id, TransferState::Finalizing);
+    if let Err(error) = enter_finalizing(state, id, &cancel) {
+        staging_guard.cleanup().await?;
+        return Err(error);
+    }
     let current = match client.identity(destination).await {
         Ok(value) => value,
         Err(error) => {
-            staging_guard.cleanup().await;
+            staging_guard.cleanup().await?;
             return Err(error);
         }
     };
@@ -663,7 +865,7 @@ async fn run_upload(
         DestinationAction::Skip => true,
     };
     if !destination_matches {
-        staging_guard.cleanup().await;
+        staging_guard.cleanup().await?;
         return Err(AppError::new(
             ErrorCode::Conflict,
             "The remote destination changed after approval.",
@@ -674,12 +876,20 @@ async fn run_upload(
         DestinationAction::CreateNew => client.commit_new(&staging, destination).await,
         DestinationAction::Skip => Ok(()),
     };
-    if result.is_err() {
-        staging_guard.cleanup().await;
-    } else {
-        staging_guard.disarm();
+    match result {
+        Ok(()) => {
+            staging_guard.disarm();
+            Ok(())
+        }
+        Err(error) => match staging_guard.cleanup().await {
+            Ok(()) => Err(error),
+            Err(_) if error.code == ErrorCode::OutcomeUnknown => Err(AppError::new(
+                ErrorCode::OutcomeUnknown,
+                "The final mutation and owned staging cleanup could not be confirmed; refresh before taking another action.",
+            )),
+            Err(cleanup_error) => Err(cleanup_error),
+        },
     }
-    result
 }
 
 async fn run_download(
@@ -737,14 +947,24 @@ where
     let (staging_file, temp) = named.into_parts();
     let mut file = tokio::fs::File::from_std(staging_file);
     set_state(state, id, TransferState::Transferring);
-    let bytes = client
+    let bytes = match client
         .download(
             &source.path,
             &mut file,
             cancel.clone(),
             progress(state.clone(), id),
         )
-        .await?;
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) if cancel.is_cancelled() && error.code != ErrorCode::OutcomeUnknown => {
+            return Err(AppError::new(
+                ErrorCode::Cancelled,
+                "The transfer was cancelled before finalization.",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     if source.size.is_some_and(|size| size != bytes) {
         return Err(transfer_error(
             "The remote source size changed during transfer.",
@@ -766,7 +986,7 @@ where
             "The transfer was cancelled before finalization.",
         ));
     }
-    set_state(state, id, TransferState::Finalizing);
+    enter_finalizing(state, id, &cancel)?;
     validate_local_directory_handle(directory)?;
     let current = local_identity(&destination)?;
     let destination_matches = match action {
@@ -866,6 +1086,27 @@ fn set_state(manager: &Arc<Mutex<ManagerState>>, id: TransferJobId, next: Transf
         }
     }
 }
+fn enter_finalizing(
+    manager: &Arc<Mutex<ManagerState>>,
+    id: TransferJobId,
+    cancel: &CancellationToken,
+) -> Result<(), AppError> {
+    let mut state = manager
+        .lock()
+        .map_err(|_| transfer_error("The transfer manager is unavailable."))?;
+    let job = state
+        .jobs
+        .get_mut(&id)
+        .ok_or_else(|| transfer_error("The transfer no longer exists."))?;
+    if cancel.is_cancelled() || job.view.state == TransferState::CancelRequested {
+        return Err(AppError::new(
+            ErrorCode::Cancelled,
+            "The transfer was cancelled before finalization.",
+        ));
+    }
+    job.view.state = TransferState::Finalizing;
+    Ok(())
+}
 fn finish_error(state: &Arc<Mutex<ManagerState>>, id: TransferJobId, error: AppError) {
     if let Ok(mut value) = state.lock() {
         if let Some(job) = value.jobs.get_mut(&id) {
@@ -921,10 +1162,13 @@ mod tests {
         rename_calls: AtomicUsize,
         identities: Mutex<VecDeque<Result<Option<crate::EntryIdentity>, AppError>>>,
         upload_result: Mutex<Option<crate::StagedUploadResult>>,
+        remove_result: Mutex<Option<Result<crate::StagingCleanup, AppError>>>,
         commit_new_result: Mutex<Option<Result<(), AppError>>>,
         block_upload: AtomicBool,
         upload_started: Notify,
         upload_release: Notify,
+        block_download: AtomicBool,
+        download_started: Notify,
         block_commit: AtomicBool,
         commit_started: Notify,
         commit_release: Notify,
@@ -970,10 +1214,13 @@ mod tests {
                 rename_calls: AtomicUsize::new(0),
                 identities: Mutex::new(VecDeque::new()),
                 upload_result: Mutex::new(None),
+                remove_result: Mutex::new(None),
                 commit_new_result: Mutex::new(None),
                 block_upload: AtomicBool::new(false),
                 upload_started: Notify::new(),
                 upload_release: Notify::new(),
+                block_download: AtomicBool::new(false),
+                download_started: Notify::new(),
                 block_commit: AtomicBool::new(false),
                 commit_started: Notify::new(),
                 commit_release: Notify::new(),
@@ -1072,10 +1319,19 @@ mod tests {
             &self,
             _: &str,
             writer: &mut (dyn AsyncWrite + Unpin + Send),
-            _: CancellationToken,
+            cancel: CancellationToken,
             progress: Progress,
         ) -> Result<u64, AppError> {
             self.download_calls.fetch_add(1, Ordering::SeqCst);
+            if self.block_download.load(Ordering::SeqCst) {
+                tokio::io::AsyncWriteExt::write_all(writer, b"partial")
+                    .await
+                    .map_err(|_| unused())?;
+                progress(7);
+                self.download_started.notify_one();
+                cancel.cancelled().await;
+                return Err(AppError::new(ErrorCode::Cancelled, "Download cancelled."));
+            }
             let bytes = self.download_bytes.lock().unwrap().clone();
             tokio::io::AsyncWriteExt::write_all(writer, &bytes)
                 .await
@@ -1102,8 +1358,13 @@ mod tests {
             self.commit_replace_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn remove_owned_staging(&self, _: &str) {
+        async fn remove_owned_staging(&self, _: &str) -> Result<crate::StagingCleanup, AppError> {
             self.remove_calls.fetch_add(1, Ordering::SeqCst);
+            self.remove_result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Ok(crate::StagingCleanup::Removed))
         }
         async fn close(&self) {}
     }
@@ -1112,7 +1373,40 @@ mod tests {
         crate::open_local_source(path.canonicalize().unwrap(), "binary.dat".into()).unwrap()
     }
 
-    #[cfg(windows)]
+    async fn run_transfer(
+        state: &Arc<Mutex<ManagerState>>,
+        id: TransferJobId,
+        spec: &JobSpec,
+        cancel: CancellationToken,
+    ) -> Result<(), AppError> {
+        let info = spec.client.info();
+        let (source_display, destination_display, total_bytes) = labels(spec);
+        state.lock().unwrap().jobs.insert(
+            id,
+            JobRecord {
+                view: TransferJob {
+                    id,
+                    host_id: info.host_id,
+                    host_session_id: info.host_session_id,
+                    sftp_session_id: info.id,
+                    direction: spec.direction,
+                    source_display,
+                    destination_display,
+                    state: TransferState::Queued,
+                    confirmed_bytes: "0".into(),
+                    total_bytes: total_bytes.map(|value| value.to_string()),
+                    error: None,
+                    retryable: false,
+                },
+                cancel: cancel.clone(),
+                active_spec: None,
+                done: CancellationToken::new(),
+                cleanup_unconfirmed: false,
+            },
+        );
+        super::run_transfer(state, id, spec, cancel).await
+    }
+
     async fn wait_for_state(
         manager: &TransferManager,
         id: TransferJobId,
@@ -1280,6 +1574,8 @@ mod tests {
                 view,
                 cancel: CancellationToken::new(),
                 active_spec: active.then_some(spec),
+                done: CancellationToken::new(),
+                cleanup_unconfirmed: false,
             },
         );
         id
@@ -2360,5 +2656,340 @@ mod tests {
         assert_eq!(client.upload_calls.load(Ordering::SeqCst), 1);
         assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
         std::fs::rename(&path, parent.path().join("disconnect-released.bin")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_disconnect_quiesces_without_remote_io_and_seals_old_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("queued.bin");
+        std::fs::write(&source, b"queued").unwrap();
+        let client = CountingClient::new();
+        let info = client.info();
+        let manager = TransferManager::new();
+        let held = manager
+            .global
+            .clone()
+            .acquire_many_owned(GLOBAL_ACTIVE as u32)
+            .await
+            .unwrap();
+        let spec = || {
+            upload_spec(
+                client.clone(),
+                ConflictPolicy::KeepBoth,
+                PlannedUpload {
+                    source: local_item(&source),
+                    destination: "/tmp/queued.bin".into(),
+                    action: DestinationAction::CreateNew,
+                },
+            )
+            .unwrap()
+        };
+        let job = manager.enqueue(spec()).await.unwrap();
+        manager
+            .quiesce_session(info.host_id, info.host_session_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_for_state(&manager, job.id, TransferState::Cancelled)
+                .await
+                .state,
+            TransferState::Cancelled
+        );
+        assert_eq!(client.upload_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            manager.enqueue(spec()).await.unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+        drop(held);
+        let mut new_client = CountingClient::new();
+        Arc::get_mut(&mut new_client).unwrap().info.host_id = info.host_id;
+        assert_ne!(new_client.info().host_session_id, info.host_session_id);
+        let new_job = manager
+            .enqueue(
+                upload_spec(
+                    new_client,
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&source),
+                        destination: "/tmp/new-session.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        wait_for_state(&manager, new_job.id, TransferState::Completed).await;
+        #[cfg(windows)]
+        std::fs::rename(&source, directory.path().join("queued-released.bin")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn active_download_disconnect_removes_local_staging_and_releases_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("downloads");
+        std::fs::create_dir(&directory).unwrap();
+        let selected = crate::open_local_directory(directory.canonicalize().unwrap()).unwrap();
+        let identity = crate::EntryIdentity {
+            kind: RemoteEntryKind::File,
+            size: Some(20),
+            modified: Some(1),
+        };
+        let client = CountingClient::new();
+        client.block_download.store(true, Ordering::SeqCst);
+        client
+            .identities
+            .lock()
+            .unwrap()
+            .push_back(Ok(Some(identity.clone())));
+        let info = client.info();
+        let manager = TransferManager::new();
+        let job = manager
+            .enqueue(
+                download_spec(
+                    client.clone(),
+                    ConflictPolicy::KeepBoth,
+                    PlannedDownload {
+                        source: crate::RemoteSource {
+                            path: "/tmp/download.bin".into(),
+                            name: "download.bin".into(),
+                            size: Some(20),
+                            identity,
+                        },
+                        destination: selected,
+                        file_name: "download.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), client.download_started.notified())
+            .await
+            .unwrap();
+        manager
+            .quiesce_session(info.host_id, info.host_session_id)
+            .await
+            .unwrap();
+        let ended = wait_for_state(&manager, job.id, TransferState::Cancelled).await;
+        assert_eq!(ended.confirmed_bytes, "7");
+        assert!(!directory.join("download.bin").exists());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        #[cfg(windows)]
+        std::fs::rename(&directory, parent.path().join("downloads-released")).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_owned_remove_is_not_reported_as_clean_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("remove-denied.bin");
+        std::fs::write(&source, b"owned").unwrap();
+        let client = CountingClient::new();
+        *client.upload_result.lock().unwrap() = Some(Err(StagedUploadFailure::OwnedFailure(
+            AppError::new(ErrorCode::Cancelled, "Stream cancelled."),
+        )));
+        *client.remove_result.lock().unwrap() =
+            Some(Err(AppError::new(ErrorCode::SftpDenied, "REMOVE denied.")));
+        let info = client.info();
+        let manager = TransferManager::new();
+        let job = manager
+            .enqueue(
+                upload_spec(
+                    client.clone(),
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&source),
+                        destination: "/tmp/remove-denied.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let ended = wait_for_state(&manager, job.id, TransferState::Failed).await;
+        assert_eq!(ended.error.unwrap().code, ErrorCode::SftpDenied);
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            manager
+                .quiesce_session(info.host_id, info.host_session_id)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Transfer
+        );
+    }
+
+    #[tokio::test]
+    async fn finalizing_commit_finishes_before_disconnect_barrier_returns() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("finalizing.bin");
+        std::fs::write(&source, b"payload").unwrap();
+        let client = CountingClient::new();
+        client.block_commit.store(true, Ordering::SeqCst);
+        let info = client.info();
+        let manager = Arc::new(TransferManager::new());
+        let job = manager
+            .enqueue(
+                upload_spec(
+                    client.clone(),
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&source),
+                        destination: "/tmp/finalizing.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), client.commit_started.notified())
+            .await
+            .unwrap();
+        let quiescing_manager = manager.clone();
+        let quiescing = tokio::spawn(async move {
+            quiescing_manager
+                .quiesce_session(info.host_id, info.host_session_id)
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert_eq!(manager.list(None)[0].state, TransferState::Finalizing);
+        assert!(!quiescing.is_finished());
+        client.commit_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), quiescing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            wait_for_state(&manager, job.id, TransferState::Completed)
+                .await
+                .state,
+            TransferState::Completed
+        );
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn one_host_quiescence_does_not_hold_other_host_jobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("shared-source.bin");
+        std::fs::write(&source, b"payload").unwrap();
+        let first_client = CountingClient::new();
+        first_client.block_upload.store(true, Ordering::SeqCst);
+        let first_info = first_client.info();
+        let other_client = CountingClient::new();
+        let manager = Arc::new(TransferManager::new());
+        let first = manager
+            .enqueue(
+                upload_spec(
+                    first_client.clone(),
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&source),
+                        destination: "/tmp/first.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            first_client.upload_started.notified(),
+        )
+        .await
+        .unwrap();
+        let quiescing_manager = manager.clone();
+        let quiescing = tokio::spawn(async move {
+            quiescing_manager
+                .quiesce_session(first_info.host_id, first_info.host_session_id)
+                .await
+        });
+        let second = manager
+            .enqueue(
+                upload_spec(
+                    other_client.clone(),
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&source),
+                        destination: "/tmp/second.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        wait_for_state(&manager, second.id, TransferState::Completed).await;
+        assert!(!quiescing.is_finished());
+        first_client.upload_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), quiescing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            wait_for_state(&manager, first.id, TransferState::Cancelled)
+                .await
+                .state,
+            TransferState::Cancelled
+        );
+        assert_eq!(first_client.remove_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiescence_timeout_keeps_session_sealed_until_cleanup_finishes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("stalled.bin");
+        std::fs::write(&source, b"payload").unwrap();
+        let client = CountingClient::new();
+        client.block_upload.store(true, Ordering::SeqCst);
+        let info = client.info();
+        let manager = Arc::new(TransferManager::new());
+        let job = manager
+            .enqueue(
+                upload_spec(
+                    client.clone(),
+                    ConflictPolicy::KeepBoth,
+                    PlannedUpload {
+                        source: local_item(&source),
+                        destination: "/tmp/stalled.bin".into(),
+                        action: DestinationAction::CreateNew,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        client.upload_started.notified().await;
+        let quiescing_manager = manager.clone();
+        let quiescing = tokio::spawn(async move {
+            quiescing_manager
+                .quiesce_session(info.host_id, info.host_session_id)
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(QUIESCE_TIMEOUT + Duration::from_secs(1)).await;
+        assert_eq!(
+            quiescing.await.unwrap().unwrap_err().code,
+            ErrorCode::Transfer
+        );
+        assert_eq!(manager.list(None)[0].state, TransferState::CancelRequested);
+        client.upload_release.notify_one();
+        manager
+            .quiesce_session(info.host_id, info.host_session_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_for_state(&manager, job.id, TransferState::Cancelled)
+                .await
+                .state,
+            TransferState::Cancelled
+        );
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
     }
 }

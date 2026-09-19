@@ -228,6 +228,14 @@ impl Application {
         sftp_session_id: SftpSessionId,
         plan_id: FilePlanId,
     ) -> Result<Vec<TransferJob>, AppError> {
+        let startup = self
+            .sftp_startups
+            .lock()
+            .await
+            .entry(host_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _startup_guard = startup.lock().await;
         self.owned_sftp(host_id, host_session_id, sftp_session_id)
             .await?;
         let plan = self
@@ -300,7 +308,11 @@ impl Application {
             .await
     }
 
-    pub(crate) async fn close_sftp(&self, host_id: HostId, host_session_id: HostSessionId) {
+    pub(crate) async fn close_sftp(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+    ) -> Result<(), AppError> {
         let startup = self
             .sftp_startups
             .lock()
@@ -309,8 +321,10 @@ impl Application {
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone();
         let _startup_guard = startup.lock().await;
-        self.transfers.disconnect(host_id, host_session_id);
         self.file_plans.revoke_session(host_id, host_session_id);
+        self.transfers
+            .quiesce_session(host_id, host_session_id)
+            .await?;
         let session = {
             let mut sessions = self.sftp_sessions.lock().await;
             match sessions.get(&host_id) {
@@ -323,6 +337,7 @@ impl Application {
         if let Some(session) = session {
             session.close().await;
         }
+        Ok(())
     }
 
     pub async fn validate_sftp_session(

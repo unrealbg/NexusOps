@@ -924,7 +924,9 @@ mod tests {
         async fn commit_replace(&self, _: &str, _: &str) -> Result<(), AppError> {
             Err(unused())
         }
-        async fn remove_owned_staging(&self, _: &str) {}
+        async fn remove_owned_staging(&self, _: &str) -> Result<crate::StagingCleanup, AppError> {
+            Ok(crate::StagingCleanup::Removed)
+        }
         async fn close(&self) {}
     }
 

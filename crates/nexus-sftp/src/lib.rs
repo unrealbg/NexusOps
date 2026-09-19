@@ -5,7 +5,7 @@ mod transfer;
 
 pub use client::{
     EntryIdentity, LISTING_ENTRY_CAP, Progress, RawSftpClient, SftpClient, StagedUploadFailure,
-    StagedUploadResult, StagingOwnership,
+    StagedUploadResult, StagingCleanup, StagingOwnership,
 };
 pub use path::{
     display_name, join_remote, parent_remote, validate_child_name, validate_remote_path,

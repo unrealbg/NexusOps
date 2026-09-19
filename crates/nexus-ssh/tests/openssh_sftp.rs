@@ -278,7 +278,7 @@ async fn openssh_sftp_streaming_interoperability() {
             .code,
         nexus_model::ErrorCode::Cancelled
     );
-    client.remove_owned_staging(&cancelled_stage).await;
+    client.remove_owned_staging(&cancelled_stage).await.unwrap();
 
     let midstream_stage =
         join_remote(&root, ".nexusops-midstream-cancel.part").expect("cancel staging");
@@ -302,7 +302,7 @@ async fn openssh_sftp_streaming_interoperability() {
             .code,
         nexus_model::ErrorCode::Cancelled
     );
-    client.remove_owned_staging(&midstream_stage).await;
+    client.remove_owned_staging(&midstream_stage).await.unwrap();
 
     let large_bytes = 256_u64 * 1024 * 1024;
     let large = join_remote(&root, "streamed-256m.bin").expect("large path");

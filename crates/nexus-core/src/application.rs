@@ -131,22 +131,47 @@ impl Application {
             started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         ))
     }
-    /// Cancels sockets immediately during desktop shutdown; no detached SSH lifetime survives.
-    pub async fn shutdown(&self) {
-        self.transfers.shutdown();
-        self.terminals.shutdown().await;
-        let sftp = std::mem::take(&mut *self.sftp_sessions.lock().await);
-        for session in sftp.into_values() {
-            session.close().await;
-        }
-        for slot in self.sessions.lock().await.values() {
+    /// Quiesces transfers before closing the SFTP channels and SSH transports.
+    pub async fn shutdown(&self) -> Result<(), AppError> {
+        let _mutation = self.mutation.lock().await;
+        let slots = self
+            .sessions
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for slot in &slots {
             let mut data = slot.data.lock().await;
             data.generation += 1;
+            data.refreshing = false;
+            if data.view.state == ConnectionState::Connecting {
+                data.cancel.cancel();
+            } else if data.view.state == ConnectionState::Connected {
+                data.view.state = ConnectionState::Disconnecting;
+            }
+        }
+        self.transfers.shutdown();
+        let sessions = self
+            .sftp_sessions
+            .lock()
+            .await
+            .values()
+            .map(|client| (client.info().host_id, client.info().host_session_id))
+            .collect::<Vec<_>>();
+        for (host, session) in sessions {
+            self.close_sftp(host, session).await?;
+        }
+        self.transfers.quiesce_all().await?;
+        self.terminals.shutdown().await;
+        for slot in slots {
+            let mut data = slot.data.lock().await;
             data.cancel.cancel();
             data.refreshing = false;
             data.transport = None;
             data.connection_id = None;
             data.view = HostSession::disconnected(data.view.host_id);
         }
+        Ok(())
     }
 }

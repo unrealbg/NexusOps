@@ -39,6 +39,14 @@ pub enum StagedUploadFailure {
 }
 pub type StagedUploadResult = Result<u64, StagedUploadFailure>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagingCleanup {
+    /// The server confirmed REMOVE for this exact owned path.
+    Removed,
+    /// The server confirmed the exact path no longer exists.
+    AlreadyAbsent,
+}
+
 impl std::ops::Deref for StagedUploadFailure {
     type Target = AppError;
     fn deref(&self) -> &Self::Target {
@@ -100,7 +108,9 @@ pub trait SftpClient: Send + Sync {
     ) -> Result<u64, AppError>;
     async fn commit_new(&self, staging: &str, destination: &str) -> Result<(), AppError>;
     async fn commit_replace(&self, staging: &str, destination: &str) -> Result<(), AppError>;
-    async fn remove_owned_staging(&self, staging: &str);
+    /// Only call after exclusive creation established ownership. A lost REMOVE
+    /// reply is an error, not confirmation that the staging path is gone.
+    async fn remove_owned_staging(&self, staging: &str) -> Result<StagingCleanup, AppError>;
     async fn close(&self);
 }
 
@@ -585,8 +595,21 @@ impl SftpClient for RawSftpClient {
         }
     }
 
-    async fn remove_owned_staging(&self, staging: &str) {
-        let _ = self.raw.remove(staging).await;
+    async fn remove_owned_staging(&self, staging: &str) -> Result<StagingCleanup, AppError> {
+        match self.raw.remove(staging).await {
+            Ok(status) if status.status_code == StatusCode::Ok => Ok(StagingCleanup::Removed),
+            Ok(status) if status.status_code == StatusCode::NoSuchFile => {
+                Ok(StagingCleanup::AlreadyAbsent)
+            }
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
+                Ok(StagingCleanup::AlreadyAbsent)
+            }
+            Ok(status) | Err(SftpError::Status(status)) => Err(map_status(status.status_code)),
+            Err(_) => Err(AppError::new(
+                ErrorCode::SftpProtocol,
+                "Owned staging cleanup could not be confirmed; inspect the remote directory.",
+            )),
+        }
     }
     async fn close(&self) {
         let _ = self.raw.close_session();
@@ -1147,6 +1170,43 @@ mod fault_tests {
         .unwrap()
         .unwrap();
         (client, state)
+    }
+
+    #[tokio::test]
+    async fn owned_staging_remove_reports_denial_removed_and_already_absent() {
+        let (denied, denied_state) = matrix_client(Fault::CleanupDenied).await;
+        assert_eq!(
+            denied
+                .remove_owned_staging("/fixture/staging")
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::SftpDenied,
+        );
+        assert!(
+            denied_state
+                .lock()
+                .unwrap()
+                .files
+                .contains_key("/fixture/staging")
+        );
+
+        let (client, state) = matrix_client(Fault::OpenDenied).await;
+        assert_eq!(
+            client
+                .remove_owned_staging("/fixture/staging")
+                .await
+                .unwrap(),
+            StagingCleanup::Removed,
+        );
+        assert_eq!(
+            client
+                .remove_owned_staging("/fixture/staging")
+                .await
+                .unwrap(),
+            StagingCleanup::AlreadyAbsent,
+        );
+        assert!(!state.lock().unwrap().files.contains_key("/fixture/staging"));
     }
 
     #[tokio::test]
