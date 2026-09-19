@@ -55,6 +55,7 @@ export function TerminalPane({
   const stopped = useRef(false);
   const lastSize = useRef<TerminalSize | null>(null);
   const resizeTimer = useRef<number | null>(null);
+  const contextActionTaken = useRef(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; canCopy: boolean } | null>(null);
 
   useEffect(() => {
@@ -109,6 +110,14 @@ export function TerminalPane({
     if (!terminal || sessionRef.current.state !== 'open') return;
     const text = await readText();
     if (text) terminal.paste(text);
+  }
+
+  function runContextAction(action: () => void, focusTerminal = true) {
+    if (contextActionTaken.current) return;
+    contextActionTaken.current = true;
+    setContextMenu(null);
+    action();
+    if (focusTerminal) terminalRef.current?.focus();
   }
 
   useEffect(() => {
@@ -168,34 +177,44 @@ export function TerminalPane({
       queueInput(Uint8Array.from(data, (character) => character.charCodeAt(0) & 0xff)),
     );
     terminal.attachCustomKeyEventHandler((event) => {
-      if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true;
-      const key = event.key.toLowerCase();
-      if (key === 'c') {
+      if (
+        event.type !== 'keydown' ||
+        !event.ctrlKey ||
+        !event.shiftKey ||
+        event.altKey ||
+        event.metaKey ||
+        event.getModifierState('AltGraph')
+      ) return true;
+      let code = event.code;
+      if (!code || code === 'Unidentified') {
+        code = /^[a-z]$/i.test(event.key) ? `Key${event.key.toUpperCase()}` : '';
+      }
+      if (code === 'KeyC') {
         event.preventDefault();
         void copySelection().catch(() => onError('The selected text could not be copied.'));
         return false;
       }
-      if (key === 'v') {
+      if (code === 'KeyV') {
         event.preventDefault();
         void pasteClipboard().catch(() => onError('Clipboard text could not be pasted.'));
         return false;
       }
-      if (key === 'f') {
+      if (code === 'KeyF') {
         event.preventDefault();
         onOpenSearch();
         return false;
       }
-      if (key === 'k') {
+      if (code === 'KeyK') {
         event.preventDefault();
         terminal.clear();
         return false;
       }
-      if (key === 't') {
+      if (code === 'KeyT') {
         event.preventDefault();
         onNew();
         return false;
       }
-      if (key === 'w') {
+      if (code === 'KeyW') {
         event.preventDefault();
         onClose();
         return false;
@@ -206,6 +225,7 @@ export function TerminalPane({
     const contextHandler = (event: MouseEvent) => {
       event.preventDefault();
       const bounds = element.getBoundingClientRect();
+      contextActionTaken.current = false;
       setContextMenu({
         x: Math.min(Math.max(8, event.clientX - bounds.left), Math.max(8, bounds.width - 150)),
         y: Math.min(Math.max(8, event.clientY - bounds.top), Math.max(8, bounds.height - 190)),
@@ -304,11 +324,28 @@ export function TerminalPane({
   }, [active, search]);
 
   useEffect(() => {
+    if (!active || !visible) return;
+    return () => setContextMenu(null);
+  }, [active, visible]);
+
+  useEffect(() => {
     if (!contextMenu) return;
+    if (!active || !visible) return;
     const close = () => setContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      setContextMenu(null);
+      terminalRef.current?.focus();
+    };
     window.addEventListener('pointerdown', close, { once: true });
-    return () => window.removeEventListener('pointerdown', close);
-  }, [contextMenu]);
+    window.addEventListener('keydown', closeOnEscape, true);
+    return () => {
+      window.removeEventListener('pointerdown', close);
+      window.removeEventListener('keydown', closeOnEscape, true);
+    };
+  }, [active, contextMenu, visible]);
 
   const ended = ['closed', 'failed', 'disconnected'].includes(session.state);
   return (
@@ -321,7 +358,7 @@ export function TerminalPane({
           <button onClick={onNew}>Open new terminal</button>
         </div>
       )}
-      {contextMenu && (
+      {contextMenu && active && visible && (
         <div
           className="terminal-context-menu"
           role="menu"
@@ -331,24 +368,28 @@ export function TerminalPane({
           <button
             role="menuitem"
             disabled={!contextMenu.canCopy}
-            onClick={() => void copySelection().catch(() => onError('The selected text could not be copied.'))}
+            onClick={() => runContextAction(() => {
+              void copySelection().catch(() => onError('The selected text could not be copied.'));
+            })}
           >
             Copy
           </button>
           <button
             role="menuitem"
             disabled={session.state !== 'open'}
-            onClick={() => void pasteClipboard().catch(() => onError('Clipboard text could not be pasted.'))}
+            onClick={() => runContextAction(() => {
+              void pasteClipboard().catch(() => onError('Clipboard text could not be pasted.'));
+            })}
           >
             Paste
           </button>
-          <button role="menuitem" onClick={() => terminalRef.current?.selectAll()}>
+          <button role="menuitem" onClick={() => runContextAction(() => terminalRef.current?.selectAll())}>
             Select all
           </button>
-          <button role="menuitem" onClick={() => terminalRef.current?.clear()}>
+          <button role="menuitem" onClick={() => runContextAction(() => terminalRef.current?.clear())}>
             Clear
           </button>
-          <button role="menuitem" onClick={onOpenSearch}>
+          <button role="menuitem" onClick={() => runContextAction(onOpenSearch, false)}>
             Search
           </button>
         </div>

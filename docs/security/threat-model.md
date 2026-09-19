@@ -2,7 +2,7 @@
 
 ## Assets and trust boundaries
 
-Protect SSH passwords, private keys/passphrases, trusted server identities and the user's remote machines. Treat the renderer, all host form inputs, DNS, remote SSH output, local files and dependency updates as separate trust boundaries. The application runs with the user's ordinary local privileges and the remote account's existing SSH privileges. It requests no elevation and makes no remote changes.
+Protect SSH passwords, private keys/passphrases, trusted server identities and the user's remote machines. Treat the renderer, all host form inputs, DNS, remote SSH output, local files and dependency updates as separate trust boundaries. The application runs with the user's ordinary local privileges and the remote account's existing SSH privileges. It requests no elevation. Remote changes occur only through explicit terminal input or approved typed SFTP plans.
 
 ## Network attacker and first contact
 
@@ -40,6 +40,16 @@ The per-terminal Rust queue is capped at 64 chunks of 16 KiB and backpressures t
 
 Production still serves bundled assets under a restrictive CSP and freezes JavaScript prototypes. The xterm 6 bundle contains one namespace assignment that conflicts with a frozen inherited `toString`; a version-pinned build transform creates the same own property with `Object.defineProperty` and stops the build if the expected source construct changes. Remote terminal text is consumed by xterm rather than interpolated into HTML.
 
+## SFTP and local file boundary
+
+SFTP reuses the verified SSH transport on a separate subsystem channel. Per-host startup serialization prevents concurrent renderer calls from publishing and invalidating competing subsystems. The renderer has no local byte-payload command. Native selection creates an opaque typed grant in Rust, scoped to one host/connection/subsystem and revoked on disconnect or reconnect. An immutable backend plan binds it to exact endpoints, opened local handles, observed source/destination identities, a per-item destination action, risk, expiry, and one execution. Approval cancel/close discards named plans, and idle expiry tasks bound abandoned grants and plans. Consume/discard ownership is atomic, so cancellation cannot revoke an already active operation. The approved local path may be displayed to the user but is excluded from logs and published evidence. These checks limit confused-deputy and stale-session use; they cannot prove a human saw an honest prompt after renderer compromise.
+
+Remote names are untrusted data. Operational POSIX names are distinct from escaped display names and Windows destinations. Server-returned traversal children, special-file transfers, Windows-invalid names, reparse destinations, and silent overwrite are rejected. New and replacement data is staged beside the target and the old target is preserved until a negotiated commit primitive succeeds. No shell fallback, recursive delete, executable preview, automatic open, chmod/chown, sudo, or remote hash command exists.
+
+The remote server, local filesystem, or another writer can race metadata checks. SFTP v3 does not provide a universal compare-and-swap operation for replacement. NexusOps retains upload file and download directory/temp-file handles, rejects reparse ancestry, and revalidates identities before and after streaming where metadata permits. Windows identity is the volume serial plus full 128-bit file ID read from each open handle; Unix identity is device plus inode. Size and modified time are separate mutable preconditions. Unsupported strong identity fails closed. On Windows, upload handles deny write/delete sharing and the selected directory handle denies deletion. Terminal history drops all local handles before publishing its final state, and any new attempt needs a new picker grant. These guarantees still do not defend against a malicious logged-in account, administrator, filesystem driver, storage fault, or a remote server that changes bytes without changing the SFTP v3 size/mtime identity. No-clobber primitives, confirmed staging ownership, final revalidation, and destination serialization reduce accidental races. `OutcomeUnknown` is used when a lost reply prevents an honest result; generic retry rejects it.
+
+Transfer memory is bounded by queue/history limits, per-host/global semaphores, directory caps, protocol packet ceilings, and 64 KiB payload chunks. File contents and transient operational paths are not logged, audited, stored in frontend state, or persisted as transfer history. A crash may leave a unique staging file; NexusOps never wildcard-deletes it after restart.
+
 ## Persistence, logs and audit
 
 SQLite parameter binding prevents metadata SQL injection. Credential revisions avoid unsafe cross-store updates; crashes may leave encrypted orphans for future maintenance. Local profile locking prevents concurrent instances. Unix profile permissions are restricted to the owner; Windows uses the user's application-data ACL. A local attacker able to write the profile can alter host metadata or pins; pins are not a defense against account compromise.
@@ -50,6 +60,6 @@ The release bootstrap accepts an alternate test profile only through `NEXUSOPS_T
 
 Ed25519 is the supported client-key type in the Windows alpha. Optional RSA support is disabled because the current upstream RSA implementation has an unfixed RustSec timing-side-channel advisory. Other parsed key formats are not claimed as verified support.
 
-## Not in Goal 01
+## Outside the current milestone
 
-Structured remote mutation and AI/plugin policy, SFTP, key rotation UI, certificate authorities, SSH agent forwarding, jump hosts, persistent or shared terminal sessions, vault export/recovery, hardware-backed keys, signed installers/updaters, telemetry, secure deletion of encrypted orphan records and an independent security audit. No compliance or complete resistance to local malware is claimed.
+AI/plugin policy, recursive file operations and sync, remote editing, key rotation UI, certificate authorities, SSH agent forwarding, jump hosts, persistent or shared terminal sessions, vault export/recovery, hardware-backed keys, signed installers/updaters, telemetry, secure deletion of encrypted orphan records and an independent security audit. No compliance or complete resistance to local malware is claimed.

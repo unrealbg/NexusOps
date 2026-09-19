@@ -10,6 +10,7 @@ import { HostForm } from './features/hosts/HostForm';
 import { HostList } from './features/hosts/HostList';
 import { HostOverview } from './features/overview/HostOverview';
 import { TerminalWorkspace } from './features/terminal/TerminalWorkspace';
+import { FilesWorkspace } from './features/files/FilesWorkspace';
 
 type DialogState =
   { type: 'add' } | { type: 'edit'; host: Host } | { type: 'delete'; host: Host } | null;
@@ -21,8 +22,9 @@ export default function App() {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [section, setSection] = useState<'overview' | 'terminal'>('overview');
+  const [section, setSection] = useState<'overview' | 'terminal' | 'files'>('overview');
   const [terminalHosts, setTerminalHosts] = useState<string[]>([]);
+  const [fileHosts, setFileHosts] = useState<string[]>([]);
   const hosts = hostsQuery.data ?? [];
   const selectedHost = hosts.find((host) => host.id === hostId) ?? null;
 
@@ -34,11 +36,13 @@ export default function App() {
     select(id);
     const host = hosts.find((candidate) => candidate.id === id);
     if (host && section === 'terminal') visitTerminal(host);
+    if (host && section === 'files') setFileHosts((current) => current.includes(host.id) ? current : [...current, host.id]);
   }
 
-  function selectSection(next: 'overview' | 'terminal') {
+  function selectSection(next: 'overview' | 'terminal' | 'files') {
     setSection(next);
     if (next === 'terminal' && selectedHost) visitTerminal(selectedHost);
+    if (next === 'files' && selectedHost) setFileHosts((current) => current.includes(selectedHost.id) ? current : [...current, selectedHost.id]);
   }
 
   // Do not move this into useMutation: its cache retains mutation variables, including secrets.
@@ -84,7 +88,7 @@ export default function App() {
             <button onClick={() => selectHost(null)}>Workspace</button>
             <span>/</span>
             <span>{selectedHost?.displayName ?? 'Overview'}</span>
-            {selectedHost && <span>{section === 'terminal' ? 'Terminal' : 'Overview'}</span>}
+            {selectedHost && <span>{section === 'terminal' ? 'Terminal' : section === 'files' ? 'Files' : 'Overview'}</span>}
           </div>
           <span className="topbar-label">
             <span className="local-dot" />
@@ -94,7 +98,7 @@ export default function App() {
         <main
           id="main-content"
           tabIndex={-1}
-          className={`main-content ${section === 'terminal' ? 'main-content--terminal' : ''}`}
+          className={`main-content ${section === 'terminal' ? 'main-content--terminal' : ''} ${section === 'files' ? 'main-content--files' : ''}`}
         >
           {hostsQuery.isPending ? (
             <div className="state-panel">
@@ -148,12 +152,22 @@ export default function App() {
               </div>
             );
           })}
+          {fileHosts.map((fileHostId) => {
+            const fileHost = hosts.find((host) => host.id === fileHostId);
+            if (!fileHost) return null;
+            const visible = section === 'files' && selectedHost?.id === fileHost.id;
+            return (
+              <div key={fileHost.id} hidden={!visible} className="files-host-root">
+                <FilesWorkspace host={fileHost} visible={visible} onShowOverview={() => setSection('overview')} />
+              </div>
+            );
+          })}
         </main>
         <footer className="app-footer">
           <span>
-            NexusOps <span className="footer-divider">/</span> Terminal workspace
+            NexusOps <span className="footer-divider">/</span> {section === 'files' ? 'SFTP files' : 'Terminal workspace'}
           </span>
-          <span>Interactive PTY · local scrollback</span>
+          <span>{section === 'files' ? 'Agentless · streamed transfers' : 'Interactive PTY · local scrollback'}</span>
         </footer>
       </div>
       {dialog && dialog.type !== 'delete' && (

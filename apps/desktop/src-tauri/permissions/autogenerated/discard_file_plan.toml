@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discard-file-plan"
+description = "Enables the discard_file_plan command without any pre-configured scope."
+commands.allow = ["discard_file_plan"]
+
+[[permission]]
+identifier = "deny-discard-file-plan"
+description = "Denies the discard_file_plan command without any pre-configured scope."
+commands.deny = ["discard_file_plan"]

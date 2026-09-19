@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-delete"
+description = "Enables the plan_delete command without any pre-configured scope."
+commands.allow = ["plan_delete"]
+
+[[permission]]
+identifier = "deny-plan-delete"
+description = "Denies the plan_delete command without any pre-configured scope."
+commands.deny = ["plan_delete"]

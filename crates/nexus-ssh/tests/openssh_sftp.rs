@@ -1,0 +1,442 @@
+//! Opt-in streamed SFTP acceptance against the marker-owned OpenSSH fixture.
+
+use nexus_model::{
+    AuthenticationMethod, Host, HostConnectionConfig, HostId, HostSessionId, TerminalSize,
+};
+use nexus_operations::RemoteSession;
+use nexus_secrets::Credential;
+use nexus_sftp::{SftpConnector, join_remote};
+use nexus_ssh::{KnownHosts, SshProvider};
+use nexus_terminal::TerminalConnector;
+use sha2::{Digest, Sha256};
+use std::{env, fs, sync::Arc};
+use tempfile::tempdir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
+
+struct Fixture {
+    host: Host,
+    password: Zeroizing<String>,
+    pin_db: String,
+}
+
+impl Fixture {
+    fn from_env() -> Self {
+        let value = |name: &str| {
+            env::var(name).unwrap_or_else(|_| {
+                panic!("missing {name}; run tools/openssh-fixture/Run-OpenSshInterop.ps1")
+            })
+        };
+        Self {
+            host: Host {
+                id: HostId::new(),
+                display_name: "Disposable OpenSSH SFTP fixture".into(),
+                connection: HostConnectionConfig {
+                    hostname: value("NEXUS_OPENSSH_HOST"),
+                    port: value("NEXUS_OPENSSH_PORT").parse().expect("port"),
+                    username: value("NEXUS_OPENSSH_USER"),
+                    authentication: AuthenticationMethod::Password,
+                },
+            },
+            password: Zeroizing::new(value("NEXUS_OPENSSH_PASSWORD")),
+            pin_db: value("NEXUS_OPENSSH_PIN_DB"),
+        }
+    }
+
+    fn credential(&self) -> Credential {
+        Credential {
+            password: Some(self.password.clone()),
+            private_key: None,
+            passphrase: None,
+        }
+    }
+}
+
+async fn download_bytes(client: &dyn nexus_sftp::SftpClient, path: &str) -> Vec<u8> {
+    let mut output = Vec::new();
+    client
+        .download(
+            path,
+            &mut output,
+            CancellationToken::new(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .expect("download");
+    output
+}
+
+fn pattern_byte(offset: u64) -> u8 {
+    let mixed = offset
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .rotate_left((offset % 63) as u32)
+        ^ (offset >> 7)
+        ^ (offset >> 23);
+    (mixed ^ (mixed >> 32)) as u8
+}
+
+async fn apply_directories(
+    client: Arc<dyn nexus_sftp::SftpClient>,
+    paths: &[String],
+    create: bool,
+) {
+    for batch in paths.chunks(32) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for path in batch {
+            let client = client.clone();
+            let path = path.clone();
+            tasks.spawn(async move {
+                if create {
+                    client.create_dir(&path).await
+                } else {
+                    client.remove_dir(&path).await
+                }
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result
+                .expect("directory task")
+                .expect("directory operation");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires tools/openssh-fixture disposable real OpenSSH server"]
+async fn openssh_sftp_streaming_interoperability() {
+    let fixture = Fixture::from_env();
+    let known_hosts = Arc::new(KnownHosts::open(&fixture.pin_db).expect("known hosts"));
+    assert!(
+        known_hosts
+            .fingerprint(
+                &fixture.host.connection.hostname,
+                fixture.host.connection.port
+            )
+            .expect("pin lookup")
+            .is_some(),
+        "phase A must establish trust first"
+    );
+    let transport = SshProvider::new(known_hosts)
+        .connect(
+            &fixture.host,
+            fixture.credential(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("authenticated SSH transport");
+    let connection = HostSessionId::new();
+    let client = transport
+        .open_sftp(fixture.host.id, connection)
+        .await
+        .expect("real SFTP subsystem");
+    let info = client.info();
+    assert_eq!(info.protocol_version, 3);
+    assert!(
+        info.extensions
+            .iter()
+            .any(|extension| extension.name == "hardlink@openssh.com" && extension.version == "1")
+    );
+    assert!(
+        info.extensions
+            .iter()
+            .any(|extension| extension.name == "posix-rename@openssh.com"
+                && extension.version == "1")
+    );
+    assert_eq!(info.limits.client_chunk_bytes, "65536");
+
+    let root = join_remote(
+        &info.root_path,
+        &format!("nexusops-sftp-{}", uuid::Uuid::new_v4().simple()),
+    )
+    .expect("owned root");
+    client.create_dir(&root).await.expect("mkdir");
+    let listing = client
+        .list(&info.root_path, CancellationToken::new())
+        .await
+        .expect("browse");
+    assert!(listing.entries.iter().any(|entry| entry.path == root));
+    assert_eq!(
+        client.stat(&root).await.expect("stat").kind,
+        nexus_model::RemoteEntryKind::Directory
+    );
+
+    let name = "кирилица ' -$[];.bin";
+    let final_path = join_remote(&root, name).expect("unicode path");
+    let staging = join_remote(&root, ".nexusops-small.part").expect("staging");
+    let original = b"\0\xffbinary\ncontent\r\n".to_vec();
+    let original_hash = Sha256::digest(&original);
+    let mut source = std::io::Cursor::new(original.clone());
+    let progress = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let progress_copy = progress.clone();
+    let written = client
+        .upload_staged(
+            &mut source,
+            &staging,
+            nexus_sftp::StagingOwnership::new(),
+            CancellationToken::new(),
+            Arc::new(move |value| {
+                progress_copy.store(value, std::sync::atomic::Ordering::SeqCst);
+            }),
+        )
+        .await
+        .expect("stream upload");
+    assert_eq!(written, original.len() as u64);
+    assert_eq!(progress.load(std::sync::atomic::Ordering::SeqCst), written);
+    client
+        .commit_new(&staging, &final_path)
+        .await
+        .expect("no-clobber finalize");
+    let downloaded_original = download_bytes(client.as_ref(), &final_path).await;
+    assert_eq!(Sha256::digest(&downloaded_original), original_hash);
+    assert_eq!(downloaded_original, original);
+
+    let empty = join_remote(&root, "empty").expect("empty path");
+    let empty_stage = join_remote(&root, ".nexusops-empty.part").expect("empty staging");
+    client
+        .upload_staged(
+            &mut std::io::Cursor::new(Vec::<u8>::new()),
+            &empty_stage,
+            nexus_sftp::StagingOwnership::new(),
+            CancellationToken::new(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .expect("empty upload");
+    client
+        .commit_new(&empty_stage, &empty)
+        .await
+        .expect("empty finalize");
+    assert!(download_bytes(client.as_ref(), &empty).await.is_empty());
+
+    let conflicting_stage =
+        join_remote(&root, ".nexusops-conflict.part").expect("conflict staging");
+    client
+        .upload_staged(
+            &mut std::io::Cursor::new(b"replacement".to_vec()),
+            &conflicting_stage,
+            nexus_sftp::StagingOwnership::new(),
+            CancellationToken::new(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .expect("conflict stage");
+    assert!(
+        client
+            .commit_new(&conflicting_stage, &final_path)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        download_bytes(client.as_ref(), &final_path).await,
+        original,
+        "no-clobber preserves old destination"
+    );
+    client
+        .commit_replace(&conflicting_stage, &final_path)
+        .await
+        .expect("safe OpenSSH replace");
+    assert_eq!(
+        download_bytes(client.as_ref(), &final_path).await,
+        b"replacement"
+    );
+
+    let renamed = join_remote(&root, "renamed.bin").expect("rename path");
+    client
+        .rename_noclobber(&final_path, &renamed)
+        .await
+        .expect("no-clobber rename");
+    assert!(
+        client
+            .identity(&final_path)
+            .await
+            .expect("old identity")
+            .is_none()
+    );
+    assert!(
+        client
+            .identity(&renamed)
+            .await
+            .expect("new identity")
+            .is_some()
+    );
+
+    let cancelled_stage = join_remote(&root, ".nexusops-cancelled.part").expect("cancel staging");
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert_eq!(
+        client
+            .upload_staged(
+                &mut tokio::io::repeat(0x5a),
+                &cancelled_stage,
+                nexus_sftp::StagingOwnership::new(),
+                cancelled,
+                Arc::new(|_| {})
+            )
+            .await
+            .expect_err("cancelled upload")
+            .code,
+        nexus_model::ErrorCode::Cancelled
+    );
+    client.remove_owned_staging(&cancelled_stage).await.unwrap();
+
+    let midstream_stage =
+        join_remote(&root, ".nexusops-midstream-cancel.part").expect("cancel staging");
+    let midstream_cancel = CancellationToken::new();
+    let cancel_from_progress = midstream_cancel.clone();
+    assert_eq!(
+        client
+            .upload_staged(
+                &mut tokio::io::repeat(0x3c),
+                &midstream_stage,
+                nexus_sftp::StagingOwnership::new(),
+                midstream_cancel,
+                Arc::new(move |confirmed| {
+                    if confirmed >= 1024 * 1024 {
+                        cancel_from_progress.cancel();
+                    }
+                })
+            )
+            .await
+            .expect_err("mid-stream cancelled upload")
+            .code,
+        nexus_model::ErrorCode::Cancelled
+    );
+    client.remove_owned_staging(&midstream_stage).await.unwrap();
+
+    let large_bytes = 256_u64 * 1024 * 1024;
+    let large = join_remote(&root, "streamed-256m.bin").expect("large path");
+    let large_stage = join_remote(&root, ".nexusops-large.part").expect("large staging");
+    let (mut generator_writer, mut generated) = tokio::io::duplex(128 * 1024);
+    let generator = tokio::spawn(async move {
+        let mut offset = 0_u64;
+        let mut hash = Sha256::new();
+        while offset < large_bytes {
+            let uneven = 17_003 + ((offset / 65_537) % 41_113) as usize;
+            let count = uneven.min((large_bytes - offset) as usize);
+            let block = (0..count)
+                .map(|index| pattern_byte(offset + index as u64))
+                .collect::<Vec<_>>();
+            generator_writer
+                .write_all(&block)
+                .await
+                .expect("pattern source write");
+            hash.update(&block);
+            offset += count as u64;
+        }
+        drop(generator_writer);
+        hash.finalize()
+    });
+    assert_eq!(
+        client
+            .upload_staged(
+                &mut generated,
+                &large_stage,
+                nexus_sftp::StagingOwnership::new(),
+                CancellationToken::new(),
+                Arc::new(|_| {})
+            )
+            .await
+            .expect("large streamed upload"),
+        large_bytes
+    );
+    let expected_hash = generator.await.expect("pattern generator");
+    client
+        .commit_new(&large_stage, &large)
+        .await
+        .expect("large finalize");
+    let local = tempdir().expect("local temp");
+    let local_path = local.path().join("streamed-256m.bin");
+    let mut local_file = tokio::fs::File::create(&local_path)
+        .await
+        .expect("local file");
+    assert_eq!(
+        client
+            .download(
+                &large,
+                &mut local_file,
+                CancellationToken::new(),
+                Arc::new(|_| {})
+            )
+            .await
+            .expect("large streamed download"),
+        large_bytes
+    );
+    local_file.flush().await.expect("flush");
+    drop(local_file);
+    let mut local_file = tokio::fs::File::open(&local_path)
+        .await
+        .expect("reopen for verification");
+    let mut checked = 0_u64;
+    let mut block = vec![0_u8; 64 * 1024];
+    let mut actual_hash = Sha256::new();
+    let mut pattern_offset = 0_u64;
+    loop {
+        let count = local_file.read(&mut block).await.expect("read back");
+        if count == 0 {
+            break;
+        }
+        for (index, byte) in block[..count].iter().enumerate() {
+            assert_eq!(*byte, pattern_byte(pattern_offset + index as u64));
+        }
+        actual_hash.update(&block[..count]);
+        checked += count as u64;
+        pattern_offset += count as u64;
+    }
+    assert_eq!(checked, large_bytes);
+    assert_eq!(actual_hash.finalize(), expected_hash);
+
+    let terminal = transport
+        .open_terminal(
+            TerminalSize {
+                columns: 80,
+                rows: 24,
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("terminal beside SFTP");
+    assert!(
+        !client
+            .list(&root, CancellationToken::new())
+            .await
+            .expect("SFTP while PTY open")
+            .entries
+            .is_empty()
+    );
+    terminal.close().await.expect("terminal close");
+
+    let large_directory = join_remote(&root, "large-listing").expect("large directory");
+    client
+        .create_dir(&large_directory)
+        .await
+        .expect("large mkdir");
+    let large_children = (0..=nexus_sftp::LISTING_ENTRY_CAP)
+        .map(|index| join_remote(&large_directory, &format!("entry-{index:05}")).unwrap())
+        .collect::<Vec<_>>();
+    apply_directories(client.clone(), &large_children, true).await;
+    let capped = client
+        .list(&large_directory, CancellationToken::new())
+        .await
+        .expect("capped real listing");
+    assert_eq!(capped.entries.len(), 5_000);
+    assert!(capped.partial);
+    apply_directories(client.clone(), &large_children, false).await;
+    client
+        .remove_dir(&large_directory)
+        .await
+        .expect("large rmdir");
+
+    for path in [&renamed, &empty, &large] {
+        client.remove_file(path).await.expect("remove file");
+    }
+    client
+        .remove_dir(&root)
+        .await
+        .expect("remove empty directory");
+    client.close().await;
+    transport.disconnect().await.expect("SSH disconnect");
+    assert!(!fs::exists(local_path).expect("local evidence metadata") || checked == large_bytes);
+}

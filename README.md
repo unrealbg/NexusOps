@@ -1,8 +1,8 @@
 # NexusOps
 
-A native, agentless infrastructure control plane. The current milestone provides host management, verified SSH connections, a read-only Linux overview, and independent interactive SSH PTY workspaces. Windows is the primary development target; the Tauri shell and Rust services support Windows, macOS and Linux.
+A native, agentless infrastructure control plane. The current milestone provides host management, verified SSH connections, a read-only Linux overview, independent interactive SSH PTY workspaces, and a safe SFTP file workspace with streamed transfers. Windows is the primary development target; the Tauri shell and Rust services support Windows, macOS and Linux.
 
-No NexusOps software is installed on the remote machine. A working SSH server, a Linux user account and standard read-only utilities are sufficient. No sudo, package installation, remote file writes or service changes are performed.
+No NexusOps software is installed on the remote machine. A working SSH server with an SFTP subsystem, a Linux user account and standard read-only utilities are sufficient. NexusOps requests no sudo, package installation, or service changes. Remote file writes occur only after an exact one-time file plan is shown and approved.
 
 ## Start
 
@@ -17,7 +17,9 @@ Create a host, select password or private-key authentication and save its creden
 
 Select **Terminal** on a connected host to open one or more real `xterm-256color` SSH PTYs. Tabs, resizing, local scrollback search, explicit text clipboard actions, and full-screen terminal programs are supported. Terminal contents and tab metadata remain in memory only. See the [terminal architecture](docs/architecture/terminal.md) for ownership, limits, shortcuts, and sensitive-data handling.
 
-`npm run dev` opens the frontend in a browser for UI work. It intentionally reports that desktop access is unavailable and does not simulate a connection. Services, Containers, Network, Security, Logs and Files are reserved, disabled navigation entries.
+Select **Files** to browse the account's resolved SFTP start directory, inspect metadata, upload/download ordinary files, and perform explicitly approved create, rename, or non-recursive delete actions. Local files and destinations are chosen through native dialogs; paths and payload bytes never enter React. Transfers are staged, bounded, cancellable, and use explicit Skip, Keep both, or supported safe Replace behavior. See [SFTP files architecture](docs/architecture/sftp.md) for the safety contracts and limitations.
+
+`npm run dev` opens the frontend in a browser for UI work. It intentionally reports that desktop access is unavailable and does not simulate a connection. Services, Containers, Network, Security and Logs are reserved, disabled navigation entries.
 
 ## Workspace
 
@@ -28,6 +30,7 @@ Select **Terminal** on a connected host to open one or more real `xterm-256color
 | `crates/nexus-core` | Host repository, provider composition, session orchestration |
 | `crates/nexus-ssh` | SSH authentication, host-key verification, bounded sessions |
 | `crates/nexus-terminal` | Typed PTY ownership, lifecycle, buffering and teardown |
+| `crates/nexus-sftp` | SFTP v3 provider, typed file plans, paths and bounded transfers |
 | `crates/nexus-secrets` | OS keychain abstraction and encrypted credential vault |
 | `crates/nexus-discovery` | Independent probes, parsers and capabilities |
 | `crates/nexus-operations` | Read-only command allowlist, planning and policy |

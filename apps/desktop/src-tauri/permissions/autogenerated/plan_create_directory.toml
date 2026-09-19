@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-create-directory"
+description = "Enables the plan_create_directory command without any pre-configured scope."
+commands.allow = ["plan_create_directory"]
+
+[[permission]]
+identifier = "deny-plan-create-directory"
+description = "Denies the plan_create_directory command without any pre-configured scope."
+commands.deny = ["plan_create_directory"]
