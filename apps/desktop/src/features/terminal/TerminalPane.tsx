@@ -177,34 +177,44 @@ export function TerminalPane({
       queueInput(Uint8Array.from(data, (character) => character.charCodeAt(0) & 0xff)),
     );
     terminal.attachCustomKeyEventHandler((event) => {
-      if (event.type !== 'keydown' || !event.ctrlKey || !event.shiftKey) return true;
-      const key = event.key.toLowerCase();
-      if (key === 'c') {
+      if (
+        event.type !== 'keydown' ||
+        !event.ctrlKey ||
+        !event.shiftKey ||
+        event.altKey ||
+        event.metaKey ||
+        event.getModifierState('AltGraph')
+      ) return true;
+      let code = event.code;
+      if (!code || code === 'Unidentified') {
+        code = /^[a-z]$/i.test(event.key) ? `Key${event.key.toUpperCase()}` : '';
+      }
+      if (code === 'KeyC') {
         event.preventDefault();
         void copySelection().catch(() => onError('The selected text could not be copied.'));
         return false;
       }
-      if (key === 'v') {
+      if (code === 'KeyV') {
         event.preventDefault();
         void pasteClipboard().catch(() => onError('Clipboard text could not be pasted.'));
         return false;
       }
-      if (key === 'f') {
+      if (code === 'KeyF') {
         event.preventDefault();
         onOpenSearch();
         return false;
       }
-      if (key === 'k') {
+      if (code === 'KeyK') {
         event.preventDefault();
         terminal.clear();
         return false;
       }
-      if (key === 't') {
+      if (code === 'KeyT') {
         event.preventDefault();
         onNew();
         return false;
       }
-      if (key === 'w') {
+      if (code === 'KeyW') {
         event.preventDefault();
         onClose();
         return false;

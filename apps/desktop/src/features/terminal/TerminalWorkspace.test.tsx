@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   xtermWrites: [] as Uint8Array[],
   xtermWriteCallbacks: [] as Array<() => void>,
   xtermDataHandlers: [] as Array<(data: string) => void>,
+  xtermPassedKeys: [] as Array<{ key: string; code: string }>,
   xtermDisposals: 0,
 }));
 
@@ -92,6 +93,7 @@ vi.mock('@xterm/xterm', () => ({
       this.textarea = textarea;
       textarea.addEventListener('keydown', (event) => {
         if (this.keyHandler?.(event) === false) return;
+        mocks.xtermPassedKeys.push({ key: event.key, code: event.code });
         if (event.key === 'Escape') {
           this.dataHandler?.('\x1b');
         }
@@ -202,6 +204,7 @@ beforeEach(() => {
   mocks.xtermWrites.length = 0;
   mocks.xtermWriteCallbacks.length = 0;
   mocks.xtermDataHandlers.length = 0;
+  mocks.xtermPassedKeys.length = 0;
   mocks.xtermDisposals = 0;
 });
 
@@ -221,6 +224,125 @@ describe('TerminalWorkspace', () => {
       return input;
     });
   }
+
+  function terminalKeyDown(input: HTMLElement, options: KeyboardEventInit) {
+    const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...options });
+    fireEvent(input, event);
+    return event;
+  }
+
+  const applicationShortcuts = [
+    { code: 'KeyC', englishKey: 'c', cyrillicKey: 'с', action: 'copy' },
+    { code: 'KeyV', englishKey: 'v', cyrillicKey: 'в', action: 'paste' },
+    { code: 'KeyF', englishKey: 'f', cyrillicKey: 'ф', action: 'search' },
+    { code: 'KeyK', englishKey: 'k', cyrillicKey: 'к', action: 'clear' },
+    { code: 'KeyT', englishKey: 't', cyrillicKey: 'т', action: 'new' },
+    { code: 'KeyW', englishKey: 'w', cyrillicKey: 'ш', action: 'close' },
+  ] as const;
+
+  test.each(applicationShortcuts.flatMap(({ code, englishKey, cyrillicKey, action }) => [
+    { code, key: englishKey, layout: 'English', action },
+    { code, key: cyrillicKey, layout: 'Cyrillic', action },
+  ]))('Ctrl+Shift+$code performs $action once with $layout event.key', async ({ code, key, action }) => {
+    mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Shell')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    mocks.selectionAvailable = true;
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    const input = await activeTerminalInput();
+    input.focus();
+
+    const event = terminalKeyDown(input, { key, code, ctrlKey: true, shiftKey: true });
+    expect(event.defaultPrevented).toBe(true);
+    expect(mocks.xtermPassedKeys).toHaveLength(0);
+    if (action === 'copy') {
+      await waitFor(() => expect(mocks.writeText).toHaveBeenCalledTimes(1));
+      expect(mocks.writeText).toHaveBeenCalledWith('[selection]');
+    } else if (action === 'paste') {
+      await waitFor(() => expect(mocks.paste).toHaveBeenCalledTimes(1));
+      expect(mocks.readText).toHaveBeenCalledTimes(1);
+      expect(mocks.paste).toHaveBeenCalledWith('[clipboard]');
+    } else if (action === 'search') {
+      expect(screen.getByLabelText('Search terminal scrollback')).toHaveFocus();
+    } else if (action === 'clear') {
+      expect(mocks.clear).toHaveBeenCalledTimes(1);
+    } else if (action === 'new') {
+      await screen.findByRole('tab', { name: /Terminal 1/ });
+      expect(mocks.openCount).toBe(1);
+    } else {
+      await waitFor(() => expect(mocks.close).toHaveBeenCalledTimes(1));
+      expect(mocks.close).toHaveBeenCalledWith(expect.objectContaining({ id: 'terminal-a' }));
+    }
+    expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  test('leaves other terminal keys untouched, including Escape and AltGr', async () => {
+    mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Shell')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    const input = await activeTerminalInput();
+    input.focus();
+
+    const ordinaryKeys: KeyboardEventInit[] = [
+      { key: 'q', code: 'KeyQ', ctrlKey: true, shiftKey: true },
+      { key: 't', code: 'KeyQ', ctrlKey: true, shiftKey: true },
+      { key: 'т', code: 'KeyT', shiftKey: true },
+      { key: 'т', code: 'KeyT', ctrlKey: true },
+      { key: 't', code: 'KeyT', ctrlKey: true, shiftKey: true, altKey: true },
+      { key: 't', code: 'KeyT', ctrlKey: true, shiftKey: true, metaKey: true },
+      { key: 'Escape', code: 'Escape' },
+    ];
+    for (const options of ordinaryKeys) {
+      expect(terminalKeyDown(input, options).defaultPrevented).toBe(false);
+    }
+    const altGraph = new KeyboardEvent('keydown', {
+      key: 't', code: 'KeyT', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+    });
+    Object.defineProperty(altGraph, 'getModifierState', { value: (modifier: string) => modifier === 'AltGraph' });
+    fireEvent(input, altGraph);
+    expect(altGraph.defaultPrevented).toBe(false);
+    expect(mocks.xtermPassedKeys).toEqual([
+      ...ordinaryKeys.map(({ key, code }) => ({ key, code })),
+      { key: 't', code: 'KeyT' },
+    ]);
+    const outside = document.createElement('button');
+    document.body.append(outside);
+    expect(terminalKeyDown(outside, { key: 't', code: 'KeyT', ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(false);
+    outside.remove();
+    expect(mocks.openCount).toBe(0);
+    await waitFor(() => expect(mocks.write).toHaveBeenCalledTimes(1));
+    expect(mocks.write).toHaveBeenCalledWith(expect.objectContaining({ id: 'terminal-a' }), bytesToBase64(new Uint8Array([27])));
+  });
+
+  test('does not paste from an ended terminal and preserves repeat handling', async () => {
+    mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Ended shell', 'disconnected')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    const input = await activeTerminalInput();
+    input.focus();
+
+    expect(terminalKeyDown(input, { key: 'в', code: 'KeyV', ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(true);
+    expect(mocks.readText).not.toHaveBeenCalled();
+    expect(mocks.paste).not.toHaveBeenCalled();
+    expect(mocks.write).not.toHaveBeenCalled();
+    expect(terminalKeyDown(input, { key: 'к', code: 'KeyK', ctrlKey: true, shiftKey: true, repeat: true }).defaultPrevented).toBe(true);
+    expect(mocks.clear).toHaveBeenCalledTimes(1);
+    expect(terminalKeyDown(input, { key: 'к', code: 'KeyK', ctrlKey: true, shiftKey: true, repeat: true }).defaultPrevented).toBe(true);
+    expect(mocks.clear).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    { code: '', key: 't' },
+    { code: 'Unidentified', key: 'T' },
+  ])('uses a Latin fallback only when physical code is $code', async ({ code, key }) => {
+    mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Shell')]);
+    mocks.poll.mockImplementation(() => new Promise(() => {}));
+    render(<TerminalWorkspace host={host('host-a', 'Alpha')} visible onShowOverview={() => {}} />);
+    const input = await activeTerminalInput();
+
+    expect(terminalKeyDown(input, { key, code, ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(true);
+    await screen.findByRole('tab', { name: /Terminal 1/ });
+    expect(mocks.openCount).toBe(1);
+  });
 
   test('dismisses each enabled context action exactly once and moves focus to its destination', async () => {
     const user = userEvent.setup();
