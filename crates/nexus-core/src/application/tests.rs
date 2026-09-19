@@ -1045,7 +1045,11 @@ async fn active_disconnect_waits_for_owned_staging_cleanup_before_sftp_close() {
             session_id,
             client.info.id,
             vec![
-                nexus_sftp::open_local_source(source.clone(), "active-upload.bin".into()).unwrap(),
+                nexus_sftp::open_local_source(
+                    source.canonicalize().unwrap(),
+                    "active-upload.bin".into(),
+                )
+                .unwrap(),
             ],
             "/tmp".into(),
             ConflictPolicy::Replace,
@@ -1131,7 +1135,13 @@ async fn disconnect_waits_for_truthful_finalizing_commit_before_sftp_close() {
             host.id,
             session_id,
             client.info.id,
-            vec![nexus_sftp::open_local_source(source, "finalizing.bin".into()).unwrap()],
+            vec![
+                nexus_sftp::open_local_source(
+                    source.canonicalize().unwrap(),
+                    "finalizing.bin".into(),
+                )
+                .unwrap(),
+            ],
             "/tmp".into(),
             ConflictPolicy::Replace,
         )
@@ -1209,8 +1219,11 @@ async fn failed_owned_cleanup_blocks_disconnect_and_reports_failed_transfer() {
             session_id,
             client.info.id,
             vec![
-                nexus_sftp::open_local_source(source.clone(), "cleanup-failure.bin".into())
-                    .unwrap(),
+                nexus_sftp::open_local_source(
+                    source.canonicalize().unwrap(),
+                    "cleanup-failure.bin".into(),
+                )
+                .unwrap(),
             ],
             "/tmp".into(),
             ConflictPolicy::Replace,
@@ -1296,7 +1309,10 @@ async fn start_stalled_lifecycle_upload() -> (
             host.id,
             session_id,
             client.info.id,
-            vec![nexus_sftp::open_local_source(source.clone(), "active.bin".into()).unwrap()],
+            vec![
+                nexus_sftp::open_local_source(source.canonicalize().unwrap(), "active.bin".into())
+                    .unwrap(),
+            ],
             "/tmp".into(),
             ConflictPolicy::Replace,
         )
