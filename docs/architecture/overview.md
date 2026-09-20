@@ -43,7 +43,7 @@ Audit events contain host ID, UTC timestamp, operation identity and risk, actor,
 
 ## Frontend state and extension points
 
-TanStack Query owns host metadata/session snapshots. Zustand owns selection only. Credentials remain in uncontrolled form controls and one short-lived IPC payload; save bypasses mutation caches. Components are grouped into shell, hosts, connection and overview concerns. CSS tokens and primitives permit future light themes; only the dark theme is shipped.
+TanStack Query owns host metadata/session snapshots. Zustand owns selection only. Goal 02C remote text remains in component-local memory and its short-lived typed save authority; see [Remote text editor](editor.md). Credentials remain in uncontrolled form controls and one short-lived IPC payload; save bypasses mutation caches. Components are grouped into shell, hosts, connection and overview concerns. CSS tokens and primitives permit future light themes; only the dark theme is shipped.
 
 Capabilities use a validated registry and observed facts. Future service/container providers can add capability identifiers without changing SSH. The operation engine currently accepts only its private fixed-command plans with `ReadOnly` risk, supports validation and verification, and reports rollback as unnecessary. File mutations use the adjacent one-shot typed-plan boundary described in [SFTP files architecture](sftp.md). The fixed discovery engine still rejects write risk and tampered kinds.
 

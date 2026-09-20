@@ -20,6 +20,8 @@ fn main() {
             "open_sftp",
             "list_remote_directory",
             "remote_properties",
+            "open_remote_text_file",
+            "plan_remote_text_save",
             "choose_upload_files",
             "choose_download_directory",
             "plan_upload",

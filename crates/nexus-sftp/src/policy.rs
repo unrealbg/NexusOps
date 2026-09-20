@@ -1,11 +1,13 @@
 use crate::{
-    EntryIdentity, SftpClient, display_name, join_remote, validate_child_name,
-    validate_remote_path, validate_windows_file_name,
+    EditorRevision, EntryIdentity, SftpClient, display_name, encode_text, join_remote,
+    validate_child_name, validate_remote_path, validate_windows_file_name,
 };
 use nexus_model::{
-    AppError, ConflictPolicy, ErrorCode, FileOperationKind, FileOperationPlan, FilePlanId,
-    FilePlanItem, HostId, HostSessionId, OperationRisk, RemoteEntryKind, SftpSessionId,
+    AppError, ConflictPolicy, EditorDocumentId, ErrorCode, FileOperationKind, FileOperationPlan,
+    FilePlanId, FilePlanItem, HostId, HostSessionId, OperationRisk, RemoteEntryKind, SftpSessionId,
+    TextNewline,
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs::File,
@@ -16,6 +18,20 @@ use std::{
 
 const PLAN_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const PLAN_CAP: usize = 100;
+const DOCUMENT_LIFETIME: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Clone)]
+struct EditorDocumentAuthority {
+    host: HostId,
+    host_session: HostSessionId,
+    sftp: SftpSessionId,
+    path: String,
+    revision: EditorRevision,
+    content_digest: [u8; 32],
+    newline: TextNewline,
+    bom: bool,
+    expires: Instant,
+}
 
 #[derive(Clone, Debug)]
 pub struct LocalItem {
@@ -99,6 +115,13 @@ pub enum MutationSpec {
 
 #[derive(Clone)]
 pub enum PlanPayload {
+    EditorSave {
+        client: std::sync::Arc<dyn SftpClient>,
+        path: String,
+        expected: EditorRevision,
+        original_digest: [u8; 32],
+        bytes: Vec<u8>,
+    },
     Upload {
         client: std::sync::Arc<dyn SftpClient>,
         policy: ConflictPolicy,
@@ -127,6 +150,7 @@ struct StoredPlan {
 
 pub struct FilePlanStore {
     plans: Arc<Mutex<HashMap<FilePlanId, StoredPlan>>>,
+    documents: Arc<Mutex<HashMap<EditorDocumentId, EditorDocumentAuthority>>>,
     lifetime: Duration,
 }
 
@@ -134,6 +158,7 @@ impl Default for FilePlanStore {
     fn default() -> Self {
         Self {
             plans: Arc::default(),
+            documents: Arc::default(),
             lifetime: PLAN_LIFETIME,
         }
     }
@@ -148,6 +173,122 @@ impl FilePlanStore {
                 })
             });
         }
+        if let Ok(mut documents) = self.documents.lock() {
+            documents.retain(|_, value| value.host != host || value.host_session != host_session);
+        }
+    }
+
+    pub fn register_editor_document(
+        &self,
+        client: &dyn SftpClient,
+        path: String,
+        revision: EditorRevision,
+        original_bytes: &[u8],
+        newline: TextNewline,
+        bom: bool,
+    ) -> Result<EditorDocumentId, AppError> {
+        let info = client.info();
+        validate_remote_path(&path)?;
+        let mut documents = self
+            .documents
+            .lock()
+            .map_err(|_| policy_error("The editor authority store is unavailable."))?;
+        documents.retain(|_, value| {
+            value.expires > Instant::now()
+                && (
+                    value.host,
+                    value.host_session,
+                    value.sftp,
+                    value.path.as_str(),
+                ) != (info.host_id, info.host_session_id, info.id, path.as_str())
+        });
+        if documents.len() >= PLAN_CAP {
+            return Err(policy_error("Too many editor documents are open."));
+        }
+        let id = EditorDocumentId::new();
+        documents.insert(
+            id,
+            EditorDocumentAuthority {
+                host: info.host_id,
+                host_session: info.host_session_id,
+                sftp: info.id,
+                path,
+                revision,
+                content_digest: Sha256::digest(original_bytes).into(),
+                newline,
+                bom,
+                expires: Instant::now() + DOCUMENT_LIFETIME,
+            },
+        );
+        Ok(id)
+    }
+
+    pub async fn plan_editor_save(
+        &self,
+        client: std::sync::Arc<dyn SftpClient>,
+        document_id: EditorDocumentId,
+        text: String,
+    ) -> Result<FileOperationPlan, AppError> {
+        let info = client.info();
+        let document = {
+            let mut documents = self
+                .documents
+                .lock()
+                .map_err(|_| policy_error("The editor authority store is unavailable."))?;
+            let existing = documents
+                .get(&document_id)
+                .ok_or_else(|| policy_error("The editor document is stale; reload it."))?;
+            if existing.expires <= Instant::now()
+                || (existing.host, existing.host_session, existing.sftp)
+                    != (info.host_id, info.host_session_id, info.id)
+            {
+                return Err(policy_error(
+                    "The editor document belongs to an old or expired session.",
+                ));
+            }
+            documents
+                .remove(&document_id)
+                .expect("verified document token")
+        };
+        if !supports(&info, "posix-rename@openssh.com", "1") {
+            return Err(AppError::new(
+                ErrorCode::SftpUnavailable,
+                "Safe editor replacement requires posix-rename@openssh.com v1.",
+            ));
+        }
+        let bytes = encode_text(&text, document.newline, document.bom)?;
+        if client.editor_revision(&document.path).await? != document.revision {
+            return Err(AppError::new(
+                ErrorCode::Conflict,
+                "The remote file changed since it was opened.",
+            ));
+        }
+        let current_bytes = client.read_editor_bytes(&document.path).await?;
+        if <[u8; 32]>::from(Sha256::digest(&current_bytes)) != document.content_digest {
+            return Err(AppError::new(
+                ErrorCode::Conflict,
+                "The remote file contents changed since it was opened.",
+            ));
+        }
+        let view = self.insert(
+            info,
+            FileOperationKind::EditText,
+            OperationRisk::High,
+            None,
+            vec![FilePlanItem {
+                source_display: "Edited text".into(),
+                destination_display: display_name(&document.path),
+                size_bytes: Some(bytes.len().to_string()),
+            }],
+            PlanPayload::EditorSave {
+                client,
+                path: document.path,
+                expected: document.revision,
+                original_digest: document.content_digest,
+                bytes,
+            },
+        )?;
+        Ok(view)
     }
 
     /// Discards only the named pending plan. If execution consumed it first,
@@ -407,18 +548,19 @@ impl FilePlanStore {
         let stored = plans.get_mut(&id).ok_or_else(|| {
             policy_error("The file-operation plan is missing or was already used.")
         })?;
-        let plan = stored
-            .plan
-            .take()
-            .ok_or_else(|| policy_error("The file-operation plan was already used."))?;
-        if plan.view.host_id != host
-            || plan.view.host_session_id != host_session
-            || plan.view.sftp_session_id != sftp
-        {
+        if stored.plan.as_ref().is_none_or(|plan| {
+            plan.view.host_id != host
+                || plan.view.host_session_id != host_session
+                || plan.view.sftp_session_id != sftp
+        }) {
             return Err(policy_error(
                 "The file-operation plan does not belong to this host session.",
             ));
         }
+        let plan = stored
+            .plan
+            .take()
+            .ok_or_else(|| policy_error("The file-operation plan was already used."))?;
         Ok(plan)
     }
 
@@ -887,6 +1029,21 @@ mod tests {
                 Ok(None)
             }
         }
+        async fn editor_revision(&self, _: &str) -> Result<EditorRevision, AppError> {
+            Ok(EditorRevision {
+                identity: EntryIdentity {
+                    kind: RemoteEntryKind::File,
+                    size: Some(4),
+                    modified: Some(1),
+                },
+                raw_mode: 0o100640,
+                uid: 1000,
+                gid: 1000,
+            })
+        }
+        async fn read_editor_bytes(&self, _: &str) -> Result<Vec<u8>, AppError> {
+            Ok(b"data".to_vec())
+        }
         async fn create_dir(&self, _: &str) -> Result<(), AppError> {
             Err(unused())
         }
@@ -961,19 +1118,15 @@ mod tests {
                 .code,
             ErrorCode::FilePolicy
         );
-        assert_eq!(
-            store
-                .consume(
-                    first.id,
-                    first.host_id,
-                    first.host_session_id,
-                    first.sftp_session_id
-                )
-                .err()
-                .unwrap()
-                .code,
-            ErrorCode::FilePolicy
-        );
+        // A wrong owner cannot consume another session's authority.
+        store
+            .consume(
+                first.id,
+                first.host_id,
+                first.host_session_id,
+                first.sftp_session_id,
+            )
+            .unwrap();
 
         let replay = store
             .plan_mutation(
@@ -1033,6 +1186,166 @@ mod tests {
                 .code,
             ErrorCode::FilePolicy
         );
+    }
+
+    #[tokio::test]
+    async fn editor_plan_binds_session_revision_bytes_and_single_use() {
+        let client = PlanClient::with_extensions(vec![nexus_model::SftpExtension {
+            name: "posix-rename@openssh.com".into(),
+            version: "1".into(),
+        }]);
+        let store = FilePlanStore::default();
+        let revision = client.editor_revision("/home/test/a.txt").await.unwrap();
+        let document = store
+            .register_editor_document(
+                client.as_ref(),
+                "/home/test/a.txt".into(),
+                revision.clone(),
+                b"data",
+                TextNewline::CrLf,
+                true,
+            )
+            .unwrap();
+        let unrelated = PlanClient::with_extensions(client.info.extensions.clone());
+        assert!(
+            store
+                .plan_editor_save(unrelated, document, "wrong session".into())
+                .await
+                .is_err()
+        );
+        let plan = store
+            .plan_editor_save(client.clone(), document, "new\ntext".into())
+            .await
+            .unwrap();
+        assert_eq!(plan.kind, FileOperationKind::EditText);
+        assert!(
+            store
+                .consume(
+                    plan.id,
+                    HostId::new(),
+                    plan.host_session_id,
+                    plan.sftp_session_id
+                )
+                .is_err()
+        );
+        let consumed = store
+            .consume(
+                plan.id,
+                plan.host_id,
+                plan.host_session_id,
+                plan.sftp_session_id,
+            )
+            .unwrap();
+        match consumed.payload {
+            PlanPayload::EditorSave {
+                path,
+                expected,
+                bytes,
+                ..
+            } => {
+                assert_eq!(path, "/home/test/a.txt");
+                assert_eq!(expected, revision);
+                assert_eq!(bytes, b"\xef\xbb\xbfnew\r\ntext");
+            }
+            _ => panic!("wrong plan payload"),
+        }
+        assert!(
+            store
+                .consume(
+                    plan.id,
+                    plan.host_id,
+                    plan.host_session_id,
+                    plan.sftp_session_id
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .plan_editor_save(client.clone(), document, "again".into())
+                .await
+                .is_err()
+        );
+        let another = store
+            .register_editor_document(
+                client.as_ref(),
+                "/home/test/a.txt".into(),
+                revision,
+                b"data",
+                TextNewline::Lf,
+                false,
+            )
+            .unwrap();
+        let pending = store
+            .plan_editor_save(client.clone(), another, "cancel".into())
+            .await
+            .unwrap();
+        store
+            .discard(
+                pending.id,
+                plan.host_id,
+                plan.host_session_id,
+                plan.sftp_session_id,
+            )
+            .unwrap();
+        store
+            .discard(
+                pending.id,
+                plan.host_id,
+                plan.host_session_id,
+                plan.sftp_session_id,
+            )
+            .unwrap();
+        assert!(
+            store
+                .consume(
+                    pending.id,
+                    plan.host_id,
+                    plan.host_session_id,
+                    plan.sftp_session_id
+                )
+                .is_err()
+        );
+        let revoked = store
+            .register_editor_document(
+                client.as_ref(),
+                "/home/test/a.txt".into(),
+                client.editor_revision("/home/test/a.txt").await.unwrap(),
+                b"data",
+                TextNewline::Lf,
+                false,
+            )
+            .unwrap();
+        store.revoke_session(plan.host_id, plan.host_session_id);
+        assert!(
+            store
+                .plan_editor_save(client, revoked, "stale".into())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_editor_plans_consume_document_authority_once() {
+        let client = PlanClient::with_extensions(vec![nexus_model::SftpExtension {
+            name: "posix-rename@openssh.com".into(),
+            version: "1".into(),
+        }]);
+        let store = Arc::new(FilePlanStore::default());
+        let token = store
+            .register_editor_document(
+                client.as_ref(),
+                "/home/test/a.txt".into(),
+                client.editor_revision("/home/test/a.txt").await.unwrap(),
+                b"data",
+                TextNewline::Lf,
+                false,
+            )
+            .unwrap();
+        let (left, right) = tokio::join!(
+            store.plan_editor_save(client.clone(), token, "left".into()),
+            store.plan_editor_save(client.clone(), token, "right".into()),
+        );
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
     }
 
     #[tokio::test]
@@ -1305,6 +1618,7 @@ mod tests {
         std::fs::create_dir(&expiring_path).unwrap();
         let expiring_store = FilePlanStore {
             plans: Arc::default(),
+            documents: Arc::default(),
             lifetime: Duration::from_secs(10),
         };
         expiring_store

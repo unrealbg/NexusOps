@@ -13,6 +13,7 @@ vi.mock('../../api/client', async (original) => ({
   hostApi: { session: vi.fn() },
   filesApi: {
     open: vi.fn(), list: vi.fn(), properties: vi.fn(), chooseUploadFiles: vi.fn(),
+    openText: vi.fn(), planTextSave: vi.fn(),
     chooseDownloadDirectory: vi.fn(), planUpload: vi.fn(), planDownload: vi.fn(),
     planCreateDirectory: vi.fn(), planRename: vi.fn(), planDelete: vi.fn(),
     execute: vi.fn(), discardPlan: vi.fn(), discardGrant: vi.fn(),
@@ -67,6 +68,48 @@ beforeEach(() => {
 });
 
 describe('Files workspace boundaries', () => {
+  it('enables Edit only for one selected regular file', async () => {
+    vi.mocked(filesApi.list).mockImplementation(async (_, path) => ({
+      ...listing(path), entries: [
+        ...listing(path).entries,
+        { name: 'folder', displayName: 'folder', path: `${path}/folder`, kind: 'directory', sizeBytes: null, modifiedAt: null, permissions: null, uid: null, gid: null },
+        { name: 'link', displayName: 'link', path: `${path}/link`, kind: 'symlink', sizeBytes: null, modifiedAt: null, permissions: null, uid: null, gid: null },
+      ],
+    }));
+    renderFiles();
+    const edit = await screen.findByRole('button', { name: 'Edit' });
+    expect(edit).toBeDisabled();
+    await screen.findByRole('checkbox', { name: 'Select folder' });
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select folder' }));
+    expect(edit).toBeDisabled();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select folder' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select link' }));
+    expect(edit).toBeDisabled();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select link' }));
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select данни.bin' }));
+    expect(edit).toBeEnabled();
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select folder' }));
+    expect(edit).toBeDisabled();
+  });
+
+  it('keeps a dirty editor mounted while Files is hidden and blocks replacing it', async () => {
+    vi.mocked(filesApi.openText).mockResolvedValue({
+      id: 'document-a', hostId: host.id, hostSessionId: session.hostSessionId, sftpSessionId: session.id,
+      path: '/home/test/данни.bin', text: 'old', originalBytes: 3, newline: 'lf', bom: false, maxBytes: 1048576,
+    });
+    const result = renderFiles();
+    await screen.findByRole('checkbox', { name: 'Select данни.bin' });
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select данни.bin' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    const editor = await screen.findByRole('textbox', { name: 'Remote text' });
+    await userEvent.type(editor, 'new');
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled();
+    result.rerender(<QueryClientProvider client={result.client}><FilesWorkspace host={host} visible={false} onShowOverview={vi.fn()} /></QueryClientProvider>);
+    expect(screen.queryByRole('textbox', { name: 'Remote text' })).not.toBeInTheDocument();
+    result.rerender(<QueryClientProvider client={result.client}><FilesWorkspace host={host} visible onShowOverview={vi.fn()} /></QueryClientProvider>);
+    expect(screen.getByRole('textbox', { name: 'Remote text' })).toHaveValue('oldnew');
+    expect(filesApi.openText).toHaveBeenCalledOnce();
+  });
   it('does not surface a delayed upload plan after disconnect', async () => {
     const planning = deferred<FileOperationPlan>();
     vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);

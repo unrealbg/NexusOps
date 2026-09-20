@@ -1123,6 +1123,23 @@ h1 {
     Consolas,
     monospace;
 }
+.remote-text-editor {
+  padding: 20px;
+  border-top: 1px solid #3a464f;
+  min-width: 0;
+}
+.remote-text-editor header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+.remote-text-editor code { overflow-wrap: anywhere; }
+.remote-text-editor .field textarea {
+  min-height: 320px;
+  max-height: 60vh;
+  font-size: 13px;
+}
 .form-row {
   display: grid;
   gap: 14px;

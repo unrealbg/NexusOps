@@ -3040,6 +3040,7 @@ dependencies = [
  "nexus-model",
  "russh-sftp",
  "serde",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",

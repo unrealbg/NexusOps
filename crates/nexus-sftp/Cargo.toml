@@ -10,6 +10,7 @@ chrono.workspace = true
 nexus-model.workspace = true
 russh-sftp = "=3.0.0"
 serde.workspace = true
+sha2 = "0.10"
 tokio = { workspace = true, features = ["fs"] }
 tokio-util.workspace = true
 uuid.workspace = true

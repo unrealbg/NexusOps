@@ -14,6 +14,7 @@ import type {
   FileOperationPlan,
   LocalSelectionGrant,
   RemoteEntry,
+  RemoteTextDocument,
   SftpSessionInfo,
   TransferJob,
 } from '@nexusops/protocol';
@@ -104,6 +105,8 @@ export const filesApi = {
   open: (hostId: string) => request<SftpSessionInfo>('open_sftp', { hostId }),
   list: (session: SftpOwnership, path: string) => request<DirectoryListing>('list_remote_directory', { ...sftpArgs(session), path }),
   properties: (session: SftpOwnership, path: string) => request<RemoteEntry>('remote_properties', { ...sftpArgs(session), path }),
+  openText: (session: SftpOwnership, path: string) => request<RemoteTextDocument>('open_remote_text_file', { ...sftpArgs(session), path }),
+  planTextSave: (session: SftpOwnership, documentId: string, text: string) => request<FileOperationPlan>('plan_remote_text_save', { ...sftpArgs(session), documentId, text }),
   chooseUploadFiles: (session: SftpOwnership) => request<LocalSelectionGrant | null>('choose_upload_files', sftpArgs(session)),
   chooseDownloadDirectory: (session: SftpOwnership) => request<LocalSelectionGrant | null>('choose_download_directory', sftpArgs(session)),
   planUpload: (session: SftpOwnership, grantId: string, remoteDirectory: string, conflictPolicy: ConflictPolicy) => request<FileOperationPlan>('plan_upload', { request: { ...sftpArgs(session), grantId, remoteDirectory, conflictPolicy } }),
