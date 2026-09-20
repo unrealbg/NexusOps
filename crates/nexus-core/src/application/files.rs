@@ -5,13 +5,7 @@ use std::sync::Arc;
 impl Application {
     pub async fn open_sftp(&self, host_id: HostId) -> Result<SftpSessionInfo, AppError> {
         self.repository.get(host_id)?;
-        let startup = self
-            .sftp_startups
-            .lock()
-            .await
-            .entry(host_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
+        let startup = self.sftp_lifecycle_gate(host_id).await;
         let _startup_guard = startup.lock().await;
         let slot = self.slot(host_id).await;
         let (transport, connection_id, generation) = {
@@ -97,6 +91,8 @@ impl Application {
         remote_directory: String,
         policy: ConflictPolicy,
     ) -> Result<FileOperationPlan, AppError> {
+        let startup = self.sftp_lifecycle_gate(host_id).await;
+        let _startup_guard = startup.lock().await;
         let client = self
             .owned_sftp(host_id, host_session_id, sftp_session_id)
             .await?;
@@ -114,6 +110,8 @@ impl Application {
         local_directory: LocalDirectory,
         policy: ConflictPolicy,
     ) -> Result<FileOperationPlan, AppError> {
+        let startup = self.sftp_lifecycle_gate(host_id).await;
+        let _startup_guard = startup.lock().await;
         let client = self
             .owned_sftp(host_id, host_session_id, sftp_session_id)
             .await?;
@@ -133,6 +131,8 @@ impl Application {
     ) -> Result<FileOperationPlan, AppError> {
         nexus_sftp::validate_child_name(&name)?;
         let path = nexus_sftp::join_remote(&parent, &name)?;
+        let startup = self.sftp_lifecycle_gate(host_id).await;
+        let _startup_guard = startup.lock().await;
         let client = self
             .owned_sftp(host_id, host_session_id, sftp_session_id)
             .await?;
@@ -156,6 +156,8 @@ impl Application {
     ) -> Result<FileOperationPlan, AppError> {
         nexus_sftp::validate_child_name(&new_name)?;
         let destination = nexus_sftp::join_remote(&nexus_sftp::parent_remote(&source)?, &new_name)?;
+        let startup = self.sftp_lifecycle_gate(host_id).await;
+        let _startup_guard = startup.lock().await;
         let client = self
             .owned_sftp(host_id, host_session_id, sftp_session_id)
             .await?;
@@ -195,6 +197,8 @@ impl Application {
         sftp_session_id: SftpSessionId,
         path: String,
     ) -> Result<FileOperationPlan, AppError> {
+        let startup = self.sftp_lifecycle_gate(host_id).await;
+        let _startup_guard = startup.lock().await;
         let client = self
             .owned_sftp(host_id, host_session_id, sftp_session_id)
             .await?;
@@ -228,13 +232,7 @@ impl Application {
         sftp_session_id: SftpSessionId,
         plan_id: FilePlanId,
     ) -> Result<Vec<TransferJob>, AppError> {
-        let startup = self
-            .sftp_startups
-            .lock()
-            .await
-            .entry(host_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
+        let startup = self.sftp_lifecycle_gate(host_id).await;
         let _startup_guard = startup.lock().await;
         self.owned_sftp(host_id, host_session_id, sftp_session_id)
             .await?;
@@ -313,13 +311,7 @@ impl Application {
         host_id: HostId,
         host_session_id: HostSessionId,
     ) -> Result<(), AppError> {
-        let startup = self
-            .sftp_startups
-            .lock()
-            .await
-            .entry(host_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
+        let startup = self.sftp_lifecycle_gate(host_id).await;
         let _startup_guard = startup.lock().await;
         self.file_plans.revoke_session(host_id, host_session_id);
         self.transfers
@@ -349,6 +341,15 @@ impl Application {
         self.owned_sftp(host_id, host_session_id, sftp_session_id)
             .await
             .map(|_| ())
+    }
+
+    async fn sftp_lifecycle_gate(&self, host_id: HostId) -> Arc<tokio::sync::Mutex<()>> {
+        self.sftp_startups
+            .lock()
+            .await
+            .entry(host_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     async fn owned_sftp(

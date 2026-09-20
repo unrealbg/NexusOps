@@ -700,6 +700,11 @@ struct LifecycleSftpClient {
     info: SftpSessionInfo,
     closes: AtomicUsize,
     identity_calls: AtomicUsize,
+    stall_plan_identity: AtomicBool,
+    stall_plan_stat: AtomicBool,
+    plan_remote_started: Notify,
+    plan_remote_release: Notify,
+    closed: Notify,
     upload_failures: std::sync::Mutex<std::collections::VecDeque<nexus_sftp::StagedUploadFailure>>,
     stall_owned_upload: AtomicBool,
     upload_started: Notify,
@@ -737,6 +742,11 @@ impl LifecycleSftpClient {
             },
             closes: AtomicUsize::new(0),
             identity_calls: AtomicUsize::new(0),
+            stall_plan_identity: AtomicBool::new(false),
+            stall_plan_stat: AtomicBool::new(false),
+            plan_remote_started: Notify::new(),
+            plan_remote_release: Notify::new(),
+            closed: Notify::new(),
             upload_failures: std::sync::Mutex::new(std::collections::VecDeque::new()),
             stall_owned_upload: AtomicBool::new(false),
             upload_started: Notify::new(),
@@ -764,12 +774,39 @@ impl nexus_sftp::SftpClient for LifecycleSftpClient {
     async fn list(&self, _: &str, _: CancellationToken) -> Result<DirectoryListing, AppError> {
         Err(unused_sftp())
     }
-    async fn stat(&self, _: &str) -> Result<RemoteEntry, AppError> {
-        Err(unused_sftp())
+    async fn stat(&self, path: &str) -> Result<RemoteEntry, AppError> {
+        if self.stall_plan_stat.swap(false, Ordering::SeqCst) {
+            self.plan_remote_started.notify_one();
+            self.plan_remote_release.notified().await;
+        }
+        if path != "/tmp/remote-source.bin" {
+            return Err(unused_sftp());
+        }
+        Ok(RemoteEntry {
+            name: "remote-source.bin".into(),
+            display_name: "remote-source.bin".into(),
+            path: path.into(),
+            kind: RemoteEntryKind::File,
+            size_bytes: Some("4".into()),
+            modified_at: None,
+            permissions: None,
+            uid: None,
+            gid: None,
+        })
     }
-    async fn identity(&self, _: &str) -> Result<Option<nexus_sftp::EntryIdentity>, AppError> {
+    async fn identity(&self, path: &str) -> Result<Option<nexus_sftp::EntryIdentity>, AppError> {
         self.identity_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(None)
+        if self.stall_plan_identity.swap(false, Ordering::SeqCst) {
+            self.plan_remote_started.notify_one();
+            self.plan_remote_release.notified().await;
+        }
+        Ok(
+            (path == "/tmp/remote-source.bin").then_some(nexus_sftp::EntryIdentity {
+                kind: RemoteEntryKind::File,
+                size: Some(4),
+                modified: Some(1),
+            }),
+        )
     }
     async fn create_dir(&self, _: &str) -> Result<(), AppError> {
         Err(unused_sftp())
@@ -862,6 +899,233 @@ impl nexus_sftp::SftpClient for LifecycleSftpClient {
     }
     async fn close(&self) {
         self.closes.fetch_add(1, Ordering::SeqCst);
+        self.closed.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn disconnect_cannot_revoke_before_inflight_upload_plan_is_published() {
+    let (_profile, app, _) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session_id = app
+        .slot(host.id)
+        .await
+        .data
+        .lock()
+        .await
+        .connection_id
+        .unwrap();
+    let client = LifecycleSftpClient::new(host.id, session_id);
+    client.stall_plan_identity.store(true, Ordering::SeqCst);
+    app.sftp_sessions
+        .lock()
+        .await
+        .insert(host.id, client.clone());
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("pending.bin");
+    std::fs::write(&path, b"pending upload").unwrap();
+    let source =
+        nexus_sftp::open_local_source(path.canonicalize().unwrap(), "pending.bin".into()).unwrap();
+    let source_handle = Arc::downgrade(&source.handle);
+    let planning_app = app.clone();
+    let sftp_id = client.info.id;
+    let planning = tokio::spawn(async move {
+        planning_app
+            .plan_upload(
+                host.id,
+                session_id,
+                sftp_id,
+                vec![source],
+                "/tmp".into(),
+                ConflictPolicy::Replace,
+            )
+            .await
+    });
+    let plan = finish_plan_before_disconnect(&app, host.id, session_id, &client, planning).await;
+    assert!(
+        source_handle.upgrade().is_none(),
+        "the local source handle survived disconnect"
+    );
+    app.connect_host(host.id).await.unwrap();
+    let new_session = app
+        .slot(host.id)
+        .await
+        .data
+        .lock()
+        .await
+        .connection_id
+        .unwrap();
+    let new_client = LifecycleSftpClient::new(host.id, new_session);
+    app.sftp_sessions
+        .lock()
+        .await
+        .insert(host.id, new_client.clone());
+    assert_ne!(new_session, session_id);
+    assert!(
+        app.execute_file_plan(host.id, new_session, new_client.info.id, plan.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_file_plan(host.id, session_id, sftp_id, plan.id)
+            .await
+            .is_err()
+    );
+}
+
+async fn finish_plan_before_disconnect(
+    app: &Arc<Application>,
+    host: HostId,
+    host_session: HostSessionId,
+    client: &Arc<LifecycleSftpClient>,
+    planning: tokio::task::JoinHandle<Result<FileOperationPlan, AppError>>,
+) -> FileOperationPlan {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.plan_remote_started.notified(),
+    )
+    .await
+    .expect("planning reached remote operation after ownership validation");
+    let disconnect_app = app.clone();
+    let disconnecting = tokio::spawn(async move { disconnect_app.disconnect_host(host).await });
+    let closed_before_publication = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        client.closed.notified(),
+    )
+    .await
+    .is_ok();
+    client.plan_remote_release.notify_one();
+    let plan = planning.await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), disconnecting)
+        .await
+        .expect("disconnect completed")
+        .unwrap()
+        .unwrap();
+    let stale_plan_published = app
+        .file_plans
+        .consume(plan.id, host, host_session, client.info.id)
+        .is_ok();
+    assert!(
+        !stale_plan_published,
+        "an old-session plan was published after revocation"
+    );
+    assert!(
+        !closed_before_publication,
+        "SFTP closed while remote planning was in flight"
+    );
+    assert_eq!(client.closes.load(Ordering::SeqCst), 1);
+    plan
+}
+
+#[tokio::test]
+async fn disconnect_releases_inflight_download_directory_plan() {
+    let (_profile, app, _) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session_id = app
+        .slot(host.id)
+        .await
+        .data
+        .lock()
+        .await
+        .connection_id
+        .unwrap();
+    let client = LifecycleSftpClient::new(host.id, session_id);
+    client.stall_plan_stat.store(true, Ordering::SeqCst);
+    app.sftp_sessions
+        .lock()
+        .await
+        .insert(host.id, client.clone());
+    let directory = tempfile::tempdir().unwrap();
+    let destination =
+        nexus_sftp::open_local_directory(directory.path().canonicalize().unwrap()).unwrap();
+    let directory_handle = Arc::downgrade(&destination.handle);
+    let planning_app = app.clone();
+    let sftp_id = client.info.id;
+    let planning = tokio::spawn(async move {
+        planning_app
+            .plan_download(
+                host.id,
+                session_id,
+                sftp_id,
+                vec!["/tmp/remote-source.bin".into()],
+                destination,
+                ConflictPolicy::Replace,
+            )
+            .await
+    });
+    finish_plan_before_disconnect(&app, host.id, session_id, &client, planning).await;
+    assert!(
+        directory_handle.upgrade().is_none(),
+        "the local directory handle survived disconnect"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_serializes_all_mutation_plan_publications() {
+    for mutation in ["create", "rename", "delete"] {
+        let (_profile, app, _) = setup(false);
+        let host = app.save_host(input(), Some(credential())).await.unwrap();
+        app.connect_host(host.id).await.unwrap();
+        let session_id = app
+            .slot(host.id)
+            .await
+            .data
+            .lock()
+            .await
+            .connection_id
+            .unwrap();
+        let client = LifecycleSftpClient::new(host.id, session_id);
+        if mutation == "delete" {
+            client.stall_plan_stat.store(true, Ordering::SeqCst);
+        } else {
+            client.stall_plan_identity.store(true, Ordering::SeqCst);
+        }
+        app.sftp_sessions
+            .lock()
+            .await
+            .insert(host.id, client.clone());
+        let planning_app = app.clone();
+        let sftp_id = client.info.id;
+        let planning = tokio::spawn(async move {
+            match mutation {
+                "create" => {
+                    planning_app
+                        .plan_create_directory(
+                            host.id,
+                            session_id,
+                            sftp_id,
+                            "/tmp".into(),
+                            "new-directory".into(),
+                        )
+                        .await
+                }
+                "rename" => {
+                    planning_app
+                        .plan_rename(
+                            host.id,
+                            session_id,
+                            sftp_id,
+                            "/tmp/remote-source.bin".into(),
+                            "renamed.bin".into(),
+                        )
+                        .await
+                }
+                "delete" => {
+                    planning_app
+                        .plan_delete(
+                            host.id,
+                            session_id,
+                            sftp_id,
+                            "/tmp/remote-source.bin".into(),
+                        )
+                        .await
+                }
+                _ => unreachable!(),
+            }
+        });
+        finish_plan_before_disconnect(&app, host.id, session_id, &client, planning).await;
     }
 }
 
