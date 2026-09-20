@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DirectoryListing, SftpSessionInfo } from '@nexusops/protocol';
+import type { DirectoryListing, FileOperationPlan, SftpSessionInfo } from '@nexusops/protocol';
 import { hostApi, filesApi } from '../../api/client';
-import { connected, host } from '../../test/fixtures';
+import { hostKeys } from '../../api/queries';
+import { connected, disconnected, host } from '../../test/fixtures';
 import { FilesWorkspace } from './FilesWorkspace';
 
 vi.mock('../../api/client', async (original) => ({
@@ -40,6 +41,17 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function uploadPlan(id = 'plan-upload'): FileOperationPlan {
+  return {
+    id, hostId: host.id, hostSessionId: session.hostSessionId, sftpSessionId: session.id,
+    kind: 'upload', risk: 'moderate', conflictPolicy: 'skip', items: [], expiresAt: '2026-10-01T20:00:00Z',
+  };
+}
+
+const nextSession: SftpSessionInfo = { ...session, id: 'sftp-2', hostSessionId: 'connection-2' };
+
+const uploadGrant = { id: 'grant-upload', kind: 'uploadFiles' as const, items: [], expiresAt: '2026-10-01T20:00:00Z' };
+
 function renderFiles(visible = true) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const result = render(<QueryClientProvider client={client}><FilesWorkspace host={host} visible={visible} onShowOverview={vi.fn()} /></QueryClientProvider>);
@@ -55,6 +67,174 @@ beforeEach(() => {
 });
 
 describe('Files workspace boundaries', () => {
+  it('does not surface a delayed upload plan after disconnect', async () => {
+    const planning = deferred<FileOperationPlan>();
+    vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
+    vi.mocked(filesApi.planUpload).mockReturnValue(planning.promise);
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    await waitFor(() => expect(filesApi.planUpload).toHaveBeenCalledOnce());
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), disconnected); });
+    await screen.findByText(/Connect this host to browse files/);
+    await act(async () => { planning.resolve(uploadPlan()); await planning.promise; });
+    expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
+    expect(filesApi.discardPlan).toHaveBeenCalledWith(session, 'plan-upload');
+  });
+
+  it('does not rebind an old upload approval to a new SFTP session', async () => {
+    const planning = deferred<FileOperationPlan>();
+    vi.mocked(filesApi.open).mockResolvedValueOnce(session).mockResolvedValueOnce(nextSession);
+    vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
+    vi.mocked(filesApi.planUpload).mockReturnValue(planning.promise);
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    await waitFor(() => expect(filesApi.planUpload).toHaveBeenCalledOnce());
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), disconnected); });
+    await screen.findByText(/Connect this host to browse files/);
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), connected); });
+    await waitFor(() => expect(filesApi.list).toHaveBeenCalledWith(nextSession, '/home/test'));
+    await act(async () => { planning.resolve(uploadPlan()); await planning.promise; });
+    expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
+    expect(filesApi.discardPlan).toHaveBeenCalledWith(session, 'plan-upload');
+    expect(filesApi.discardPlan).not.toHaveBeenCalledWith(nextSession, 'plan-upload');
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('ignores an old planning response when a visible reopen replaces SFTP identity', async () => {
+    const planning = deferred<FileOperationPlan>();
+    vi.mocked(filesApi.open).mockResolvedValueOnce(session).mockResolvedValueOnce(nextSession);
+    vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
+    vi.mocked(filesApi.planUpload).mockReturnValue(planning.promise);
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    await waitFor(() => expect(filesApi.planUpload).toHaveBeenCalledOnce());
+    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible={false} onShowOverview={vi.fn()} /></QueryClientProvider>);
+    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible onShowOverview={vi.fn()} /></QueryClientProvider>);
+    await waitFor(() => expect(filesApi.list).toHaveBeenCalledWith(nextSession, '/home/test'));
+    await act(async () => { planning.resolve(uploadPlan()); await planning.promise; });
+    expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
+    expect(filesApi.discardPlan).toHaveBeenCalledWith(session, 'plan-upload');
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('ignores a delayed download plan after disconnect and discards under its old owner', async () => {
+    const planning = deferred<FileOperationPlan>();
+    vi.mocked(filesApi.chooseDownloadDirectory).mockResolvedValue({
+      id: 'grant-download', kind: 'downloadDirectory', items: [], expiresAt: '2026-10-01T20:00:00Z',
+    });
+    vi.mocked(filesApi.planDownload).mockReturnValue(planning.promise);
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select данни.bin' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Download selected…' }));
+    await waitFor(() => expect(filesApi.planDownload).toHaveBeenCalledOnce());
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), disconnected); });
+    await screen.findByText(/Connect this host to browse files/);
+    const plan = { ...uploadPlan('plan-download-stale'), kind: 'download' as const };
+    await act(async () => { planning.resolve(plan); await planning.promise; });
+    expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
+    expect(filesApi.discardPlan).toHaveBeenCalledWith(session, 'plan-download-stale');
+  });
+
+  it('removes an already visible approval when the host disconnects', async () => {
+    vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
+    vi.mocked(filesApi.planUpload).mockResolvedValue(uploadPlan());
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    expect(await screen.findByRole('dialog', { name: 'Approve file operation' })).toBeInTheDocument();
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), disconnected); });
+    await screen.findByText(/Connect this host to browse files/);
+    expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('executes a current approval once and removes it before a second click', async () => {
+    vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
+    vi.mocked(filesApi.planUpload).mockResolvedValue(uploadPlan());
+    vi.mocked(filesApi.execute).mockResolvedValue([]);
+    renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    const approve = await screen.findByRole('button', { name: 'Approve and execute' });
+    await act(async () => { fireEvent.click(approve); fireEvent.click(approve); });
+    await waitFor(() => expect(filesApi.execute).toHaveBeenCalledTimes(1));
+    expect(filesApi.execute).toHaveBeenCalledWith(session, 'plan-upload');
+    expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
+  });
+
+  it('handles an in-flight Approve rejection after disconnect without retrying', async () => {
+    let rejectExecute!: (reason: Error) => void;
+    vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
+    vi.mocked(filesApi.planUpload).mockResolvedValue(uploadPlan());
+    vi.mocked(filesApi.execute).mockReturnValue(new Promise((_, reject) => { rejectExecute = reject; }));
+    vi.mocked(filesApi.discardPlan).mockResolvedValue(undefined);
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Approve and execute' }));
+    expect(filesApi.execute).toHaveBeenCalledTimes(1);
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), disconnected); });
+    await screen.findByText(/Connect this host to browse files/);
+    await act(async () => { rejectExecute(new Error('SFTP closed')); });
+    expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
+    expect(filesApi.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a visible old approval when SFTP identity changes on reopen', async () => {
+    vi.mocked(filesApi.open).mockResolvedValueOnce(session).mockResolvedValueOnce(nextSession);
+    vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
+    vi.mocked(filesApi.planUpload).mockResolvedValue(uploadPlan());
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    expect(await screen.findByRole('dialog', { name: 'Approve file operation' })).toBeInTheDocument();
+    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible={false} onShowOverview={vi.fn()} /></QueryClientProvider>);
+    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible onShowOverview={vi.fn()} /></QueryClientProvider>);
+    await waitFor(() => expect(filesApi.list).toHaveBeenCalledWith(nextSession, '/home/test'));
+    expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('ignores a delayed create-directory plan after disconnect', async () => {
+    const planning = deferred<FileOperationPlan>();
+    vi.mocked(filesApi.planCreateDirectory).mockReturnValue(planning.promise);
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'New directory' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'Name' }), 'new-directory');
+    await userEvent.click(screen.getByRole('button', { name: 'Review plan' }));
+    await waitFor(() => expect(filesApi.planCreateDirectory).toHaveBeenCalledOnce());
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), disconnected); });
+    await screen.findByText(/Connect this host to browse files/);
+    const plan = { ...uploadPlan('plan-create-stale'), kind: 'createDirectory' as const, conflictPolicy: null };
+    await act(async () => { planning.resolve(plan); await planning.promise; });
+    expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
+    expect(filesApi.discardPlan).toHaveBeenCalledWith(session, 'plan-create-stale');
+  });
+
+  it('handles a rejected Cancel around turnover without double-discard or an unhandled rejection', async () => {
+    vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
+    vi.mocked(filesApi.planUpload).mockResolvedValue(uploadPlan());
+    vi.mocked(filesApi.discardPlan).mockRejectedValue(new Error('SFTP closed'));
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    const close = await screen.findByRole('button', { name: 'Close dialog' });
+    await act(async () => {
+      fireEvent.click(close);
+      fireEvent.click(close);
+      view.client.setQueryData(hostKeys.session(host.id), disconnected);
+    });
+    await screen.findByText(/Connect this host to browse files/);
+    expect(filesApi.discardPlan).toHaveBeenCalledTimes(1);
+    expect(filesApi.discardPlan).toHaveBeenCalledWith(session, 'plan-upload');
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
   it('keeps the picker target bound to the directory visible when selection began', async () => {
     const picker = deferred<{ id: string; kind: 'uploadFiles'; items: []; expiresAt: string } | null>();
     vi.mocked(filesApi.chooseUploadFiles).mockReturnValue(picker.promise);
@@ -125,6 +305,7 @@ describe('Files workspace boundaries', () => {
     expect(await screen.findByText('C:\\Users\\owner\\Downloads\\данни (1).bin')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(filesApi.discardPlan).toHaveBeenCalledWith(session, 'plan-download'));
+    expect(filesApi.discardPlan).toHaveBeenCalledTimes(1);
     expect(filesApi.execute).not.toHaveBeenCalled();
   });
 });

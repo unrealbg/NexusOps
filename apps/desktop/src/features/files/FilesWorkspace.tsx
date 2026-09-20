@@ -7,6 +7,15 @@ import { applicationError, filesApi } from '../../api/client';
 import { useHostSession } from '../../api/queries';
 
 type EntryDialog = { type: 'mkdir'; value: string } | { type: 'rename'; entry: RemoteEntry; value: string } | null;
+type Approval = { session: SftpSessionInfo; generation: number; plans: FileOperationPlan[] };
+
+function sameSession(left: SftpSessionInfo, right: SftpSessionInfo) {
+  return left.hostId === right.hostId && left.hostSessionId === right.hostSessionId && left.id === right.id;
+}
+
+function ownsPlan(session: SftpSessionInfo, plan: FileOperationPlan) {
+  return session.hostId === plan.hostId && session.hostSessionId === plan.hostSessionId && session.id === plan.sftpSessionId;
+}
 
 export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; visible: boolean; onShowOverview: () => void }) {
   const connection = useHostSession(host.id);
@@ -24,14 +33,39 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   const [conflictPolicy, setConflictPolicy] = useState<ConflictPolicy>('skip');
-  const [plans, setPlans] = useState<FileOperationPlan[]>([]);
+  const [approval, setApproval] = useState<Approval | null>(null);
   const [dialog, setDialog] = useState<EntryDialog>(null);
   const [properties, setProperties] = useState<RemoteEntry | null>(null);
   const [transfers, setTransfers] = useState<TransferJob[]>([]);
   const requestGeneration = useRef(0);
+  const approvalGeneration = useRef(0);
+  const activeSession = useRef<SftpSessionInfo | null>(null);
+  const approvalRef = useRef<Approval | null>(null);
 
   const connected = connection.data?.state === 'connected';
-  const canMutate = connected && !!sftp && !stale && !loading;
+  const canMutate = connected && !!sftp && sftp.hostId === host.id && !stale && !loading;
+  const liveApproval = connected && approval && sftp && sameSession(approval.session, sftp) ? approval : null;
+
+  function clearApproval() {
+    approvalRef.current = null;
+    setApproval(null);
+  }
+  function isCurrent(session: SftpSessionInfo, generation: number) {
+    return generation === approvalGeneration.current && !!activeSession.current && sameSession(session, activeSession.current);
+  }
+  function discardStale(session: SftpSessionInfo, plans: FileOperationPlan[]) {
+    void Promise.allSettled(plans.filter((plan) => ownsPlan(session, plan)).map((plan) => filesApi.discardPlan(session, plan.id)));
+  }
+  function publishPlans(session: SftpSessionInfo, generation: number, plans: FileOperationPlan[]) {
+    if (!isCurrent(session, generation) || plans.some((plan) => !ownsPlan(session, plan))) {
+      discardStale(session, plans);
+      return;
+    }
+    if (approvalRef.current) discardStale(approvalRef.current.session, approvalRef.current.plans);
+    const next = { session, generation, plans };
+    approvalRef.current = next;
+    setApproval(next);
+  }
 
   async function loadDirectory(session: SftpSessionInfo, target: string, mode: 'push' | 'replace' | 'history' = 'push') {
     const generation = ++requestGeneration.current;
@@ -59,20 +93,31 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   }
 
   useEffect(() => {
-    if (!visible) return;
     if (!connected) {
       requestGeneration.current += 1;
+      approvalGeneration.current += 1;
+      activeSession.current = null;
+      approvalRef.current = null;
       let active = true;
       void Promise.resolve().then(() => {
         if (!active) return;
         setSftp(null);
+        setApproval(null);
         if (listing) setStale(true);
       });
       return () => { active = false; };
     }
+    if (!visible) return;
     let active = true;
     void filesApi.open(host.id).then((session) => {
       if (!active) return;
+      if (!activeSession.current || !sameSession(activeSession.current, session)) {
+        approvalGeneration.current += 1;
+        approvalRef.current = null;
+        setApproval(null);
+        requestGeneration.current += 1;
+      }
+      activeSession.current = session;
       setSftp(session);
       void loadDirectory(session, listing?.path ?? session.rootPath, listing ? 'history' : 'replace');
     }).catch((reason) => { if (active) setError(applicationError(reason).message); });
@@ -112,51 +157,94 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
     setSelected((current) => { const next = new Set(current); if (checked) next.add(path); else next.delete(path); return next; });
   }
   async function upload() {
-    const session = owner(); const target = listing?.path; if (!target) return;
-    setError(null);
-    try { const grant = await filesApi.chooseUploadFiles(session); if (!grant) return; setPlans([await filesApi.planUpload(session, grant.id, target, conflictPolicy)]); }
-    catch (reason) { setError(applicationError(reason).message); }
-  }
-  async function download() {
-    const session = owner(); const paths = selectedEntries.filter((entry) => entry.kind === 'file').map((entry) => entry.path); if (!paths.length) return;
-    setError(null);
-    try { const grant = await filesApi.chooseDownloadDirectory(session); if (!grant) return; setPlans([await filesApi.planDownload(session, grant.id, paths, conflictPolicy)]); }
-    catch (reason) { setError(applicationError(reason).message); }
-  }
-  async function prepareDelete() {
-    const session = owner(); setError(null);
-    const next: FileOperationPlan[] = [];
-    try { for (const entry of selectedEntries) next.push(await filesApi.planDelete(session, entry.path)); setPlans(next); }
-    catch (reason) { await Promise.allSettled(next.map((plan) => filesApi.discardPlan(session, plan.id))); setError(applicationError(reason).message); }
-  }
-  async function prepareEntryDialog() {
-    const session = owner(); if (!dialog || !listing) return;
+    let session: SftpSessionInfo | null = null;
+    let generation = approvalGeneration.current;
     setError(null);
     try {
+      session = owner(); generation = approvalGeneration.current; const target = listing?.path; if (!target) return;
+      const grant = await filesApi.chooseUploadFiles(session); if (!grant) return;
+      if (!isCurrent(session, generation)) { void filesApi.discardGrant(session, grant.id).catch(() => undefined); return; }
+      publishPlans(session, generation, [await filesApi.planUpload(session, grant.id, target, conflictPolicy)]);
+    } catch (reason) { if (session && isCurrent(session, generation)) setError(applicationError(reason).message); }
+  }
+  async function download() {
+    let session: SftpSessionInfo | null = null;
+    let generation = approvalGeneration.current;
+    setError(null);
+    try {
+      session = owner(); generation = approvalGeneration.current;
+      const paths = selectedEntries.filter((entry) => entry.kind === 'file').map((entry) => entry.path); if (!paths.length) return;
+      const grant = await filesApi.chooseDownloadDirectory(session); if (!grant) return;
+      if (!isCurrent(session, generation)) { void filesApi.discardGrant(session, grant.id).catch(() => undefined); return; }
+      publishPlans(session, generation, [await filesApi.planDownload(session, grant.id, paths, conflictPolicy)]);
+    } catch (reason) { if (session && isCurrent(session, generation)) setError(applicationError(reason).message); }
+  }
+  async function prepareDelete() {
+    let session: SftpSessionInfo | null = null;
+    let generation = approvalGeneration.current;
+    setError(null);
+    const next: FileOperationPlan[] = [];
+    try {
+      session = owner(); generation = approvalGeneration.current;
+      for (const entry of selectedEntries) {
+        if (!isCurrent(session, generation)) break;
+        next.push(await filesApi.planDelete(session, entry.path));
+      }
+      if (next.length) publishPlans(session, generation, next);
+    } catch (reason) {
+      if (session) discardStale(session, next);
+      if (session && isCurrent(session, generation)) setError(applicationError(reason).message);
+    }
+  }
+  async function prepareEntryDialog() {
+    setError(null);
+    let session: SftpSessionInfo | null = null;
+    let generation = approvalGeneration.current;
+    try {
+      session = owner(); generation = approvalGeneration.current; if (!dialog || !listing) return;
       const plan = dialog.type === 'mkdir'
         ? await filesApi.planCreateDirectory(session, listing.path, dialog.value)
         : await filesApi.planRename(session, dialog.entry.path, dialog.value);
-      setDialog(null); setPlans([plan]);
-    } catch (reason) { setError(applicationError(reason).message); }
+      if (isCurrent(session, generation)) setDialog(null);
+      publishPlans(session, generation, [plan]);
+    } catch (reason) { if (session && isCurrent(session, generation)) setError(applicationError(reason).message); }
   }
   async function executePlans() {
-    const session = owner(); const accepted = plans; setPlans([]); setError(null);
-    try { for (const plan of accepted) await filesApi.execute(session, plan.id); if (listing) await loadDirectory(session, listing.path, 'history'); }
-    catch (reason) { await Promise.allSettled(accepted.map((plan) => filesApi.discardPlan(session, plan.id))); setError(applicationError(reason).message); }
+    const pending = approvalRef.current; if (!pending) return;
+    clearApproval(); setError(null);
+    try {
+      const session = owner();
+      if (!isCurrent(pending.session, pending.generation) || !sameSession(session, pending.session)) {
+        discardStale(pending.session, pending.plans);
+        return;
+      }
+      for (const plan of pending.plans) {
+        if (!isCurrent(session, pending.generation)) { discardStale(session, pending.plans); return; }
+        await filesApi.execute(session, plan.id);
+      }
+      if (listing && isCurrent(session, pending.generation)) await loadDirectory(session, listing.path, 'history');
+    } catch (reason) {
+      discardStale(pending.session, pending.plans);
+      if (isCurrent(pending.session, pending.generation)) setError(applicationError(reason).message);
+    }
   }
   async function discardPlans() {
-    const pending = plans;
-    setPlans([]);
-    if (!sftp) return;
-    const results = await Promise.allSettled(pending.map((plan) => filesApi.discardPlan(sftp, plan.id)));
+    const pending = approvalRef.current; if (!pending) return;
+    clearApproval();
+    const results = await Promise.allSettled(pending.plans.map((plan) => filesApi.discardPlan(pending.session, plan.id)));
     const failure = results.find((result) => result.status === 'rejected');
-    if (failure?.status === 'rejected') setError(applicationError(failure.reason).message);
+    if (failure?.status === 'rejected' && isCurrent(pending.session, pending.generation)) setError(applicationError(failure.reason).message);
   }
   async function showProperties(entry: RemoteEntry) {
     try { setProperties(await filesApi.properties(owner(), entry.path)); } catch (reason) { setError(applicationError(reason).message); }
   }
   async function retry(job: TransferJob) {
-    try { setPlans([await filesApi.planRetry(owner(), job.id)]); } catch (reason) { setError(applicationError(reason).message); }
+    let session: SftpSessionInfo | null = null;
+    let generation = approvalGeneration.current;
+    try {
+      session = owner(); generation = approvalGeneration.current;
+      publishPlans(session, generation, [await filesApi.planRetry(session, job.id)]);
+    } catch (reason) { if (session && isCurrent(session, generation)) setError(applicationError(reason).message); }
   }
   function visitHistory(index: number) { const target = history[index]; if (!sftp || !target) return; setHistoryIndex(index); void loadDirectory(sftp, target, 'history'); }
   function up() { if (!listing || !sftp || listing.path === '/') return; const target = listing.path.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/'; void loadDirectory(sftp, target); }
@@ -211,7 +299,7 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
       </div>
       <section className="transfer-queue" aria-label="Transfer queue"><h2>Transfers</h2>{transfers.length === 0 ? <p>No transfers in this session.</p> : transfers.map((job) => <div className="transfer-row" key={job.id}><div><strong>{job.direction === 'upload' ? '↑' : '↓'} {job.sourceDisplay}</strong><span> → {job.destinationDisplay}</span></div><div><span className={`transfer-state transfer-state--${job.state}`}>{job.state}</span> <span>{formatProgress(job)}</span>{['queued','preparing','transferring'].includes(job.state) && <button onClick={() => { if (sftp) void filesApi.cancel(sftp, job.id); }}>Cancel</button>}{job.retryable && <button onClick={() => void retry(job)}>Prepare retry</button>}</div>{job.error && <span className="transfer-error">{job.error.message}</span>}</div>)}</section>
       {dialog && <Modal title={dialog.type === 'mkdir' ? 'Create remote directory' : 'Rename remote entry'} onClose={() => setDialog(null)}><label className="field"><span>Name</span><input autoFocus value={dialog.value} onChange={(event) => setDialog({ ...dialog, value: event.target.value })} /></label><p className="dialog-description">The operation will be prepared as an immutable plan. Rename never overwrites an existing destination.</p><div className="modal-actions"><Button onClick={() => setDialog(null)}>Cancel</Button><Button disabled={!dialog.value} onClick={() => void prepareEntryDialog()}>Review plan</Button></div></Modal>}
-      {plans.length > 0 && <Modal title="Approve file operation" onClose={() => { void discardPlans(); }}><p className="dialog-description">Host: <strong>{host.displayName}</strong>. This one-time approval expires at {new Date(plans[0]!.expiresAt).toLocaleTimeString()}.</p>{plans.map((plan) => <div className="file-plan" key={plan.id}><strong>{plan.kind} · {plan.risk}{plan.conflictPolicy ? ` · Conflict: ${plan.conflictPolicy}` : ''}</strong>{plan.items.map((item, index) => <div key={index}><code>{item.sourceDisplay}</code> → <code>{item.destinationDisplay}</code>{item.sizeBytes && ` · ${item.sizeBytes} bytes`}</div>)}</div>)}{plans.some((plan) => plan.kind === 'delete') && <Notice>Delete is permanent. Directories must be empty; symbolic links are removed without following their target.</Notice>}<div className="modal-actions"><Button onClick={() => { void discardPlans(); }}>Cancel</Button><Button variant={plans.some((plan) => plan.kind === 'delete') ? 'danger' : 'primary'} onClick={() => void executePlans()}>Approve and execute</Button></div></Modal>}
+      {liveApproval && <Modal title="Approve file operation" onClose={() => { void discardPlans(); }}><p className="dialog-description">Host: <strong>{host.displayName}</strong>. This one-time approval expires at {new Date(liveApproval.plans[0]!.expiresAt).toLocaleTimeString()}.</p>{liveApproval.plans.map((plan) => <div className="file-plan" key={plan.id}><strong>{plan.kind} · {plan.risk}{plan.conflictPolicy ? ` · Conflict: ${plan.conflictPolicy}` : ''}</strong>{plan.items.map((item, index) => <div key={index}><code>{item.sourceDisplay}</code> → <code>{item.destinationDisplay}</code>{item.sizeBytes && ` · ${item.sizeBytes} bytes`}</div>)}</div>)}{liveApproval.plans.some((plan) => plan.kind === 'delete') && <Notice>Delete is permanent. Directories must be empty; symbolic links are removed without following their target.</Notice>}<div className="modal-actions"><Button onClick={() => { void discardPlans(); }}>Cancel</Button><Button variant={liveApproval.plans.some((plan) => plan.kind === 'delete') ? 'danger' : 'primary'} onClick={() => void executePlans()}>Approve and execute</Button></div></Modal>}
       {properties && <Modal title="Remote properties" onClose={() => setProperties(null)}><dl className="properties"><dt>Name</dt><dd>{properties.displayName}</dd><dt>Type</dt><dd>{properties.kind}</dd><dt>Size</dt><dd>{properties.sizeBytes ?? 'Unknown'}</dd><dt>Modified</dt><dd>{properties.modifiedAt ?? 'Unknown'}</dd><dt>Permissions</dt><dd>{properties.permissions ?? 'Unknown'}</dd><dt>UID / GID</dt><dd>{properties.uid ?? 'Unknown'} / {properties.gid ?? 'Unknown'}</dd></dl><div className="modal-actions"><Button onClick={() => setProperties(null)}>Close</Button></div></Modal>}
     </section>
   );
