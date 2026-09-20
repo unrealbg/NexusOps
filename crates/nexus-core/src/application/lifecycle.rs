@@ -27,6 +27,7 @@ impl Application {
         let view = data.view.clone();
         drop(data);
         if let Some(connection_id) = closed_connection {
+            self.close_sftp(id, connection_id).await?;
             self.terminals
                 .disconnect_connection(id, connection_id)
                 .await;
@@ -43,26 +44,34 @@ impl Application {
         let slot = self.slot(id).await;
         let mut data = slot.data.lock().await;
         data.generation += 1;
-        data.cancel.cancel();
         data.refreshing = false;
-        let transport = data.transport.take();
-        let connection_id = data.connection_id.take();
+        let connection_id = data.connection_id;
         let state = data.view.state;
-        data.view = HostSession::disconnected(id);
+        if state == ConnectionState::Connecting {
+            data.cancel.cancel();
+        }
         if matches!(
             state,
             ConnectionState::Connecting | ConnectionState::Connected
         ) {
-            data.view.state = state
-                .transition(ConnectionState::Disconnecting)?
-                .transition(ConnectionState::Disconnected)?;
+            data.view.state = state.transition(ConnectionState::Disconnecting)?;
         }
         drop(data);
         if let Some(connection_id) = connection_id {
+            if let Err(error) = self.close_sftp(id, connection_id).await {
+                slot.data.lock().await.view.error = Some(error.clone());
+                return Err(error);
+            }
             self.terminals
                 .disconnect_connection(id, connection_id)
                 .await;
         }
+        let mut data = slot.data.lock().await;
+        data.cancel.cancel();
+        let transport = data.transport.take();
+        data.connection_id = None;
+        data.view = HostSession::disconnected(id);
+        drop(data);
         if let Some(transport) = transport {
             transport.disconnect().await?;
         }

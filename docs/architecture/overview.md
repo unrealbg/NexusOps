@@ -1,6 +1,6 @@
 # Architecture
 
-NexusOps separates transport-independent domain data, application orchestration, infrastructure probes and the desktop adapter. Rust is the source of truth for the wire model. `export_protocol` produces the checked-in TypeScript declarations; CI rejects drift. Components consume the typed application client, not `invoke` directly. The only registered IPC commands concern host CRUD, connect/disconnect/reconnect, session status, explicit trust and refresh.
+NexusOps separates transport-independent domain data, application orchestration, infrastructure probes and the desktop adapter. Rust is the source of truth for the wire model. `export_protocol` produces the checked-in TypeScript declarations; CI rejects drift. Components consume the typed application client, not `invoke` directly. Registered IPC commands are narrow host, discovery, terminal, SFTP file-operation, transfer, and native-selection actions; there is no generic command or filesystem IPC.
 
 ```mermaid
 flowchart TD
@@ -9,6 +9,8 @@ flowchart TD
   CORE --> PROVIDERS[Providers / HostProbe and ConnectionProvider]
   PROVIDERS --> POLICY[Operation / Policy layer]
   POLICY --> SSH[SSH transport / nexus-ssh]
+  CORE --> FILES[Typed file plans / nexus-sftp]
+  FILES --> SSH
   SSH --> HOST[Remote Linux host / existing SSH server]
   CORE --> REPO[Local host metadata]
   CORE --> VAULT[SecretStore / encrypted vault + OS keychain]
@@ -43,6 +45,6 @@ Audit events contain host ID, UTC timestamp, operation identity and risk, actor,
 
 TanStack Query owns host metadata/session snapshots. Zustand owns selection only. Credentials remain in uncontrolled form controls and one short-lived IPC payload; save bypasses mutation caches. Components are grouped into shell, hosts, connection and overview concerns. CSS tokens and primitives permit future light themes; only the dark theme is shipped.
 
-Capabilities use a validated registry and observed facts. Future service/container providers can add capability identifiers without changing SSH. The operation engine currently accepts only its private fixed-command plans with `ReadOnly` risk, supports validation and verification, and reports rollback as unnecessary. Mutating operations must add their own plans, verification and compensating actions, plus policy approvals and audit before any execution API is exposed.
+Capabilities use a validated registry and observed facts. Future service/container providers can add capability identifiers without changing SSH. The operation engine currently accepts only its private fixed-command plans with `ReadOnly` risk, supports validation and verification, and reports rollback as unnecessary. File mutations use the adjacent one-shot typed-plan boundary described in [SFTP files architecture](sftp.md). The fixed discovery engine still rejects write risk and tampered kinds.
 
 See the [ADRs](../adr/0001-workspace-and-boundaries.md) for decisions and the [threat model](../security/threat-model.md) for boundaries that remain outside this goal.

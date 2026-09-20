@@ -2,10 +2,12 @@
 mod error;
 mod host;
 mod session;
+mod sftp;
 mod terminal;
 pub use error::*;
 pub use host::*;
 pub use session::*;
+pub use sftp::*;
 pub use terminal::*;
 
 use serde::{Deserialize, Serialize};

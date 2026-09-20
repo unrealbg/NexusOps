@@ -12,6 +12,7 @@ nexus-discovery.workspace = true
 nexus-operations.workspace = true
 nexus-audit.workspace = true
 nexus-terminal.workspace = true
+nexus-sftp.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 async-trait.workspace = true

@@ -10,7 +10,6 @@ const futureSections = [
   ['network', 'Network'],
   ['security', 'Security'],
   ['logs', 'Logs'],
-  ['files', 'Files'],
 ] as const;
 
 function HostItem({
@@ -59,8 +58,8 @@ export function HostSidebar({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onAdd: () => void;
-  activeSection: 'overview' | 'terminal';
-  onSection: (section: 'overview' | 'terminal') => void;
+  activeSection: 'overview' | 'terminal' | 'files';
+  onSection: (section: 'overview' | 'terminal' | 'files') => void;
 }) {
   return (
     <aside className="sidebar">
@@ -107,6 +106,15 @@ export function HostSidebar({
         >
           <Icon name="terminal" />
           Terminal
+        </button>
+        <button
+          className={`nav-item ${activeSection === 'files' ? 'nav-item--active' : ''}`}
+          aria-current={activeSection === 'files' ? 'page' : undefined}
+          disabled={!selectedId}
+          onClick={() => onSection('files')}
+        >
+          <Icon name="files" />
+          Files
         </button>
         {futureSections.map(([icon, label]) => (
           <button

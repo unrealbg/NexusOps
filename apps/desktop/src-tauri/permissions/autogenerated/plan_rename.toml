@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-rename"
+description = "Enables the plan_rename command without any pre-configured scope."
+commands.allow = ["plan_rename"]
+
+[[permission]]
+identifier = "deny-plan-rename"
+description = "Denies the plan_rename command without any pre-configured scope."
+commands.deny = ["plan_rename"]

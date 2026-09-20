@@ -26,6 +26,13 @@ pub enum ErrorCode {
     TerminalStream,
     TerminalStartup,
     TerminalChannel,
+    SftpUnavailable,
+    SftpDenied,
+    SftpProtocol,
+    FilePolicy,
+    LocalAccess,
+    Transfer,
+    OutcomeUnknown,
 }
 
 /// Safe user-visible failure. Never put raw library errors or remote output in message.

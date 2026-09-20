@@ -2,6 +2,7 @@ use crate::{ConnectionProvider, HostRepository, StoredHost, sessions::SessionSlo
 use nexus_audit::{AuditActor, AuditEvent, AuditLog, AuditOutcome};
 use nexus_model::*;
 use nexus_secrets::{CredentialInput, EncryptedSecretStore, PlatformKeyProvider, SecretStore};
+use nexus_sftp::{FilePlanStore, SftpClient, TransferManager};
 use nexus_ssh::{KnownHosts, SshProvider};
 use nexus_terminal::TerminalManager;
 use std::{collections::HashMap, fs::File, path::Path, sync::Arc, time::Instant};
@@ -17,6 +18,10 @@ pub struct Application {
     pub(crate) known_hosts: Arc<KnownHosts>,
     pub(crate) audit: Arc<AuditLog>,
     pub(crate) terminals: Arc<TerminalManager>,
+    pub(crate) sftp_sessions: Mutex<HashMap<HostId, Arc<dyn SftpClient>>>,
+    pub(crate) sftp_startups: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
+    pub(crate) file_plans: FilePlanStore,
+    pub(crate) transfers: TransferManager,
     sessions: Mutex<HashMap<HostId, Arc<SessionSlot>>>,
     mutation: Mutex<()>,
     _profile_lock: Option<File>,
@@ -38,6 +43,7 @@ fn error_outcome(error: &AppError) -> AuditOutcome {
     }
 }
 mod connection;
+mod files;
 mod hosts;
 mod identity;
 mod lifecycle;
@@ -82,6 +88,10 @@ impl Application {
             known_hosts,
             audit,
             terminals: Arc::new(TerminalManager::new()),
+            sftp_sessions: Mutex::new(HashMap::new()),
+            sftp_startups: Mutex::new(HashMap::new()),
+            file_plans: FilePlanStore::default(),
+            transfers: TransferManager::new(),
             sessions: Mutex::new(HashMap::new()),
             mutation: Mutex::new(()),
             _profile_lock: Some(lock),
@@ -110,6 +120,9 @@ impl Application {
                 risk: match kind {
                     "identity.trust" => OperationRisk::High,
                     "host.save" | "host.delete" => OperationRisk::Low,
+                    "file.create_directory" => OperationRisk::Low,
+                    "file.rename" | "file.transfer.accepted" => OperationRisk::Moderate,
+                    "file.delete" => OperationRisk::Destructive,
                     _ => OperationRisk::ReadOnly,
                 },
             },
@@ -118,17 +131,47 @@ impl Application {
             started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         ))
     }
-    /// Cancels sockets immediately during desktop shutdown; no detached SSH lifetime survives.
-    pub async fn shutdown(&self) {
-        self.terminals.shutdown().await;
-        for slot in self.sessions.lock().await.values() {
+    /// Quiesces transfers before closing the SFTP channels and SSH transports.
+    pub async fn shutdown(&self) -> Result<(), AppError> {
+        let _mutation = self.mutation.lock().await;
+        let slots = self
+            .sessions
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for slot in &slots {
             let mut data = slot.data.lock().await;
             data.generation += 1;
+            data.refreshing = false;
+            if data.view.state == ConnectionState::Connecting {
+                data.cancel.cancel();
+            } else if data.view.state == ConnectionState::Connected {
+                data.view.state = ConnectionState::Disconnecting;
+            }
+        }
+        self.transfers.shutdown();
+        let sessions = self
+            .sftp_sessions
+            .lock()
+            .await
+            .values()
+            .map(|client| (client.info().host_id, client.info().host_session_id))
+            .collect::<Vec<_>>();
+        for (host, session) in sessions {
+            self.close_sftp(host, session).await?;
+        }
+        self.transfers.quiesce_all().await?;
+        self.terminals.shutdown().await;
+        for slot in slots {
+            let mut data = slot.data.lock().await;
             data.cancel.cancel();
             data.refreshing = false;
             data.transport = None;
             data.connection_id = None;
             data.view = HostSession::disconnected(data.view.host_id);
         }
+        Ok(())
     }
 }

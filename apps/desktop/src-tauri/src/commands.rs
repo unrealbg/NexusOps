@@ -1,10 +1,38 @@
+use crate::local_access::LocalAccessService;
 use nexus_core::Application;
 use nexus_model::{
     AppError, Host, HostId, HostInput, HostKeyChallenge, HostSession, HostSessionId,
     TerminalOutputBatch, TerminalSession, TerminalSessionId, TerminalSize,
 };
+use nexus_model::{
+    ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
+    LocalSelectionGrant, RemoteEntry, SftpSessionId, SftpSessionInfo, TransferJob, TransferJobId,
+};
 use nexus_secrets::CredentialInput;
+use serde::Deserialize;
 use tauri::State;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanUploadRequest {
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    grant_id: LocalGrantId,
+    remote_directory: String,
+    conflict_policy: ConflictPolicy,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDownloadRequest {
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    grant_id: LocalGrantId,
+    remote_paths: Vec<String>,
+    conflict_policy: ConflictPolicy,
+}
 
 #[tauri::command]
 pub fn list_hosts(app: State<'_, Application>) -> Result<Vec<Host>, AppError> {
@@ -27,11 +55,21 @@ pub async fn connect_host(app: State<'_, Application>, host_id: HostId) -> Resul
     app.connect_host(host_id).await
 }
 #[tauri::command]
-pub async fn disconnect_host(app: State<'_, Application>, host_id: HostId) -> Result<(), AppError> {
+pub async fn disconnect_host(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    host_id: HostId,
+) -> Result<(), AppError> {
+    local.revoke_host(host_id);
     app.disconnect_host(host_id).await
 }
 #[tauri::command]
-pub async fn reconnect_host(app: State<'_, Application>, host_id: HostId) -> Result<(), AppError> {
+pub async fn reconnect_host(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    host_id: HostId,
+) -> Result<(), AppError> {
+    local.revoke_host(host_id);
     app.reconnect_host(host_id).await
 }
 #[tauri::command]
@@ -126,5 +164,232 @@ pub async fn close_terminal(
     terminal_id: TerminalSessionId,
 ) -> Result<(), AppError> {
     app.close_terminal(host_id, host_session_id, terminal_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn open_sftp(
+    app: State<'_, Application>,
+    host_id: HostId,
+) -> Result<SftpSessionInfo, AppError> {
+    app.open_sftp(host_id).await
+}
+#[tauri::command]
+pub async fn list_remote_directory(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    path: String,
+) -> Result<DirectoryListing, AppError> {
+    app.list_remote_directory(host_id, host_session_id, sftp_session_id, path)
+        .await
+}
+#[tauri::command]
+pub async fn remote_properties(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    path: String,
+) -> Result<RemoteEntry, AppError> {
+    app.remote_properties(host_id, host_session_id, sftp_session_id, path)
+        .await
+}
+#[tauri::command]
+pub async fn choose_upload_files(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+) -> Result<Option<LocalSelectionGrant>, AppError> {
+    let scope = crate::local_access::GrantScope {
+        host_id,
+        host_session_id,
+        sftp_session_id,
+    };
+    app.validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await?;
+    let grant = local.choose_upload_files(scope).await?;
+    if let Err(error) = app
+        .validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await
+    {
+        local.revoke_session(host_id, host_session_id);
+        return Err(error);
+    }
+    Ok(grant)
+}
+#[tauri::command]
+pub async fn choose_download_directory(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+) -> Result<Option<LocalSelectionGrant>, AppError> {
+    let scope = crate::local_access::GrantScope {
+        host_id,
+        host_session_id,
+        sftp_session_id,
+    };
+    app.validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await?;
+    let grant = local.choose_download_directory(scope).await?;
+    if let Err(error) = app
+        .validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await
+    {
+        local.revoke_session(host_id, host_session_id);
+        return Err(error);
+    }
+    Ok(grant)
+}
+#[tauri::command]
+pub async fn plan_upload(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    request: PlanUploadRequest,
+) -> Result<FileOperationPlan, AppError> {
+    let scope = crate::local_access::GrantScope {
+        host_id: request.host_id,
+        host_session_id: request.host_session_id,
+        sftp_session_id: request.sftp_session_id,
+    };
+    let sources = local.consume_upload(request.grant_id, scope)?;
+    app.plan_upload(
+        request.host_id,
+        request.host_session_id,
+        request.sftp_session_id,
+        sources,
+        request.remote_directory,
+        request.conflict_policy,
+    )
+    .await
+}
+#[tauri::command]
+pub async fn plan_download(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    request: PlanDownloadRequest,
+) -> Result<FileOperationPlan, AppError> {
+    let scope = crate::local_access::GrantScope {
+        host_id: request.host_id,
+        host_session_id: request.host_session_id,
+        sftp_session_id: request.sftp_session_id,
+    };
+    let directory = local.consume_download_directory(request.grant_id, scope)?;
+    app.plan_download(
+        request.host_id,
+        request.host_session_id,
+        request.sftp_session_id,
+        request.remote_paths,
+        directory,
+        request.conflict_policy,
+    )
+    .await
+}
+#[tauri::command]
+pub async fn plan_create_directory(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    parent: String,
+    name: String,
+) -> Result<FileOperationPlan, AppError> {
+    app.plan_create_directory(host_id, host_session_id, sftp_session_id, parent, name)
+        .await
+}
+#[tauri::command]
+pub async fn plan_rename(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    source: String,
+    new_name: String,
+) -> Result<FileOperationPlan, AppError> {
+    app.plan_rename(host_id, host_session_id, sftp_session_id, source, new_name)
+        .await
+}
+#[tauri::command]
+pub async fn plan_delete(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    path: String,
+) -> Result<FileOperationPlan, AppError> {
+    app.plan_delete(host_id, host_session_id, sftp_session_id, path)
+        .await
+}
+#[tauri::command]
+pub async fn execute_file_plan(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    plan_id: FilePlanId,
+) -> Result<Vec<TransferJob>, AppError> {
+    app.execute_file_plan(host_id, host_session_id, sftp_session_id, plan_id)
+        .await
+}
+#[tauri::command]
+pub async fn discard_file_plan(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    plan_id: FilePlanId,
+) -> Result<(), AppError> {
+    app.discard_file_plan(host_id, host_session_id, sftp_session_id, plan_id)
+        .await
+}
+#[tauri::command]
+pub async fn discard_local_grant(
+    app: State<'_, Application>,
+    local: State<'_, LocalAccessService>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    grant_id: LocalGrantId,
+) -> Result<(), AppError> {
+    app.validate_sftp_session(host_id, host_session_id, sftp_session_id)
+        .await?;
+    local.discard(
+        grant_id,
+        crate::local_access::GrantScope {
+            host_id,
+            host_session_id,
+            sftp_session_id,
+        },
+    )
+}
+#[tauri::command]
+pub fn list_transfers(app: State<'_, Application>, host_id: Option<HostId>) -> Vec<TransferJob> {
+    app.list_transfers(host_id)
+}
+#[tauri::command]
+pub async fn cancel_transfer(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    job_id: TransferJobId,
+) -> Result<(), AppError> {
+    app.cancel_transfer(host_id, host_session_id, sftp_session_id, job_id)
+        .await
+}
+#[tauri::command]
+pub async fn plan_retry_transfer(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    job_id: TransferJobId,
+) -> Result<FileOperationPlan, AppError> {
+    app.plan_retry_transfer(host_id, host_session_id, sftp_session_id, job_id)
         .await
 }

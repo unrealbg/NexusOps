@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-properties"
+description = "Enables the remote_properties command without any pre-configured scope."
+commands.allow = ["remote_properties"]
+
+[[permission]]
+identifier = "deny-remote-properties"
+description = "Denies the remote_properties command without any pre-configured scope."
+commands.deny = ["remote_properties"]

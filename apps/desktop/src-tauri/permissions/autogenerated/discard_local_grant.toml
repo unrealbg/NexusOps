@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discard-local-grant"
+description = "Enables the discard_local_grant command without any pre-configured scope."
+commands.allow = ["discard_local_grant"]
+
+[[permission]]
+identifier = "deny-discard-local-grant"
+description = "Denies the discard_local_grant command without any pre-configured scope."
+commands.deny = ["discard_local_grant"]

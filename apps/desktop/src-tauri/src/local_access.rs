@@ -1,0 +1,478 @@
+use nexus_model::{
+    AppError, ErrorCode, HostId, HostSessionId, LocalGrantId, LocalGrantKind, LocalSelectionGrant,
+    LocalSelectionItem, SftpSessionId,
+};
+use nexus_sftp::{LocalDirectory, LocalItem};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak},
+    time::{Duration, Instant},
+};
+
+const GRANT_LIFETIME: Duration = Duration::from_secs(10 * 60);
+const GRANT_CAP: usize = 64;
+const FILE_CAP: usize = 32;
+
+enum GrantValue {
+    Upload(Vec<LocalItem>),
+    DownloadDirectory(LocalDirectory),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GrantScope {
+    pub host_id: HostId,
+    pub host_session_id: HostSessionId,
+    pub sftp_session_id: SftpSessionId,
+}
+struct StoredGrant {
+    value: GrantValue,
+    scope: GrantScope,
+    expires: Instant,
+}
+
+pub struct LocalAccessService {
+    grants: Arc<Mutex<HashMap<LocalGrantId, StoredGrant>>>,
+    lifetime: Duration,
+}
+
+impl Default for LocalAccessService {
+    fn default() -> Self {
+        Self {
+            grants: Arc::default(),
+            lifetime: GRANT_LIFETIME,
+        }
+    }
+}
+
+impl LocalAccessService {
+    pub async fn choose_upload_files(
+        &self,
+        scope: GrantScope,
+    ) -> Result<Option<LocalSelectionGrant>, AppError> {
+        let Some(handles) = rfd::AsyncFileDialog::new()
+            .set_title("Choose files to upload")
+            .pick_files()
+            .await
+        else {
+            return Ok(None);
+        };
+        if handles.is_empty() || handles.len() > FILE_CAP {
+            return Err(local_error("Choose between 1 and 32 regular files."));
+        }
+        let mut items = Vec::with_capacity(handles.len());
+        let mut views = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let path = handle.path().to_path_buf();
+            let name = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .ok_or_else(|| {
+                    local_error("A selected filename cannot be represented losslessly.")
+                })?
+                .to_owned();
+            nexus_sftp::validate_child_name(&name)?;
+            let item = nexus_sftp::open_local_source(path, name.clone())?;
+            views.push(LocalSelectionItem {
+                display_name: nexus_sftp::display_name(&name),
+                size_bytes: Some(item.size.to_string()),
+            });
+            items.push(item);
+        }
+        self.insert(
+            LocalGrantKind::UploadFiles,
+            views,
+            GrantValue::Upload(items),
+            scope,
+        )
+    }
+
+    pub async fn choose_download_directory(
+        &self,
+        scope: GrantScope,
+    ) -> Result<Option<LocalSelectionGrant>, AppError> {
+        let Some(handle) = rfd::AsyncFileDialog::new()
+            .set_title("Choose download destination")
+            .pick_folder()
+            .await
+        else {
+            return Ok(None);
+        };
+        let path = handle.path().to_path_buf();
+        let directory = nexus_sftp::open_local_directory(path.clone())?;
+        self.insert(
+            LocalGrantKind::DownloadDirectory,
+            vec![LocalSelectionItem {
+                display_name: path.display().to_string(),
+                size_bytes: None,
+            }],
+            GrantValue::DownloadDirectory(directory),
+            scope,
+        )
+    }
+
+    pub fn consume_upload(
+        &self,
+        id: LocalGrantId,
+        scope: GrantScope,
+    ) -> Result<Vec<LocalItem>, AppError> {
+        match self.consume(id, scope)? {
+            GrantValue::Upload(items) => Ok(items),
+            _ => Err(local_error("The local grant has the wrong scope.")),
+        }
+    }
+    pub fn consume_download_directory(
+        &self,
+        id: LocalGrantId,
+        scope: GrantScope,
+    ) -> Result<LocalDirectory, AppError> {
+        match self.consume(id, scope)? {
+            GrantValue::DownloadDirectory(path) => Ok(path),
+            _ => Err(local_error("The local grant has the wrong scope.")),
+        }
+    }
+    pub fn revoke_all(&self) {
+        if let Ok(mut grants) = self.grants.lock() {
+            grants.clear();
+        }
+    }
+    pub fn revoke_session(&self, host_id: HostId, host_session_id: HostSessionId) {
+        if let Ok(mut grants) = self.grants.lock() {
+            grants.retain(|_, grant| {
+                grant.scope.host_id != host_id || grant.scope.host_session_id != host_session_id
+            });
+        }
+    }
+    pub fn revoke_host(&self, host_id: HostId) {
+        if let Ok(mut grants) = self.grants.lock() {
+            grants.retain(|_, grant| grant.scope.host_id != host_id);
+        }
+    }
+
+    /// Discards only the named unused grant. If consumption won the mutex race,
+    /// the returned value is already owned by planning and is left untouched.
+    pub fn discard(&self, id: LocalGrantId, scope: GrantScope) -> Result<(), AppError> {
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| local_error("Local access grants are unavailable."))?;
+        let Some(grant) = grants.get(&id) else {
+            return Ok(());
+        };
+        if grant.scope != scope {
+            return Err(local_error(
+                "The local selection grant belongs to a different SFTP session.",
+            ));
+        }
+        grants.remove(&id);
+        Ok(())
+    }
+
+    fn insert(
+        &self,
+        kind: LocalGrantKind,
+        items: Vec<LocalSelectionItem>,
+        value: GrantValue,
+        scope: GrantScope,
+    ) -> Result<Option<LocalSelectionGrant>, AppError> {
+        let id = LocalGrantId::new();
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| local_error("Local access grants are unavailable."))?;
+        grants.retain(|_, grant| grant.expires > Instant::now());
+        if grants.len() >= GRANT_CAP {
+            return Err(local_error(
+                "Too many local selections are awaiting approval.",
+            ));
+        }
+        grants.insert(
+            id,
+            StoredGrant {
+                value,
+                scope,
+                expires: Instant::now() + self.lifetime,
+            },
+        );
+        let expires = grants.get(&id).expect("inserted grant").expires;
+        schedule_grant_expiry(Arc::downgrade(&self.grants), id, expires);
+        Ok(Some(LocalSelectionGrant {
+            id,
+            kind,
+            items,
+            expires_at: (chrono::Utc::now()
+                + chrono::Duration::from_std(self.lifetime)
+                    .map_err(|_| local_error("The local selection lifetime is invalid."))?)
+            .to_rfc3339(),
+        }))
+    }
+    fn consume(&self, id: LocalGrantId, scope: GrantScope) -> Result<GrantValue, AppError> {
+        let mut grants = self
+            .grants
+            .lock()
+            .map_err(|_| local_error("Local access grants are unavailable."))?;
+        let grant = grants.remove(&id).ok_or_else(|| {
+            local_error("The local selection grant is missing or was already used.")
+        })?;
+        if Instant::now() > grant.expires {
+            return Err(local_error("The local selection grant expired."));
+        }
+        if grant.scope != scope {
+            return Err(local_error(
+                "The local selection grant belongs to a different SFTP session.",
+            ));
+        }
+        Ok(grant.value)
+    }
+}
+
+fn schedule_grant_expiry(
+    grants: Weak<Mutex<HashMap<LocalGrantId, StoredGrant>>>,
+    id: LocalGrantId,
+    expires: Instant,
+) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(expires)).await;
+        let Some(grants) = grants.upgrade() else {
+            return;
+        };
+        if let Ok(mut grants) = grants.lock()
+            && grants
+                .get(&id)
+                .is_some_and(|grant| grant.expires == expires)
+        {
+            grants.remove(&id);
+        }
+    });
+}
+fn local_error(message: &'static str) -> AppError {
+    AppError::new(ErrorCode::LocalAccess, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grants_are_typed_one_shot_bounded_and_expiring() {
+        let service = LocalAccessService::default();
+        let directory = tempfile::tempdir().unwrap();
+        let selected =
+            nexus_sftp::open_local_directory(directory.path().canonicalize().unwrap()).unwrap();
+        let scope = GrantScope {
+            host_id: HostId::new(),
+            host_session_id: HostSessionId::new(),
+            sftp_session_id: SftpSessionId::new(),
+        };
+        let view = vec![LocalSelectionItem {
+            display_name: "Destination".into(),
+            size_bytes: None,
+        }];
+        let grant = service
+            .insert(
+                LocalGrantKind::DownloadDirectory,
+                view.clone(),
+                GrantValue::DownloadDirectory(selected.clone()),
+                scope,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            service.consume_upload(grant.id, scope).unwrap_err().code,
+            ErrorCode::LocalAccess
+        );
+        assert_eq!(
+            service
+                .consume_download_directory(grant.id, scope)
+                .unwrap_err()
+                .code,
+            ErrorCode::LocalAccess
+        );
+
+        let expired = service
+            .insert(
+                LocalGrantKind::DownloadDirectory,
+                view.clone(),
+                GrantValue::DownloadDirectory(selected.clone()),
+                scope,
+            )
+            .unwrap()
+            .unwrap();
+        service
+            .grants
+            .lock()
+            .unwrap()
+            .get_mut(&expired.id)
+            .unwrap()
+            .expires = Instant::now() - Duration::from_millis(1);
+        assert_eq!(
+            service
+                .consume_download_directory(expired.id, scope)
+                .unwrap_err()
+                .code,
+            ErrorCode::LocalAccess
+        );
+
+        for _ in 0..GRANT_CAP {
+            service
+                .insert(
+                    LocalGrantKind::DownloadDirectory,
+                    view.clone(),
+                    GrantValue::DownloadDirectory(selected.clone()),
+                    scope,
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            service
+                .insert(
+                    LocalGrantKind::DownloadDirectory,
+                    view,
+                    GrantValue::DownloadDirectory(selected.clone()),
+                    scope,
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::LocalAccess
+        );
+        service.revoke_all();
+        assert!(service.grants.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn grants_are_bound_to_host_connection_and_sftp_session() {
+        let service = LocalAccessService::default();
+        let temporary = tempfile::tempdir().unwrap();
+        let selected =
+            nexus_sftp::open_local_directory(temporary.path().canonicalize().unwrap()).unwrap();
+        let scope = GrantScope {
+            host_id: HostId::new(),
+            host_session_id: HostSessionId::new(),
+            sftp_session_id: SftpSessionId::new(),
+        };
+        let grant = service
+            .insert(
+                LocalGrantKind::DownloadDirectory,
+                vec![],
+                GrantValue::DownloadDirectory(selected.clone()),
+                scope,
+            )
+            .unwrap()
+            .unwrap();
+        let other_host = GrantScope {
+            host_id: HostId::new(),
+            ..scope
+        };
+        assert_eq!(
+            service
+                .consume_download_directory(grant.id, other_host)
+                .unwrap_err()
+                .code,
+            ErrorCode::LocalAccess
+        );
+
+        let grant = service
+            .insert(
+                LocalGrantKind::DownloadDirectory,
+                vec![],
+                GrantValue::DownloadDirectory(selected),
+                scope,
+            )
+            .unwrap()
+            .unwrap();
+        service.revoke_session(scope.host_id, scope.host_session_id);
+        assert_eq!(
+            service
+                .consume_download_directory(grant.id, scope)
+                .unwrap_err()
+                .code,
+            ErrorCode::LocalAccess
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(start_paused = true)]
+    async fn scoped_discard_and_idle_expiry_release_only_their_grants() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("selected");
+        std::fs::create_dir(&path).unwrap();
+        let scope = GrantScope {
+            host_id: HostId::new(),
+            host_session_id: HostSessionId::new(),
+            sftp_session_id: SftpSessionId::new(),
+        };
+        let service = LocalAccessService {
+            grants: Arc::default(),
+            lifetime: Duration::from_secs(10),
+        };
+        let first = service
+            .insert(
+                LocalGrantKind::DownloadDirectory,
+                vec![],
+                GrantValue::DownloadDirectory(
+                    nexus_sftp::open_local_directory(path.canonicalize().unwrap()).unwrap(),
+                ),
+                scope,
+            )
+            .unwrap()
+            .unwrap();
+        let second = service
+            .insert(
+                LocalGrantKind::DownloadDirectory,
+                vec![],
+                GrantValue::DownloadDirectory(
+                    nexus_sftp::open_local_directory(path.canonicalize().unwrap()).unwrap(),
+                ),
+                scope,
+            )
+            .unwrap()
+            .unwrap();
+
+        service.discard(first.id, scope).unwrap();
+        assert!(std::fs::rename(&path, parent.path().join("other-active")).is_err());
+        service.discard(second.id, scope).unwrap();
+        std::fs::rename(&path, parent.path().join("discard-released")).unwrap();
+
+        let consumed_path = parent.path().join("consumed");
+        std::fs::create_dir(&consumed_path).unwrap();
+        let consumed_grant = service
+            .insert(
+                LocalGrantKind::DownloadDirectory,
+                vec![],
+                GrantValue::DownloadDirectory(
+                    nexus_sftp::open_local_directory(consumed_path.canonicalize().unwrap())
+                        .unwrap(),
+                ),
+                scope,
+            )
+            .unwrap()
+            .unwrap();
+        let consumed = service
+            .consume_download_directory(consumed_grant.id, scope)
+            .unwrap();
+        service.discard(consumed_grant.id, scope).unwrap();
+        assert!(std::fs::rename(&consumed_path, parent.path().join("active-grant")).is_err());
+        drop(consumed);
+        std::fs::rename(&consumed_path, parent.path().join("consume-released")).unwrap();
+
+        let expiring_path = parent.path().join("expiring");
+        std::fs::create_dir(&expiring_path).unwrap();
+        service
+            .insert(
+                LocalGrantKind::DownloadDirectory,
+                vec![],
+                GrantValue::DownloadDirectory(
+                    nexus_sftp::open_local_directory(expiring_path.canonicalize().unwrap())
+                        .unwrap(),
+                ),
+                scope,
+            )
+            .unwrap();
+        assert!(std::fs::rename(&expiring_path, parent.path().join("not-yet")).is_err());
+        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+        assert!(service.grants.lock().unwrap().is_empty());
+        std::fs::rename(&expiring_path, parent.path().join("expiry-released")).unwrap();
+    }
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-retry-transfer"
+description = "Enables the plan_retry_transfer command without any pre-configured scope."
+commands.allow = ["plan_retry_transfer"]
+
+[[permission]]
+identifier = "deny-plan-retry-transfer"
+description = "Denies the plan_retry_transfer command without any pre-configured scope."
+commands.deny = ["plan_retry_transfer"]

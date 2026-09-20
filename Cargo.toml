@@ -23,6 +23,7 @@ base64 = "0.22.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 zeroize = { version = "1.8.2", features = ["derive", "serde"] }
 tempfile = "3.26"
+fs-id = "0.2.0"
 ts-rs = { version = "12.0.1", features = ["uuid-impl"] }
 nexus-model = { path = "crates/nexus-model" }
 nexus-core = { path = "crates/nexus-core" }
@@ -32,6 +33,7 @@ nexus-discovery = { path = "crates/nexus-discovery" }
 nexus-operations = { path = "crates/nexus-operations" }
 nexus-audit = { path = "crates/nexus-audit" }
 nexus-terminal = { path = "crates/nexus-terminal" }
+nexus-sftp = { path = "crates/nexus-sftp" }
 
 [profile.dev]
 debug = 0

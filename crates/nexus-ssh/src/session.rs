@@ -6,6 +6,7 @@ use crate::{
 use async_trait::async_trait;
 use nexus_model::{AppError, ErrorCode};
 use nexus_operations::{ReadOnlyCommand, RemoteSession};
+use nexus_sftp::{RawSftpClient, SftpClient, SftpConnector};
 use nexus_terminal::{TerminalChannel, TerminalConnector, TerminalRead};
 use russh::{ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, client};
 use std::{
@@ -20,6 +21,7 @@ use tokio::{sync::Mutex, time::timeout};
 use tokio_util::sync::{CancellationToken, DropGuard};
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+const SFTP_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const OUTPUT_LIMIT: usize = 64 * 1024;
 pub(crate) const STARTUP_OUTPUT_LIMIT: usize = 64 * 1024;
 pub struct SshSession {
@@ -27,6 +29,76 @@ pub struct SshSession {
     pub(crate) lifetime: CancellationToken,
     pub(crate) _guard: DropGuard,
     pub(crate) closed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl SftpConnector for SshSession {
+    async fn open_sftp(
+        &self,
+        host_id: nexus_model::HostId,
+        host_session_id: nexus_model::HostSessionId,
+    ) -> Result<Arc<dyn SftpClient>, AppError> {
+        if self.is_closed() {
+            return Err(AppError::new(
+                ErrorCode::SftpUnavailable,
+                "SFTP is unavailable because the SSH connection is closed.",
+            ));
+        }
+        let mut channel = {
+            let handle = self.handle.lock().await;
+            handle.channel_open_session().await.map_err(|_| {
+                AppError::new(
+                    ErrorCode::SftpUnavailable,
+                    "The SFTP channel could not be opened.",
+                )
+            })?
+        };
+        channel.request_subsystem(true, "sftp").await.map_err(|_| {
+            AppError::new(
+                ErrorCode::SftpUnavailable,
+                "The SFTP subsystem request failed.",
+            )
+        })?;
+        enum SubsystemReply {
+            Accepted,
+            Denied,
+            Unavailable,
+        }
+        let reply = timeout(SFTP_STARTUP_TIMEOUT, async {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = self.lifetime.cancelled() => return SubsystemReply::Unavailable,
+                    message = channel.wait() => match message {
+                        Some(ChannelMsg::Success) => return SubsystemReply::Accepted,
+                        Some(ChannelMsg::Failure) => return SubsystemReply::Denied,
+                        Some(ChannelMsg::Close) | None => return SubsystemReply::Unavailable,
+                        Some(_) => continue,
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or(SubsystemReply::Unavailable);
+        match reply {
+            SubsystemReply::Accepted => {}
+            SubsystemReply::Denied => {
+                let _ = timeout(CLOSE_TIMEOUT, channel.close()).await;
+                return Err(AppError::new(
+                    ErrorCode::SftpDenied,
+                    "The SSH server denied the SFTP subsystem request.",
+                ));
+            }
+            SubsystemReply::Unavailable => {
+                let _ = timeout(CLOSE_TIMEOUT, channel.close()).await;
+                return Err(AppError::new(
+                    ErrorCode::SftpUnavailable,
+                    "The SSH server did not make an SFTP subsystem available.",
+                ));
+            }
+        }
+        RawSftpClient::connect(channel.into_stream(), host_id, host_session_id).await
+    }
 }
 
 struct RusshTerminalChannel {
