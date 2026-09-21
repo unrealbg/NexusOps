@@ -279,7 +279,8 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   function up() { if (!listing || !sftp || listing.path === '/') return; const target = listing.path.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/'; void loadDirectory(sftp, target); }
 
   return (
-    <>{visible && <section className="files-workspace" aria-label={`Files on ${host.displayName}`}>
+    <section className="files-workspace" aria-label={`Files on ${host.displayName}`} hidden={!visible}>
+      <div className="files-controls">
       <header className="files-heading">
         <div><div className="eyebrow">SFTP WORKSPACE</div><h1>{host.displayName} files</h1></div>
         <div className="files-session">{sftp ? `SFTP v${sftp.protocolVersion}` : connected ? 'Opening SFTP…' : 'Disconnected'}</div>
@@ -312,7 +313,8 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
         <label>Filter loaded entries <input value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
         <span>{listing ? `${listing.entries.length}${listing.partial ? '+' : ''} loaded` : 'No listing'}</span>
       </div>
-      <div className="files-table-wrap">
+      </div>
+      {editor ? <RemoteTextEditor initial={editor} host={host} session={sftp} connected={connected} visible={visible} transfers={transfers} onClose={() => setEditor(null)} /> : <div className="files-table-wrap">
         {loading && !listing ? <Spinner label="Loading remote directory…" /> : (
           <table className="files-table">
             <thead><tr><th><span className="sr-only">Select</span></th><th><button onClick={() => { if (sort === 'name') setDescending(!descending); else { setSort('name'); setDescending(false); } }}>Name</button></th><th>Type</th><th><button onClick={() => { if (sort === 'size') setDescending(!descending); else { setSort('size'); setDescending(false); } }}>Size</button></th><th><button onClick={() => { if (sort === 'modified') setDescending(!descending); else { setSort('modified'); setDescending(false); } }}>Modified</button></th><th>Mode</th><th><span className="sr-only">Actions</span></th></tr></thead>
@@ -325,14 +327,12 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
           </table>
         )}
         {listing?.partial && <Notice>Partial listing: the safety cap of {listing.entryCap} entries was reached. Sorting and filtering apply only to loaded entries.</Notice>}
-      </div>
+      </div>}
       <section className="transfer-queue" aria-label="Transfer queue"><h2>Transfers</h2>{transfers.length === 0 ? <p>No transfers in this session.</p> : transfers.map((job) => <div className="transfer-row" key={job.id}><div><strong>{job.direction === 'upload' ? '↑' : '↓'} {job.sourceDisplay}</strong><span> → {job.destinationDisplay}</span></div><div><span className={`transfer-state transfer-state--${job.state}`}>{job.state}</span> <span>{formatProgress(job)}</span>{['queued','preparing','transferring'].includes(job.state) && <button onClick={() => { if (sftp) void filesApi.cancel(sftp, job.id); }}>Cancel</button>}{job.retryable && <button onClick={() => void retry(job)}>Prepare retry</button>}</div>{job.error && <span className="transfer-error">{job.error.message}</span>}</div>)}</section>
       {dialog && <Modal title={dialog.type === 'mkdir' ? 'Create remote directory' : 'Rename remote entry'} onClose={() => setDialog(null)}><label className="field"><span>Name</span><input autoFocus value={dialog.value} onChange={(event) => setDialog({ ...dialog, value: event.target.value })} /></label><p className="dialog-description">The operation will be prepared as an immutable plan. Rename never overwrites an existing destination.</p><div className="modal-actions"><Button onClick={() => setDialog(null)}>Cancel</Button><Button disabled={!dialog.value} onClick={() => void prepareEntryDialog()}>Review plan</Button></div></Modal>}
       {liveApproval && <Modal title="Approve file operation" onClose={() => { void discardPlans(); }}><p className="dialog-description">Host: <strong>{host.displayName}</strong>. This one-time approval expires at {new Date(liveApproval.plans[0]!.expiresAt).toLocaleTimeString()}.</p>{liveApproval.plans.map((plan) => <div className="file-plan" key={plan.id}><strong>{plan.kind} · {plan.risk}{plan.conflictPolicy ? ` · Conflict: ${plan.conflictPolicy}` : ''}</strong>{plan.items.map((item, index) => <div key={index}><code>{item.sourceDisplay}</code> → <code>{item.destinationDisplay}</code>{item.sizeBytes && ` · ${item.sizeBytes} bytes`}</div>)}</div>)}{liveApproval.plans.some((plan) => plan.kind === 'delete') && <Notice>Delete is permanent. Directories must be empty; symbolic links are removed without following their target.</Notice>}<div className="modal-actions"><Button onClick={() => { void discardPlans(); }}>Cancel</Button><Button variant={liveApproval.plans.some((plan) => plan.kind === 'delete') ? 'danger' : 'primary'} onClick={() => void executePlans()}>Approve and execute</Button></div></Modal>}
       {properties && <Modal title="Remote properties" onClose={() => setProperties(null)}><dl className="properties"><dt>Name</dt><dd>{properties.displayName}</dd><dt>Type</dt><dd>{properties.kind}</dd><dt>Size</dt><dd>{properties.sizeBytes ?? 'Unknown'}</dd><dt>Modified</dt><dd>{properties.modifiedAt ?? 'Unknown'}</dd><dt>Permissions</dt><dd>{properties.permissions ?? 'Unknown'}</dd><dt>UID / GID</dt><dd>{properties.uid ?? 'Unknown'} / {properties.gid ?? 'Unknown'}</dd></dl><div className="modal-actions"><Button onClick={() => setProperties(null)}>Close</Button></div></Modal>}
-    </section>}
-    {editor && <RemoteTextEditor initial={editor} host={host} session={sftp} connected={connected} visible={visible} transfers={transfers} onClose={() => setEditor(null)} />}
-    </>
+    </section>
   );
 }
 

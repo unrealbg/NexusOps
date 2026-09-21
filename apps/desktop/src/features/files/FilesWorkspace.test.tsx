@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DirectoryListing, FileOperationPlan, SftpSessionInfo } from '@nexusops/protocol';
+import type { DirectoryListing, FileOperationPlan, RemoteTextDocument, SftpSessionInfo } from '@nexusops/protocol';
 import { hostApi, filesApi } from '../../api/client';
 import { hostKeys } from '../../api/queries';
 import { connected, disconnected, host } from '../../test/fixtures';
@@ -52,6 +52,10 @@ function uploadPlan(id = 'plan-upload'): FileOperationPlan {
 const nextSession: SftpSessionInfo = { ...session, id: 'sftp-2', hostSessionId: 'connection-2' };
 
 const uploadGrant = { id: 'grant-upload', kind: 'uploadFiles' as const, items: [], expiresAt: '2026-10-01T20:00:00Z' };
+const textDocument: RemoteTextDocument = {
+  id: 'document-a', hostId: host.id, hostSessionId: session.hostSessionId, sftpSessionId: session.id,
+  path: '/home/test/данни.bin', text: 'old', originalBytes: 3, newline: 'lf', bom: false, maxBytes: 1048576,
+};
 
 function renderFiles(visible = true) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
@@ -69,6 +73,28 @@ beforeEach(() => {
 });
 
 describe('Files workspace boundaries', () => {
+  it('places the focused editor in the primary Files slot and restores the listing on Close', async () => {
+    vi.mocked(filesApi.openText).mockResolvedValue(textDocument);
+    renderFiles();
+    await screen.findByRole('checkbox', { name: 'Select данни.bin' });
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select данни.bin' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+
+    const workspace = screen.getByRole('region', { name: `Files on ${host.displayName}` });
+    const editor = await screen.findByRole('region', { name: 'Remote text editor' });
+    expect(editor.parentElement).toBe(workspace);
+    expect(workspace.querySelector('.files-table-wrap')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Remote text' })).toHaveFocus();
+    expect(workspace.querySelector('.transfer-queue')).toBeInTheDocument();
+    expect(editor.compareDocumentPosition(workspace.querySelector('.transfer-queue')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('region', { name: 'Remote text editor' })).not.toBeInTheDocument();
+    expect(workspace.querySelector('.files-table-wrap')).toBeInTheDocument();
+    expect(filesApi.discardTextDocument).toHaveBeenCalledExactlyOnceWith(
+      { hostId: session.hostId, hostSessionId: session.hostSessionId, id: session.id }, textDocument.id);
+  });
+
   it('enables Edit only for one selected regular file', async () => {
     vi.mocked(filesApi.list).mockImplementation(async (_, path) => ({
       ...listing(path), entries: [
@@ -94,10 +120,7 @@ describe('Files workspace boundaries', () => {
   });
 
   it('keeps a dirty editor mounted while Files is hidden and blocks replacing it', async () => {
-    vi.mocked(filesApi.openText).mockResolvedValue({
-      id: 'document-a', hostId: host.id, hostSessionId: session.hostSessionId, sftpSessionId: session.id,
-      path: '/home/test/данни.bin', text: 'old', originalBytes: 3, newline: 'lf', bom: false, maxBytes: 1048576,
-    });
+    vi.mocked(filesApi.openText).mockResolvedValue(textDocument);
     const result = renderFiles();
     await screen.findByRole('checkbox', { name: 'Select данни.bin' });
     await userEvent.click(screen.getByRole('checkbox', { name: 'Select данни.bin' }));
@@ -105,11 +128,24 @@ describe('Files workspace boundaries', () => {
     const editor = await screen.findByRole('textbox', { name: 'Remote text' });
     await userEvent.type(editor, 'new');
     expect(screen.getByRole('button', { name: 'Edit' })).toBeDisabled();
+    const workspace = screen.getByRole('region', { name: `Files on ${host.displayName}` });
     result.rerender(<QueryClientProvider client={result.client}><FilesWorkspace host={host} visible={false} onShowOverview={vi.fn()} /></QueryClientProvider>);
+    expect(workspace).toBeInTheDocument();
+    expect(workspace).not.toBeVisible();
     expect(screen.queryByRole('textbox', { name: 'Remote text' })).not.toBeInTheDocument();
+    expect(filesApi.discardTextDocument).not.toHaveBeenCalled();
     result.rerender(<QueryClientProvider client={result.client}><FilesWorkspace host={host} visible onShowOverview={vi.fn()} /></QueryClientProvider>);
+    expect(screen.getByRole('region', { name: `Files on ${host.displayName}` })).toBe(workspace);
     expect(screen.getByRole('textbox', { name: 'Remote text' })).toHaveValue('oldnew');
     expect(filesApi.openText).toHaveBeenCalledOnce();
+    expect(filesApi.discardTextDocument).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(await screen.findByRole('dialog', { name: 'Discard unsaved changes?' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+    expect(screen.queryByRole('region', { name: 'Remote text editor' })).not.toBeInTheDocument();
+    expect(workspace.querySelector('.files-table-wrap')).toBeInTheDocument();
+    expect(filesApi.discardTextDocument).toHaveBeenCalledExactlyOnceWith(
+      { hostId: session.hostId, hostSessionId: session.hostSessionId, id: session.id }, textDocument.id);
   });
   it('retires a delayed open token under its old session after disconnect', async () => {
     const opening = deferred<Awaited<ReturnType<typeof filesApi.openText>>>();

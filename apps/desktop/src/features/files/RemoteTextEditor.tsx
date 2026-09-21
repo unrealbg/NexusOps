@@ -44,8 +44,12 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
   const discardedPlans = useRef(new Set<string>());
   const discardedDocuments = useRef(new Set<string>());
   const confirmationRef = useRef<'close' | 'reload' | null>(null);
+  const textAreaRef = useRef<HTMLTextAreaElement>(null);
   const scopeRef = useRef({ session, connected, visible });
   useLayoutEffect(() => { scopeRef.current = { session, connected, visible }; }, [session, connected, visible]);
+  useEffect(() => {
+    if (visible && !confirmationRef.current && !approvalRef.current) textAreaRef.current?.focus();
+  }, [visible]);
   const dirty = text !== baseline;
   const authorityLive = connected && owns(session, document);
   const stale = !authorityLive || revisionStale;
@@ -244,7 +248,7 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
     {stale && <Notice>Remote authority is stale or disconnected. Local text is retained; reload the remote file before saving.</Notice>}
     {jobId && <Notice>Saving staged text; wait for the transfer result.</Notice>}
     {error && <Notice>{error}</Notice>}
-    <label className="field"><span>Remote text</span><textarea aria-label="Remote text" spellCheck={false} value={text} disabled={!!jobId || !!approval || executing || reloading}
+    <label className="field"><span>Remote text</span><textarea ref={textAreaRef} aria-label="Remote text" spellCheck={false} value={text} disabled={!!jobId || !!approval || executing || reloading}
       onChange={(event) => { textRef.current = event.target.value; bufferGeneration.current += 1; setText(event.target.value); }} /></label>
     <div className="modal-actions">
       <Button disabled={!canPlan} onClick={() => void reviewSave()}>Save / review</Button>
