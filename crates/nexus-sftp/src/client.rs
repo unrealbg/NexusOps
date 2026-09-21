@@ -1154,11 +1154,14 @@ mod fault_tests {
         EditorSymlink,
         EditorSpecial,
         EditorUnknown,
+        EditorMetadataDenied,
+        EditorMetadataMismatch,
     }
 
     struct MatrixState {
         fault: Fault,
         files: HashMap<String, Vec<u8>>,
+        modes: HashMap<String, u32>,
         calls: Vec<String>,
         writes: usize,
         reads: usize,
@@ -1224,10 +1227,10 @@ mod fault_tests {
                             Fault::EditorSymlink => Some(0o120777),
                             Fault::EditorSpecial => Some(0o020600),
                             Fault::EditorUnknown => None,
-                            _ => Some(0o100600),
+                            _ => Some(state.modes.get(&path).copied().unwrap_or(0o100600)),
                         }
                     } else {
-                        Some(0o100600)
+                        Some(state.modes.get(&path).copied().unwrap_or(0o100600))
                     },
                     size: Some(
                         if state.fault == Fault::DeclaredSmall && path == "/fixture/editor" {
@@ -1253,7 +1256,7 @@ mod fault_tests {
             id: u32,
             path: String,
             flags: OpenFlags,
-            _: FileAttributes,
+            attrs: FileAttributes,
         ) -> Result<Handle, Self::Error> {
             let mut state = self.0.lock().unwrap();
             state.calls.push(format!("OPEN {path}"));
@@ -1265,6 +1268,9 @@ mod fault_tests {
                     return Err(StatusCode::Failure);
                 }
                 state.files.insert(path.clone(), Vec::new());
+                state
+                    .modes
+                    .insert(path.clone(), 0o100000 | attrs.permissions.unwrap_or(0o600));
             } else if !state.files.contains_key(&path) {
                 return Err(StatusCode::NoSuchFile);
             }
@@ -1335,6 +1341,28 @@ mod fault_tests {
             }
         }
 
+        async fn setstat(
+            &mut self,
+            id: u32,
+            path: String,
+            attrs: FileAttributes,
+        ) -> Result<Status, Self::Error> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("SETSTAT {path}"));
+            if state.fault == Fault::EditorMetadataDenied {
+                return Err(StatusCode::PermissionDenied);
+            }
+            if !state.files.contains_key(&path) {
+                return Err(StatusCode::NoSuchFile);
+            }
+            if state.fault != Fault::EditorMetadataMismatch
+                && let Some(mode) = attrs.permissions
+            {
+                state.modes.insert(path, 0o100000 | (mode & 0o7777));
+            }
+            Ok(ok(id))
+        }
+
         async fn remove(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
             let mut state = self.0.lock().unwrap();
             state.calls.push(format!("REMOVE {path}"));
@@ -1342,6 +1370,7 @@ mod fault_tests {
                 return Err(StatusCode::PermissionDenied);
             }
             state.files.remove(&path).ok_or(StatusCode::NoSuchFile)?;
+            state.modes.remove(&path);
             Ok(ok(id))
         }
 
@@ -1381,9 +1410,12 @@ mod fault_tests {
                     .get(&source)
                     .ok_or(StatusCode::NoSuchFile)?
                     .clone();
-                state.files.insert(destination, content);
+                state.files.insert(destination.clone(), content);
                 if request == "posix-rename@openssh.com" {
                     state.files.remove(&source);
+                    if let Some(mode) = state.modes.remove(&source) {
+                        state.modes.insert(destination, mode);
+                    }
                 }
                 return Ok(Packet::Status(ok(id)));
             }
@@ -1399,6 +1431,7 @@ mod fault_tests {
                 ("/fixture/source".into(), b"first-second".to_vec()),
                 ("/fixture/staging".into(), b"old-staging".to_vec()),
             ]),
+            modes: HashMap::new(),
             calls: Vec::new(),
             writes: 0,
             reads: 0,
@@ -1483,6 +1516,99 @@ mod fault_tests {
                     .calls
                     .iter()
                     .any(|call| call == "OPEN /fixture/editor")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn editor_metadata_denial_or_readback_mismatch_cleans_owned_staging_without_replace() {
+        use nexus_model::{TextNewline, TransferState};
+        for fault in [Fault::EditorMetadataDenied, Fault::EditorMetadataMismatch] {
+            let (client, state) = matrix_client(fault).await;
+            {
+                let mut fixture = state.lock().unwrap();
+                fixture
+                    .files
+                    .insert("/fixture/editor".into(), b"old".to_vec());
+                fixture.modes.insert("/fixture/editor".into(), 0o100640);
+            }
+            let revision = client.editor_revision("/fixture/editor").await.unwrap();
+            let store = crate::FilePlanStore::default();
+            let document = store
+                .register_editor_document(
+                    client.as_ref(),
+                    "/fixture/editor".into(),
+                    revision,
+                    b"old",
+                    TextNewline::Lf,
+                    false,
+                )
+                .unwrap();
+            let plan = store
+                .plan_editor_save(client, document, "new".into())
+                .await
+                .unwrap();
+            let manager = crate::TransferManager::new();
+            let job = manager
+                .execute(
+                    store
+                        .consume(
+                            plan.id,
+                            plan.host_id,
+                            plan.host_session_id,
+                            plan.sftp_session_id,
+                        )
+                        .unwrap(),
+                )
+                .await
+                .unwrap()[0]
+                .id;
+            let failed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let view = manager
+                        .list(None)
+                        .into_iter()
+                        .find(|item| item.id == job)
+                        .unwrap();
+                    if view.state == TransferState::Failed {
+                        break view;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                failed.error.unwrap().code,
+                ErrorCode::SftpDenied | ErrorCode::FilePolicy
+            ));
+            let fixture = state.lock().unwrap();
+            assert_eq!(fixture.files["/fixture/editor"], b"old");
+            assert!(
+                !fixture
+                    .files
+                    .keys()
+                    .any(|path| path.ends_with(".edit.part"))
+            );
+            assert!(
+                fixture
+                    .calls
+                    .iter()
+                    .any(|call| call.starts_with("SETSTAT "))
+            );
+            assert_eq!(
+                fixture
+                    .calls
+                    .iter()
+                    .filter(|call| call.starts_with("REMOVE "))
+                    .count(),
+                1
+            );
+            assert!(
+                !fixture
+                    .calls
+                    .iter()
+                    .any(|call| call == "EXTENDED posix-rename@openssh.com")
             );
         }
     }

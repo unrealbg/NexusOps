@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   ConflictPolicy, FileOperationPlan, Host, RemoteEntry, RemoteTextDocument, SftpSessionInfo, TransferJob,
 } from '@nexusops/protocol';
@@ -41,10 +41,18 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   const [editor, setEditor] = useState<RemoteTextDocument | null>(null);
   const [openingEditor, setOpeningEditor] = useState(false);
   const openingEditorGuard = useRef(false);
+  const mounted = useRef(true);
+  const visibleNow = useRef(visible);
+  useLayoutEffect(() => { visibleNow.current = visible; }, [visible]);
   const requestGeneration = useRef(0);
   const approvalGeneration = useRef(0);
   const activeSession = useRef<SftpSessionInfo | null>(null);
   const approvalRef = useRef<Approval | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const connected = connection.data?.state === 'connected';
   const canMutate = connected && !!sftp && sftp.hostId === host.id && !stale && !loading;
@@ -251,10 +259,13 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
     try {
       session = owner(); generation = approvalGeneration.current;
       const document = await filesApi.openText(session, entry.path);
-      if (isCurrent(session, generation) && document.hostId === session.hostId &&
-          document.hostSessionId === session.hostSessionId && document.sftpSessionId === session.id) setEditor(document);
-    } catch (reason) { if (session && isCurrent(session, generation)) setError(applicationError(reason).message); }
-    finally { openingEditorGuard.current = false; setOpeningEditor(false); }
+      if (mounted.current && visibleNow.current && isCurrent(session, generation) &&
+          document.hostId === session.hostId && document.hostSessionId === session.hostSessionId &&
+          document.sftpSessionId === session.id) setEditor(document);
+      else void filesApi.discardTextDocument({ hostId: document.hostId, hostSessionId: document.hostSessionId,
+        id: document.sftpSessionId }, document.id).catch(() => undefined);
+    } catch (reason) { if (mounted.current && session && isCurrent(session, generation)) setError(applicationError(reason).message); }
+    finally { openingEditorGuard.current = false; if (mounted.current) setOpeningEditor(false); }
   }
   async function retry(job: TransferJob) {
     let session: SftpSessionInfo | null = null;

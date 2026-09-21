@@ -220,7 +220,35 @@ impl FilePlanStore {
                 expires: Instant::now() + DOCUMENT_LIFETIME,
             },
         );
+        let expires = documents.get(&id).expect("inserted document").expires;
+        drop(documents);
+        schedule_document_expiry(Arc::downgrade(&self.documents), id, expires);
         Ok(id)
+    }
+
+    /// Retires only a matching, still-pending editor document. A consumed or
+    /// session-revoked token is already retired and may be discarded again.
+    pub fn discard_editor_document(
+        &self,
+        id: EditorDocumentId,
+        host: HostId,
+        host_session: HostSessionId,
+        sftp: SftpSessionId,
+    ) -> Result<(), AppError> {
+        let mut documents = self
+            .documents
+            .lock()
+            .map_err(|_| policy_error("The editor authority store is unavailable."))?;
+        let Some(document) = documents.get(&id) else {
+            return Ok(());
+        };
+        if (document.host, document.host_session, document.sftp) != (host, host_session, sftp) {
+            return Err(policy_error(
+                "The editor document belongs to another SFTP session.",
+            ));
+        }
+        documents.remove(&id);
+        Ok(())
     }
 
     pub async fn plan_editor_save(
@@ -633,6 +661,29 @@ fn schedule_plan_expiry(
                 .is_some_and(|stored| stored.expires == expires)
         {
             plans.remove(&id);
+        }
+    });
+}
+
+fn schedule_document_expiry(
+    documents: Weak<Mutex<HashMap<EditorDocumentId, EditorDocumentAuthority>>>,
+    id: EditorDocumentId,
+    expires: Instant,
+) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    runtime.spawn(async move {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(expires)).await;
+        let Some(documents) = documents.upgrade() else {
+            return;
+        };
+        if let Ok(mut documents) = documents.lock()
+            && documents
+                .get(&id)
+                .is_some_and(|value| value.expires == expires)
+        {
+            documents.remove(&id);
         }
     });
 }
@@ -1346,6 +1397,76 @@ mod tests {
             store.plan_editor_save(client.clone(), token, "right".into()),
         );
         assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+    }
+
+    #[tokio::test]
+    async fn ed03_explicit_document_close_is_scoped_idempotent_and_releases_capacity() {
+        let client = PlanClient::new();
+        let other = PlanClient::new();
+        let info = client.info();
+        let revision = client.editor_revision("/home/test/a.txt").await.unwrap();
+        let store = FilePlanStore::default();
+        let retained = store
+            .register_editor_document(
+                other.as_ref(),
+                "/home/test/retained".into(),
+                revision.clone(),
+                b"data",
+                TextNewline::Lf,
+                false,
+            )
+            .unwrap();
+        for index in 0..=PLAN_CAP {
+            let id = store
+                .register_editor_document(
+                    client.as_ref(),
+                    format!("/home/test/{index}.txt"),
+                    revision.clone(),
+                    b"data",
+                    TextNewline::Lf,
+                    false,
+                )
+                .unwrap();
+            assert!(
+                store
+                    .discard_editor_document(
+                        id,
+                        other.info.host_id,
+                        other.info.host_session_id,
+                        other.info.id
+                    )
+                    .is_err()
+            );
+            assert!(store.documents.lock().unwrap().contains_key(&id));
+            store
+                .discard_editor_document(id, info.host_id, info.host_session_id, info.id)
+                .unwrap();
+            store
+                .discard_editor_document(id, info.host_id, info.host_session_id, info.id)
+                .unwrap();
+        }
+        assert!(store.documents.lock().unwrap().contains_key(&retained));
+        store
+            .documents
+            .lock()
+            .unwrap()
+            .get_mut(&retained)
+            .unwrap()
+            .expires = Instant::now() - Duration::from_millis(1);
+        assert!(
+            store
+                .plan_editor_save(other.clone(), retained, "new".into())
+                .await
+                .is_err()
+        );
+        store
+            .discard_editor_document(
+                retained,
+                other.info.host_id,
+                other.info.host_session_id,
+                other.info.id,
+            )
+            .unwrap();
     }
 
     #[tokio::test]

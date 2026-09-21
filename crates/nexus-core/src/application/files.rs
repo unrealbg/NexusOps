@@ -144,6 +144,21 @@ impl Application {
             .await
     }
 
+    pub fn discard_remote_text_document(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+        sftp_session_id: SftpSessionId,
+        document_id: nexus_model::EditorDocumentId,
+    ) -> Result<(), AppError> {
+        self.file_plans.discard_editor_document(
+            document_id,
+            host_id,
+            host_session_id,
+            sftp_session_id,
+        )
+    }
+
     pub async fn plan_upload(
         &self,
         host_id: HostId,

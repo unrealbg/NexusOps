@@ -909,10 +909,6 @@ async fn run_editor_save(
             "The remote file contents changed during editor staging.",
         ));
     }
-    if let Err(error) = enter_finalizing(state, id, &cancel) {
-        guard.cleanup().await?;
-        return Err(error);
-    }
     let current = client.editor_revision(destination).await;
     if current.as_ref() != Ok(expected) {
         guard.cleanup().await?;
@@ -937,6 +933,10 @@ async fn run_editor_save(
             ErrorCode::Conflict,
             "The remote file contents changed before editor replacement.",
         ));
+    }
+    if let Err(error) = enter_finalizing(state, id, &cancel) {
+        guard.cleanup().await?;
+        return Err(error);
     }
     match client.commit_replace(&staging, destination).await {
         Ok(()) => {
@@ -1345,6 +1345,10 @@ mod tests {
         commit_replace_calls: AtomicUsize,
         editor_revisions: Mutex<VecDeque<crate::EditorRevision>>,
         editor_reads: Mutex<VecDeque<Vec<u8>>>,
+        editor_read_calls: AtomicUsize,
+        block_final_editor_read: AtomicBool,
+        final_editor_read_started: Notify,
+        final_editor_read_release: Notify,
         metadata_calls: AtomicUsize,
         commit_replace_result: Mutex<Option<Result<(), AppError>>>,
         identity_calls: AtomicUsize,
@@ -1401,6 +1405,10 @@ mod tests {
                 commit_replace_calls: AtomicUsize::new(0),
                 editor_revisions: Mutex::new(VecDeque::new()),
                 editor_reads: Mutex::new(VecDeque::new()),
+                editor_read_calls: AtomicUsize::new(0),
+                block_final_editor_read: AtomicBool::new(false),
+                final_editor_read_started: Notify::new(),
+                final_editor_read_release: Notify::new(),
                 metadata_calls: AtomicUsize::new(0),
                 commit_replace_result: Mutex::new(None),
                 identity_calls: AtomicUsize::new(0),
@@ -1456,6 +1464,12 @@ mod tests {
                 .unwrap_or_else(editor_revision_fixture))
         }
         async fn read_editor_bytes(&self, _: &str) -> Result<Vec<u8>, AppError> {
+            if self.editor_read_calls.fetch_add(1, Ordering::SeqCst) == 2
+                && self.block_final_editor_read.load(Ordering::SeqCst)
+            {
+                self.final_editor_read_started.notify_one();
+                self.final_editor_read_release.notified().await;
+            }
             Ok(self
                 .editor_reads
                 .lock()
@@ -1678,6 +1692,39 @@ mod tests {
         assert!(!unknown.retryable);
         assert_eq!(client.commit_replace_calls.load(Ordering::SeqCst), 1);
         assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ed05_cancellation_during_final_editor_validation_precedes_finalizing() {
+        let client = CountingClient::new();
+        client.block_final_editor_read.store(true, Ordering::SeqCst);
+        let info = client.info();
+        let manager = TransferManager::new();
+        let job = manager.enqueue(editor_spec(client.clone())).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.final_editor_read_started.notified(),
+        )
+        .await
+        .unwrap();
+        let state = manager
+            .list(Some(info.host_id))
+            .into_iter()
+            .find(|item| item.id == job.id)
+            .unwrap()
+            .state;
+        assert_ne!(
+            state,
+            TransferState::Finalizing,
+            "full-file validation is not the commit boundary"
+        );
+        manager
+            .cancel(job.id, info.host_id, info.host_session_id, info.id)
+            .unwrap();
+        client.final_editor_read_release.notify_one();
+        wait_for_state(&manager, job.id, TransferState::Cancelled).await;
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.commit_replace_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

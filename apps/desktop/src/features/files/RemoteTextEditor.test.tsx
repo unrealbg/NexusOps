@@ -8,7 +8,7 @@ import { RemoteTextEditor } from './RemoteTextEditor';
 
 vi.mock('../../api/client', async (original) => ({
   ...(await original<typeof import('../../api/client')>()),
-  filesApi: { openText: vi.fn(), planTextSave: vi.fn(), execute: vi.fn(), discardPlan: vi.fn() },
+  filesApi: { openText: vi.fn(), planTextSave: vi.fn(), execute: vi.fn(), discardPlan: vi.fn(), discardTextDocument: vi.fn() },
 }));
 
 const session: SftpSessionInfo = {
@@ -39,11 +39,117 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(filesApi.planTextSave).mockResolvedValue(plan);
   vi.mocked(filesApi.discardPlan).mockResolvedValue();
+  vi.mocked(filesApi.discardTextDocument).mockResolvedValue();
   vi.mocked(filesApi.execute).mockResolvedValue([job('queued')]);
   vi.mocked(filesApi.openText).mockResolvedValue(document);
 });
 
 describe('remote text editor authority and interaction', () => {
+  it('ED-01 discards a delayed plan under its original session after confirmed close and unmount', async () => {
+    let resolve!: (value: FileOperationPlan) => void;
+    vi.mocked(filesApi.planTextSave).mockReturnValue(new Promise((done) => { resolve = done; }));
+    const result = view();
+    await userEvent.type(screen.getByRole('textbox', { name: 'Remote text' }), 'A');
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+    expect(result.props.onClose).toHaveBeenCalledOnce();
+    result.unmount();
+    await act(async () => { resolve(plan); });
+    expect(filesApi.discardPlan).toHaveBeenCalledExactlyOnceWith(session, plan.id);
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('ED-02 discards approval for an older buffer snapshot while retaining newer text', async () => {
+    let resolve!: (value: FileOperationPlan) => void;
+    vi.mocked(filesApi.planTextSave).mockReturnValue(new Promise((done) => { resolve = done; }));
+    view();
+    const editor = screen.getByRole('textbox', { name: 'Remote text' });
+    fireEvent.change(editor, { target: { value: 'text A' } });
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    fireEvent.change(editor, { target: { value: 'text B' } });
+    await act(async () => { resolve(plan); });
+    expect(editor).toHaveValue('text B');
+    expect(screen.queryByRole('dialog', { name: 'Approve remote text save' })).not.toBeInTheDocument();
+    expect(filesApi.discardPlan).toHaveBeenCalledExactlyOnceWith(session, plan.id);
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('ED-04 handles physical Ctrl+S from an editor control exactly once', async () => {
+    view();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Remote text' }), { target: { value: 'changed' } });
+    const control = screen.getByRole('button', { name: 'Close' });
+    control.focus();
+    fireEvent.keyDown(control, { key: 'ы', code: 'KeyS', ctrlKey: true });
+    fireEvent.keyDown(control, { key: 'ы', code: 'KeyS', ctrlKey: true });
+    expect(filesApi.planTextSave).toHaveBeenCalledOnce();
+  });
+
+  it('handles English KeyS in the textarea but not a keydown outside the editor', () => {
+    view();
+    const editor = screen.getByRole('textbox', { name: 'Remote text' });
+    fireEvent.change(editor, { target: { value: 'changed' } });
+    expect(fireEvent.keyDown(globalThis.document.body, { key: 's', code: 'KeyS', ctrlKey: true })).toBe(true);
+    expect(filesApi.planTextSave).not.toHaveBeenCalled();
+    expect(fireEvent.keyDown(editor, { key: 's', code: 'KeyS', ctrlKey: true })).toBe(false);
+    expect(filesApi.planTextSave).toHaveBeenCalledOnce();
+  });
+
+  it('ED-04 lets AltGraph pass through even when Ctrl is reported', () => {
+    view();
+    const editor = screen.getByRole('textbox', { name: 'Remote text' });
+    fireEvent.change(editor, { target: { value: 'changed' } });
+    const key = new KeyboardEvent('keydown', { key: 's', code: 'KeyS', ctrlKey: true, bubbles: true, cancelable: true });
+    Object.defineProperty(key, 'getModifierState', { value: (modifier: string) => modifier === 'AltGraph' });
+    const handled = fireEvent(editor, key);
+    expect(handled).toBe(true);
+    expect(filesApi.planTextSave).not.toHaveBeenCalled();
+  });
+
+  it('passes unsupported modifiers, repeat and confirmation through without save review', async () => {
+    view();
+    const editor = screen.getByRole('textbox', { name: 'Remote text' });
+    fireEvent.change(editor, { target: { value: 'changed' } });
+    for (const modifiers of [{ altKey: true }, { metaKey: true }, { repeat: true }]) {
+      expect(fireEvent.keyDown(editor, { key: 's', code: 'KeyS', ctrlKey: true, ...modifiers })).toBe(true);
+    }
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(fireEvent.keyDown(editor, { key: 's', code: 'KeyS', ctrlKey: true })).toBe(true);
+    expect(filesApi.planTextSave).not.toHaveBeenCalled();
+  });
+
+  it('retires a clean document on Close once, including unmount cleanup', async () => {
+    const result = view();
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    result.unmount();
+    await waitFor(() => expect(filesApi.discardTextDocument).toHaveBeenCalledExactlyOnceWith(
+      { hostId: document.hostId, hostSessionId: document.hostSessionId, id: document.sftpSessionId }, document.id));
+  });
+
+  it('retires the old token after reload and the replacement on unmount', async () => {
+    const replacement = { ...document, id: 'document-b', text: 'fresh' };
+    vi.mocked(filesApi.openText).mockResolvedValueOnce(replacement);
+    const result = view();
+    await userEvent.click(screen.getByRole('button', { name: 'Reload remote' }));
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Remote text' })).toHaveValue('fresh'));
+    expect(filesApi.discardTextDocument).toHaveBeenCalledWith(
+      { hostId: document.hostId, hostSessionId: document.hostSessionId, id: document.sftpSessionId }, document.id);
+    result.unmount();
+    await waitFor(() => expect(filesApi.discardTextDocument).toHaveBeenCalledWith(
+      { hostId: replacement.hostId, hostSessionId: replacement.hostSessionId, id: replacement.sftpSessionId }, replacement.id));
+  });
+
+  it('retires an ignored reload token returned after editor unmount', async () => {
+    let resolve!: (value: RemoteTextDocument) => void;
+    vi.mocked(filesApi.openText).mockReturnValue(new Promise((done) => { resolve = done; }));
+    const result = view();
+    await userEvent.click(screen.getByRole('button', { name: 'Reload remote' }));
+    result.unmount();
+    await act(async () => { resolve({ ...document, id: 'late-document' }); });
+    expect(filesApi.discardTextDocument).toHaveBeenCalledWith(
+      { hostId: document.hostId, hostSessionId: document.hostSessionId, id: document.sftpSessionId }, 'late-document');
+  });
+
   it('reviews physical KeyS exactly once, including BG layout, but ignores AltGr', async () => {
     view();
     const editor = screen.getByRole('textbox', { name: 'Remote text' });

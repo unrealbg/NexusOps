@@ -13,7 +13,7 @@ vi.mock('../../api/client', async (original) => ({
   hostApi: { session: vi.fn() },
   filesApi: {
     open: vi.fn(), list: vi.fn(), properties: vi.fn(), chooseUploadFiles: vi.fn(),
-    openText: vi.fn(), planTextSave: vi.fn(),
+    openText: vi.fn(), planTextSave: vi.fn(), discardTextDocument: vi.fn(),
     chooseDownloadDirectory: vi.fn(), planUpload: vi.fn(), planDownload: vi.fn(),
     planCreateDirectory: vi.fn(), planRename: vi.fn(), planDelete: vi.fn(),
     execute: vi.fn(), discardPlan: vi.fn(), discardGrant: vi.fn(),
@@ -65,6 +65,7 @@ beforeEach(() => {
   vi.mocked(filesApi.open).mockResolvedValue(session);
   vi.mocked(filesApi.list).mockImplementation(async (_, path) => listing(path));
   vi.mocked(filesApi.transfers).mockResolvedValue([]);
+  vi.mocked(filesApi.discardTextDocument).mockResolvedValue();
 });
 
 describe('Files workspace boundaries', () => {
@@ -109,6 +110,23 @@ describe('Files workspace boundaries', () => {
     result.rerender(<QueryClientProvider client={result.client}><FilesWorkspace host={host} visible onShowOverview={vi.fn()} /></QueryClientProvider>);
     expect(screen.getByRole('textbox', { name: 'Remote text' })).toHaveValue('oldnew');
     expect(filesApi.openText).toHaveBeenCalledOnce();
+  });
+  it('retires a delayed open token under its old session after disconnect', async () => {
+    const opening = deferred<Awaited<ReturnType<typeof filesApi.openText>>>();
+    vi.mocked(filesApi.openText).mockReturnValue(opening.promise);
+    const view = renderFiles();
+    await screen.findByRole('checkbox', { name: 'Select данни.bin' });
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Select данни.bin' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), disconnected); });
+    await screen.findByText(/Connect this host to browse files/);
+    await act(async () => { opening.resolve({
+      id: 'delayed-document', hostId: host.id, hostSessionId: session.hostSessionId, sftpSessionId: session.id,
+      path: '/home/test/данни.bin', text: 'old', originalBytes: 3, newline: 'lf', bom: false, maxBytes: 1048576,
+    }); await opening.promise; });
+    expect(screen.queryByRole('textbox', { name: 'Remote text' })).not.toBeInTheDocument();
+    expect(filesApi.discardTextDocument).toHaveBeenCalledExactlyOnceWith(
+      { hostId: session.hostId, hostSessionId: session.hostSessionId, id: session.id }, 'delayed-document');
   });
   it('does not surface a delayed upload plan after disconnect', async () => {
     const planning = deferred<FileOperationPlan>();
