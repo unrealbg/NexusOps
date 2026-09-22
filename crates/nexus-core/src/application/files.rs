@@ -344,7 +344,7 @@ impl Application {
         host_session_id: HostSessionId,
         sftp_session_id: SftpSessionId,
         plan_id: FilePlanId,
-    ) -> Result<(), AppError> {
+    ) -> Result<bool, AppError> {
         self.file_plans
             .discard(plan_id, host_id, host_session_id, sftp_session_id)
     }

@@ -118,6 +118,7 @@ export const filesApi = {
   planDelete: (session: SftpOwnership, path: string) => request<FileOperationPlan>('plan_delete', { ...sftpArgs(session), path }),
   execute: (session: SftpOwnership, planId: string) => request<TransferJob[]>('execute_file_plan', { ...sftpArgs(session), planId }),
   discardPlan: (session: SftpOwnership, planId: string) => request<void>('discard_file_plan', { ...sftpArgs(session), planId }),
+  discardEditorPlan: (session: SftpOwnership, planId: string) => request<boolean>('discard_file_plan', { ...sftpArgs(session), planId }),
   discardGrant: (session: SftpOwnership, grantId: string) => request<void>('discard_local_grant', { ...sftpArgs(session), grantId }),
   transfers: (hostId?: string) => request<TransferJob[]>('list_transfers', { hostId: hostId ?? null }),
   cancel: (session: SftpOwnership, jobId: string) => request<void>('cancel_transfer', { ...sftpArgs(session), jobId }),

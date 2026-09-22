@@ -8,7 +8,7 @@ import { RemoteTextEditor } from './RemoteTextEditor';
 
 vi.mock('../../api/client', async (original) => ({
   ...(await original<typeof import('../../api/client')>()),
-  filesApi: { openText: vi.fn(), planTextSave: vi.fn(), execute: vi.fn(), discardPlan: vi.fn(), discardTextDocument: vi.fn() },
+  filesApi: { openText: vi.fn(), planTextSave: vi.fn(), execute: vi.fn(), discardPlan: vi.fn(), discardEditorPlan: vi.fn(), discardTextDocument: vi.fn() },
 }));
 
 const session: SftpSessionInfo = {
@@ -36,9 +36,10 @@ function view(overrides: Partial<React.ComponentProps<typeof RemoteTextEditor>> 
   return { ...render(<RemoteTextEditor {...props} />), props };
 }
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   vi.mocked(filesApi.planTextSave).mockResolvedValue(plan);
   vi.mocked(filesApi.discardPlan).mockResolvedValue();
+  vi.mocked(filesApi.discardEditorPlan).mockResolvedValue(true);
   vi.mocked(filesApi.discardTextDocument).mockResolvedValue();
   vi.mocked(filesApi.execute).mockResolvedValue([job('queued')]);
   vi.mocked(filesApi.openText).mockResolvedValue(document);
@@ -168,14 +169,130 @@ describe('remote text editor authority and interaction', () => {
     await waitFor(() => expect(filesApi.execute).toHaveBeenCalledOnce());
   });
 
-  it('discards a current approval exactly once and requires reload before another save', async () => {
+  it('discards P1 and permits a fresh P2 review of the unchanged dirty text without reload', async () => {
+    const secondPlan = { ...plan, id: 'plan-b' };
+    vi.mocked(filesApi.planTextSave).mockResolvedValueOnce(plan).mockResolvedValueOnce(secondPlan);
     view();
     await userEvent.type(screen.getByRole('textbox', { name: 'Remote text' }), 'new');
     await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
     await screen.findByRole('dialog', { name: 'Approve remote text save' });
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(filesApi.discardPlan).toHaveBeenCalledExactlyOnceWith(session, plan.id);
+    expect(filesApi.discardEditorPlan).toHaveBeenCalledExactlyOnceWith(session, plan.id);
+    expect(screen.getByRole('textbox', { name: 'Remote text' })).toHaveValue('old\nnew');
+    expect(screen.getByRole('status')).toHaveTextContent('Save cancelled. Your unsaved changes are retained.');
+    expect(screen.queryByText(/Remote authority is stale or disconnected/)).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save / review' })).toBeEnabled());
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    expect(filesApi.planTextSave).toHaveBeenNthCalledWith(2, session, document.id, 'old\nnew');
+    expect(await screen.findByRole('dialog', { name: 'Approve remote text save' })).toBeInTheDocument();
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps review disabled until discard confirms and plans the latest buffer snapshot', async () => {
+    let release!: (value: boolean) => void;
+    vi.mocked(filesApi.discardEditorPlan).mockReturnValue(new Promise((done) => { release = done; }));
+    vi.mocked(filesApi.planTextSave).mockResolvedValueOnce(plan).mockResolvedValueOnce({ ...plan, id: 'plan-b' });
+    view();
+    const editor = screen.getByRole('textbox', { name: 'Remote text' });
+    await userEvent.type(editor, 'A');
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    await screen.findByRole('dialog', { name: 'Approve remote text save' });
+    await userEvent.click(screen.getByRole('button', { name: 'Close dialog' }));
     expect(screen.getByRole('button', { name: 'Save / review' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Reload remote' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('Cancelling save review');
+    await act(async () => { release(true); });
+    expect(screen.getByRole('button', { name: 'Save / review' })).toBeEnabled();
+    await userEvent.type(editor, 'B');
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    expect(filesApi.planTextSave).toHaveBeenNthCalledWith(2, session, document.id, 'old\nAB');
+    expect(await screen.findByRole('dialog', { name: 'Approve remote text save' })).toBeInTheDocument();
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('treats Escape as Cancel and blocks retry when backend discard is unconfirmed', async () => {
+    vi.mocked(filesApi.discardEditorPlan).mockResolvedValue(false);
+    view();
+    await userEvent.type(screen.getByRole('textbox', { name: 'Remote text' }), 'A');
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Approve remote text save' });
+    fireEvent(dialog, new Event('cancel', { bubbles: true, cancelable: true }));
+    await screen.findByText(/save plan was not confirmed cancelled/i);
+    expect(filesApi.discardEditorPlan).toHaveBeenCalledExactlyOnceWith(session, plan.id);
+    expect(screen.getByRole('textbox', { name: 'Remote text' })).toHaveValue('old\nA');
+    expect(screen.getByRole('button', { name: 'Save / review' })).toBeDisabled();
+    expect(screen.queryByText('Save cancelled. Your unsaved changes are retained.')).not.toBeInTheDocument();
+  });
+
+  it('does not revive authority after disconnect during a delayed discard', async () => {
+    let release!: (value: boolean) => void;
+    vi.mocked(filesApi.discardEditorPlan).mockReturnValue(new Promise((done) => { release = done; }));
+    const result = view();
+    await userEvent.type(screen.getByRole('textbox', { name: 'Remote text' }), 'A');
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    await screen.findByRole('dialog', { name: 'Approve remote text save' });
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    result.rerender(<RemoteTextEditor {...result.props} connected={false} session={null} />);
+    await act(async () => { release(true); });
+    result.rerender(<RemoteTextEditor {...result.props} session={{ ...session, id: 'sftp-b', hostSessionId: 'connection-b' }} />);
+    expect(screen.getByRole('textbox', { name: 'Remote text' })).toHaveValue('old\nA');
+    expect(screen.getByRole('button', { name: 'Save / review' })).toBeDisabled();
+    expect(screen.queryByText('Save cancelled. Your unsaved changes are retained.')).not.toBeInTheDocument();
+  });
+
+  it('clears a prior successful Cancel notice when the session disconnects', async () => {
+    const result = view();
+    await userEvent.type(screen.getByRole('textbox', { name: 'Remote text' }), 'A');
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    await screen.findByRole('dialog', { name: 'Approve remote text save' });
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByText('Save cancelled. Your unsaved changes are retained.')).toBeInTheDocument();
+    result.rerender(<RemoteTextEditor {...result.props} connected={false} session={null} />);
+    await waitFor(() => expect(screen.queryByText('Save cancelled. Your unsaved changes are retained.')).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Save / review' })).toBeDisabled();
+  });
+
+  it('does not revive a retired document when discard completes after dirty Close and unmount', async () => {
+    let release!: (value: boolean) => void;
+    vi.mocked(filesApi.discardEditorPlan).mockReturnValue(new Promise((done) => { release = done; }));
+    const result = view();
+    await userEvent.type(screen.getByRole('textbox', { name: 'Remote text' }), 'A');
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    await screen.findByRole('dialog', { name: 'Approve remote text save' });
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Discard changes' }));
+    result.unmount();
+    await act(async () => { release(true); });
+    expect(result.props.onClose).toHaveBeenCalledOnce();
+    expect(filesApi.discardTextDocument).toHaveBeenCalledExactlyOnceWith(
+      { hostId: document.hostId, hostSessionId: document.hostSessionId, id: document.sftpSessionId }, document.id);
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('retains dirty text and blocks retry when discard rejects', async () => {
+    vi.mocked(filesApi.discardEditorPlan).mockRejectedValue({ code: 'sftpUnavailable', message: 'Session closed during cancel' });
+    view();
+    await userEvent.type(screen.getByRole('textbox', { name: 'Remote text' }), 'A');
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    await screen.findByRole('dialog', { name: 'Approve remote text save' });
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await screen.findByText(/Save cancellation could not be confirmed/);
+    expect(screen.getByRole('textbox', { name: 'Remote text' })).toHaveValue('old\nA');
+    expect(screen.getByRole('button', { name: 'Save / review' })).toBeDisabled();
+    expect(filesApi.planTextSave).toHaveBeenCalledOnce();
+  });
+
+  it('approves a plan once even if a second click races with Cancel', async () => {
+    view();
+    await userEvent.type(screen.getByRole('textbox', { name: 'Remote text' }), 'A');
+    await userEvent.click(screen.getByRole('button', { name: 'Save / review' }));
+    await screen.findByRole('dialog', { name: 'Approve remote text save' });
+    const approve = screen.getByRole('button', { name: 'Approve and save' });
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    await act(async () => { fireEvent.click(approve); fireEvent.click(cancel); fireEvent.click(approve); });
+    expect(filesApi.execute).toHaveBeenCalledExactlyOnceWith(session, plan.id);
+    expect(filesApi.discardEditorPlan).not.toHaveBeenCalled();
   });
 
   it('keeps dirty text across disconnect and never rebinds it to a new session', async () => {

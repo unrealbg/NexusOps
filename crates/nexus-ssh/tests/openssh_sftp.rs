@@ -267,10 +267,35 @@ async fn openssh_remote_text_editor_interoperability() {
         let document = store
             .register_editor_document(client.as_ref(), path.clone(), before, &bytes, newline, bom)
             .unwrap();
+        let cancelled = store
+            .plan_editor_save(client.clone(), document, "cancelled draft".into())
+            .await
+            .expect("cancelled review plan");
+        assert!(
+            store
+                .discard(
+                    cancelled.id,
+                    cancelled.host_id,
+                    cancelled.host_session_id,
+                    cancelled.sftp_session_id
+                )
+                .expect("confirmed cancel")
+        );
+        assert!(
+            store
+                .consume(
+                    cancelled.id,
+                    cancelled.host_id,
+                    cancelled.host_session_id,
+                    cancelled.sftp_session_id
+                )
+                .is_err()
+        );
         let plan = store
             .plan_editor_save(client.clone(), document, edited.into())
             .await
             .expect("plan");
+        assert_ne!(plan.id, cancelled.id);
         let internal = store
             .consume(
                 plan.id,

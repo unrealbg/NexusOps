@@ -29,6 +29,8 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
   const [jobId, setJobId] = useState<string | null>(null);
   const [executing, setExecuting] = useState(false);
   const [planning, setPlanning] = useState(false);
+  const [canceling, setCanceling] = useState(false);
+  const [cancelNotice, setCancelNotice] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<'close' | 'reload' | null>(null);
@@ -53,7 +55,7 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
   const dirty = text !== baseline;
   const authorityLive = connected && owns(session, document);
   const stale = !authorityLive || revisionStale;
-  const canPlan = visible && authorityLive && !revisionStale && dirty && !planning && !approval && !jobId && !executing && !reloading && !confirm;
+  const canPlan = visible && authorityLive && !revisionStale && dirty && !planning && !canceling && !approval && !jobId && !executing && !reloading && !confirm;
 
   function discardPlanOnce(owner: SftpSessionInfo, planId: string) {
     if (discardedPlans.current.has(planId)) return;
@@ -71,8 +73,47 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
     approvalRef.current = null;
     if (updateState && mounted.current) setApproval(null);
     if (pending) {
-      if (updateState && mounted.current) setRevisionStale(true); // Planning consumed the document token.
+      if (updateState && mounted.current) setRevisionStale(true);
       discardPlanOnce(pending.session, pending.plan.id);
+    }
+  }
+
+  async function cancelApproval() {
+    const pending = approvalRef.current;
+    if (!pending || canceling) return;
+    approvalRef.current = null;
+    setApproval(null);
+    setCanceling(true);
+    setCancelNotice(false);
+    setError(null);
+    const requestGeneration = generation.current;
+    const requestDocumentId = documentRef.current.id;
+    try {
+      const released = await filesApi.discardEditorPlan(pending.session, pending.plan.id);
+      if (!released) {
+        if (mounted.current && !retired.current && documentRef.current.id === requestDocumentId) {
+          setRevisionStale(true);
+          setError('The save plan was not confirmed cancelled. Reload the remote file before saving again.');
+        }
+        return;
+      }
+      const current = scopeRef.current;
+      if (!mounted.current || retired.current) return;
+      if (documentRef.current.id !== requestDocumentId) return;
+      if (generation.current !== requestGeneration || !current.connected || !current.visible ||
+          !owns(current.session, documentRef.current) ||
+          new Date(pending.plan.expiresAt).getTime() <= Date.now()) {
+        setRevisionStale(true);
+        return;
+      }
+      setCancelNotice(true);
+    } catch (reason) {
+      if (mounted.current && !retired.current && documentRef.current.id === requestDocumentId) {
+        setRevisionStale(true);
+        setError(`Save cancellation could not be confirmed: ${applicationError(reason).message} Reload the remote file before saving again.`);
+      }
+    } finally {
+      if (mounted.current && !retired.current) setCanceling(false);
     }
   }
 
@@ -106,6 +147,7 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
       if (!active) return;
       setPlanning(false);
       setReloading(false);
+      setCancelNotice(false);
       forgetApproval();
     });
     return () => { active = false; };
@@ -139,6 +181,7 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
     const requestBufferGeneration = bufferGeneration.current;
     const owner = session;
     setError(null);
+    setCancelNotice(false);
     try {
       const plan = await filesApi.planTextSave(owner, requestDocument.id, requestText);
       const current = scopeRef.current;
@@ -175,6 +218,7 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
     if (!pending) return;
     approvalRef.current = null;
     if (mounted.current) setApproval(null);
+    setCancelNotice(false);
     const current = scopeRef.current;
     if (!mounted.current || retired.current || !current.connected || !current.visible ||
         !owns(current.session, documentRef.current) || current.session?.id !== pending.session.id ||
@@ -204,6 +248,7 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
     const requestGeneration = ++generation.current;
     forgetApproval();
     setError(null);
+    setCancelNotice(false);
     setReloading(true);
     try {
       const oldDocument = documentRef.current;
@@ -248,18 +293,20 @@ export function RemoteTextEditor({ initial, host, session, connected, visible, t
     {stale && <Notice>Remote authority is stale or disconnected. Local text is retained; reload the remote file before saving.</Notice>}
     {jobId && <Notice>Saving staged text; wait for the transfer result.</Notice>}
     {error && <Notice>{error}</Notice>}
+    {canceling && <Notice tone="neutral">Cancelling save review…</Notice>}
+    {cancelNotice && <Notice tone="neutral">Save cancelled. Your unsaved changes are retained.</Notice>}
     <label className="field"><span>Remote text</span><textarea ref={textAreaRef} aria-label="Remote text" spellCheck={false} value={text} disabled={!!jobId || !!approval || executing || reloading}
       onChange={(event) => { textRef.current = event.target.value; bufferGeneration.current += 1; setText(event.target.value); }} /></label>
     <div className="modal-actions">
       <Button disabled={!canPlan} onClick={() => void reviewSave()}>Save / review</Button>
-      <Button disabled={!connected || !session || !!jobId || executing || reloading} onClick={() => { if (dirty) { confirmationRef.current = 'reload'; setConfirm('reload'); } else void reload(); }}>Reload remote</Button>
+      <Button disabled={!connected || !session || !!jobId || executing || canceling || reloading} onClick={() => { if (dirty) { confirmationRef.current = 'reload'; setConfirm('reload'); } else void reload(); }}>Reload remote</Button>
       <Button disabled={!!jobId || executing || reloading} onClick={close}>Close</Button>
     </div>
-    {approval && authorityLive && <Modal title="Approve remote text save" onClose={() => forgetApproval()}>
+    {approval && authorityLive && <Modal title="Approve remote text save" onClose={() => { void cancelApproval(); }}>
       <p>Host: {host.displayName}. Edit / replace content at <code>{displayPath(document.path)}</code>.</p>
       <p>Risk: {approval.plan.risk}. Original: {document.originalBytes} bytes. New: {approval.plan.items[0]?.sizeBytes} bytes.</p>
       <p>The one-time plan expires at {new Date(approval.plan.expiresAt).toLocaleTimeString()}.</p>
-      <div className="modal-actions"><Button onClick={() => forgetApproval()}>Cancel</Button><Button onClick={() => void approve()}>Approve and save</Button></div>
+      <div className="modal-actions"><Button onClick={() => void cancelApproval()}>Cancel</Button><Button onClick={() => void approve()}>Approve and save</Button></div>
     </Modal>}
     {confirm && <Modal title={confirm === 'close' ? 'Discard unsaved changes?' : 'Reload remote text?'} onClose={() => { confirmationRef.current = null; setConfirm(null); }}>
       <p>Unsaved local text will be lost.</p>
