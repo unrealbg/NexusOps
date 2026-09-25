@@ -1,12 +1,14 @@
 mod client;
+mod editor;
 mod path;
 mod policy;
 mod transfer;
 
 pub use client::{
-    EntryIdentity, LISTING_ENTRY_CAP, Progress, RawSftpClient, SftpClient, StagedUploadFailure,
-    StagedUploadResult, StagingCleanup, StagingOwnership,
+    EditorRevision, EntryIdentity, LISTING_ENTRY_CAP, Progress, RawSftpClient, SftpClient,
+    StagedUploadFailure, StagedUploadResult, StagingCleanup, StagingOwnership,
 };
+pub use editor::{decode_text, encode_text};
 pub use path::{
     display_name, join_remote, parent_remote, validate_child_name, validate_remote_path,
     validate_windows_file_name,

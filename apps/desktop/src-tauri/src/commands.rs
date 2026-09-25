@@ -326,6 +326,39 @@ pub async fn plan_delete(
         .await
 }
 #[tauri::command]
+pub async fn open_remote_text_file(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    path: String,
+) -> Result<nexus_model::RemoteTextDocument, AppError> {
+    app.open_remote_text_file(host_id, host_session_id, sftp_session_id, path)
+        .await
+}
+#[tauri::command]
+pub async fn plan_remote_text_save(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    document_id: nexus_model::EditorDocumentId,
+    text: String,
+) -> Result<FileOperationPlan, AppError> {
+    app.plan_remote_text_save(host_id, host_session_id, sftp_session_id, document_id, text)
+        .await
+}
+#[tauri::command]
+pub async fn discard_remote_text_document(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    sftp_session_id: SftpSessionId,
+    document_id: nexus_model::EditorDocumentId,
+) -> Result<(), AppError> {
+    app.discard_remote_text_document(host_id, host_session_id, sftp_session_id, document_id)
+}
+#[tauri::command]
 pub async fn execute_file_plan(
     app: State<'_, Application>,
     host_id: HostId,
@@ -343,7 +376,7 @@ pub async fn discard_file_plan(
     host_session_id: HostSessionId,
     sftp_session_id: SftpSessionId,
     plan_id: FilePlanId,
-) -> Result<(), AppError> {
+) -> Result<bool, AppError> {
     app.discard_file_plan(host_id, host_session_id, sftp_session_id, plan_id)
         .await
 }

@@ -26,6 +26,31 @@ opaque_id!(SftpSessionId);
 opaque_id!(LocalGrantId);
 opaque_id!(FilePlanId);
 opaque_id!(TransferJobId);
+opaque_id!(EditorDocumentId);
+
+pub const MAX_REMOTE_EDITOR_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum TextNewline {
+    Lf,
+    CrLf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTextDocument {
+    pub id: EditorDocumentId,
+    pub host_id: HostId,
+    pub host_session_id: HostSessionId,
+    pub sftp_session_id: SftpSessionId,
+    pub path: String,
+    pub text: String,
+    pub original_bytes: u32,
+    pub newline: TextNewline,
+    pub bom: bool,
+    pub max_bytes: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -132,6 +157,7 @@ pub enum FileOperationKind {
     CreateDirectory,
     Rename,
     Delete,
+    EditText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

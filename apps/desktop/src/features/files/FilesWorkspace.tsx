@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
-  ConflictPolicy, FileOperationPlan, Host, RemoteEntry, SftpSessionInfo, TransferJob,
+  ConflictPolicy, FileOperationPlan, Host, RemoteEntry, RemoteTextDocument, SftpSessionInfo, TransferJob,
 } from '@nexusops/protocol';
 import { Button, Modal, Notice, Spinner } from '@nexusops/ui';
 import { applicationError, filesApi } from '../../api/client';
 import { useHostSession } from '../../api/queries';
+import { RemoteTextEditor } from './RemoteTextEditor';
 
 type EntryDialog = { type: 'mkdir'; value: string } | { type: 'rename'; entry: RemoteEntry; value: string } | null;
 type Approval = { session: SftpSessionInfo; generation: number; plans: FileOperationPlan[] };
@@ -37,10 +38,21 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   const [dialog, setDialog] = useState<EntryDialog>(null);
   const [properties, setProperties] = useState<RemoteEntry | null>(null);
   const [transfers, setTransfers] = useState<TransferJob[]>([]);
+  const [editor, setEditor] = useState<RemoteTextDocument | null>(null);
+  const [openingEditor, setOpeningEditor] = useState(false);
+  const openingEditorGuard = useRef(false);
+  const mounted = useRef(true);
+  const visibleNow = useRef(visible);
+  useLayoutEffect(() => { visibleNow.current = visible; }, [visible]);
   const requestGeneration = useRef(0);
   const approvalGeneration = useRef(0);
   const activeSession = useRef<SftpSessionInfo | null>(null);
   const approvalRef = useRef<Approval | null>(null);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const connected = connection.data?.state === 'connected';
   const canMutate = connected && !!sftp && sftp.hostId === host.id && !stale && !loading;
@@ -238,6 +250,23 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   async function showProperties(entry: RemoteEntry) {
     try { setProperties(await filesApi.properties(owner(), entry.path)); } catch (reason) { setError(applicationError(reason).message); }
   }
+  async function openEditor(entry: RemoteEntry) {
+    if (entry.kind !== 'file' || editor || openingEditorGuard.current) return;
+    openingEditorGuard.current = true;
+    setOpeningEditor(true);
+    let session: SftpSessionInfo | null = null;
+    let generation = approvalGeneration.current;
+    try {
+      session = owner(); generation = approvalGeneration.current;
+      const document = await filesApi.openText(session, entry.path);
+      if (mounted.current && visibleNow.current && isCurrent(session, generation) &&
+          document.hostId === session.hostId && document.hostSessionId === session.hostSessionId &&
+          document.sftpSessionId === session.id) setEditor(document);
+      else void filesApi.discardTextDocument({ hostId: document.hostId, hostSessionId: document.hostSessionId,
+        id: document.sftpSessionId }, document.id).catch(() => undefined);
+    } catch (reason) { if (mounted.current && session && isCurrent(session, generation)) setError(applicationError(reason).message); }
+    finally { openingEditorGuard.current = false; if (mounted.current) setOpeningEditor(false); }
+  }
   async function retry(job: TransferJob) {
     let session: SftpSessionInfo | null = null;
     let generation = approvalGeneration.current;
@@ -249,9 +278,9 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
   function visitHistory(index: number) { const target = history[index]; if (!sftp || !target) return; setHistoryIndex(index); void loadDirectory(sftp, target, 'history'); }
   function up() { if (!listing || !sftp || listing.path === '/') return; const target = listing.path.replace(/\/+$/, '').replace(/\/[^/]*$/, '') || '/'; void loadDirectory(sftp, target); }
 
-  if (!visible) return null;
   return (
-    <section className="files-workspace" aria-label={`Files on ${host.displayName}`}>
+    <section className="files-workspace" aria-label={`Files on ${host.displayName}`} hidden={!visible}>
+      <div className="files-controls">
       <header className="files-heading">
         <div><div className="eyebrow">SFTP WORKSPACE</div><h1>{host.displayName} files</h1></div>
         <div className="files-session">{sftp ? `SFTP v${sftp.protocolVersion}` : connected ? 'Opening SFTP…' : 'Disconnected'}</div>
@@ -273,6 +302,7 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
       <div className="files-actions">
         <Button disabled={!canMutate} onClick={() => void upload()}>Upload files…</Button>
         <Button disabled={!canMutate || !selectedEntries.some((entry) => entry.kind === 'file')} onClick={() => void download()}>Download selected…</Button>
+        <Button disabled={!canMutate || !!editor || openingEditor || selectedEntries.length !== 1 || selectedEntries[0]?.kind !== 'file'} onClick={() => { const entry = selectedEntries[0]; if (entry) void openEditor(entry); }}>Edit</Button>
         <Button disabled={!canMutate} onClick={() => setDialog({ type: 'mkdir', value: '' })}>New directory</Button>
         <Button disabled={!canMutate || selectedEntries.length !== 1 || selectedEntries[0]?.kind !== 'file'} onClick={() => { const entry = selectedEntries[0]; if (entry) setDialog({ type: 'rename', entry, value: entry.name }); }}>Rename</Button>
         <Button variant="danger" disabled={!canMutate || selectedEntries.length === 0} onClick={() => void prepareDelete()}>Delete</Button>
@@ -283,7 +313,8 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
         <label>Filter loaded entries <input value={filter} onChange={(event) => setFilter(event.target.value)} /></label>
         <span>{listing ? `${listing.entries.length}${listing.partial ? '+' : ''} loaded` : 'No listing'}</span>
       </div>
-      <div className="files-table-wrap">
+      </div>
+      {editor ? <RemoteTextEditor initial={editor} host={host} session={sftp} connected={connected} visible={visible} transfers={transfers} onClose={() => setEditor(null)} /> : <div className="files-table-wrap">
         {loading && !listing ? <Spinner label="Loading remote directory…" /> : (
           <table className="files-table">
             <thead><tr><th><span className="sr-only">Select</span></th><th><button onClick={() => { if (sort === 'name') setDescending(!descending); else { setSort('name'); setDescending(false); } }}>Name</button></th><th>Type</th><th><button onClick={() => { if (sort === 'size') setDescending(!descending); else { setSort('size'); setDescending(false); } }}>Size</button></th><th><button onClick={() => { if (sort === 'modified') setDescending(!descending); else { setSort('modified'); setDescending(false); } }}>Modified</button></th><th>Mode</th><th><span className="sr-only">Actions</span></th></tr></thead>
@@ -296,7 +327,7 @@ export function FilesWorkspace({ host, visible, onShowOverview }: { host: Host; 
           </table>
         )}
         {listing?.partial && <Notice>Partial listing: the safety cap of {listing.entryCap} entries was reached. Sorting and filtering apply only to loaded entries.</Notice>}
-      </div>
+      </div>}
       <section className="transfer-queue" aria-label="Transfer queue"><h2>Transfers</h2>{transfers.length === 0 ? <p>No transfers in this session.</p> : transfers.map((job) => <div className="transfer-row" key={job.id}><div><strong>{job.direction === 'upload' ? '↑' : '↓'} {job.sourceDisplay}</strong><span> → {job.destinationDisplay}</span></div><div><span className={`transfer-state transfer-state--${job.state}`}>{job.state}</span> <span>{formatProgress(job)}</span>{['queued','preparing','transferring'].includes(job.state) && <button onClick={() => { if (sftp) void filesApi.cancel(sftp, job.id); }}>Cancel</button>}{job.retryable && <button onClick={() => void retry(job)}>Prepare retry</button>}</div>{job.error && <span className="transfer-error">{job.error.message}</span>}</div>)}</section>
       {dialog && <Modal title={dialog.type === 'mkdir' ? 'Create remote directory' : 'Rename remote entry'} onClose={() => setDialog(null)}><label className="field"><span>Name</span><input autoFocus value={dialog.value} onChange={(event) => setDialog({ ...dialog, value: event.target.value })} /></label><p className="dialog-description">The operation will be prepared as an immutable plan. Rename never overwrites an existing destination.</p><div className="modal-actions"><Button onClick={() => setDialog(null)}>Cancel</Button><Button disabled={!dialog.value} onClick={() => void prepareEntryDialog()}>Review plan</Button></div></Modal>}
       {liveApproval && <Modal title="Approve file operation" onClose={() => { void discardPlans(); }}><p className="dialog-description">Host: <strong>{host.displayName}</strong>. This one-time approval expires at {new Date(liveApproval.plans[0]!.expiresAt).toLocaleTimeString()}.</p>{liveApproval.plans.map((plan) => <div className="file-plan" key={plan.id}><strong>{plan.kind} · {plan.risk}{plan.conflictPolicy ? ` · Conflict: ${plan.conflictPolicy}` : ''}</strong>{plan.items.map((item, index) => <div key={index}><code>{item.sourceDisplay}</code> → <code>{item.destinationDisplay}</code>{item.sizeBytes && ` · ${item.sizeBytes} bytes`}</div>)}</div>)}{liveApproval.plans.some((plan) => plan.kind === 'delete') && <Notice>Delete is permanent. Directories must be empty; symbolic links are removed without following their target.</Notice>}<div className="modal-actions"><Button onClick={() => { void discardPlans(); }}>Cancel</Button><Button variant={liveApproval.plans.some((plan) => plan.kind === 'delete') ? 'danger' : 'primary'} onClick={() => void executePlans()}>Approve and execute</Button></div></Modal>}

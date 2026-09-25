@@ -82,6 +82,83 @@ impl Application {
             .await
     }
 
+    pub async fn open_remote_text_file(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+        sftp_session_id: SftpSessionId,
+        path: String,
+    ) -> Result<nexus_model::RemoteTextDocument, AppError> {
+        let gate = self.sftp_lifecycle_gate(host_id).await;
+        let _guard = gate.lock().await;
+        let client = self
+            .owned_sftp(host_id, host_session_id, sftp_session_id)
+            .await?;
+        let before = client.editor_revision(&path).await?;
+        let bytes = client.read_editor_bytes(&path).await?;
+        let after = client.editor_revision(&path).await?;
+        if before != after || before.identity.size != Some(bytes.len() as u64) {
+            return Err(AppError::new(
+                ErrorCode::Conflict,
+                "The remote text file changed while opening.",
+            ));
+        }
+        let (text, newline, bom) = nexus_sftp::decode_text(&bytes)?;
+        let id = self.file_plans.register_editor_document(
+            client.as_ref(),
+            path.clone(),
+            before,
+            &bytes,
+            newline,
+            bom,
+        )?;
+        Ok(nexus_model::RemoteTextDocument {
+            id,
+            host_id,
+            host_session_id,
+            sftp_session_id,
+            path,
+            text,
+            original_bytes: bytes.len() as u32,
+            newline,
+            bom,
+            max_bytes: nexus_model::MAX_REMOTE_EDITOR_BYTES as u32,
+        })
+    }
+
+    pub async fn plan_remote_text_save(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+        sftp_session_id: SftpSessionId,
+        document_id: nexus_model::EditorDocumentId,
+        text: String,
+    ) -> Result<FileOperationPlan, AppError> {
+        let gate = self.sftp_lifecycle_gate(host_id).await;
+        let _guard = gate.lock().await;
+        let client = self
+            .owned_sftp(host_id, host_session_id, sftp_session_id)
+            .await?;
+        self.file_plans
+            .plan_editor_save(client, document_id, text)
+            .await
+    }
+
+    pub fn discard_remote_text_document(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+        sftp_session_id: SftpSessionId,
+        document_id: nexus_model::EditorDocumentId,
+    ) -> Result<(), AppError> {
+        self.file_plans.discard_editor_document(
+            document_id,
+            host_id,
+            host_session_id,
+            sftp_session_id,
+        )
+    }
+
     pub async fn plan_upload(
         &self,
         host_id: HostId,
@@ -240,6 +317,7 @@ impl Application {
             .file_plans
             .consume(plan_id, host_id, host_session_id, sftp_session_id)?;
         let audit_kind = match plan.view.kind {
+            FileOperationKind::EditText => "file.editor_save.accepted",
             FileOperationKind::CreateDirectory => "file.create_directory",
             FileOperationKind::Rename => "file.rename",
             FileOperationKind::Delete => "file.delete",
@@ -266,7 +344,7 @@ impl Application {
         host_session_id: HostSessionId,
         sftp_session_id: SftpSessionId,
         plan_id: FilePlanId,
-    ) -> Result<(), AppError> {
+    ) -> Result<bool, AppError> {
         self.file_plans
             .discard(plan_id, host_id, host_session_id, sftp_session_id)
     }

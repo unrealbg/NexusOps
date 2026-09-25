@@ -9,6 +9,7 @@ use nexus_model::{
     AppError, ConflictPolicy, ErrorCode, FileOperationPlan, HostId, HostSessionId, RemoteEntryKind,
     SftpSessionId, TransferDirection, TransferJob, TransferJobId, TransferState,
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
@@ -35,6 +36,11 @@ struct JobSpec {
 enum Source {
     Local(crate::LocalItem),
     Remote(crate::policy::RemoteSource),
+    Editor {
+        bytes: Vec<u8>,
+        expected: crate::EditorRevision,
+        original_digest: [u8; 32],
+    },
 }
 #[derive(Clone)]
 enum Destination {
@@ -189,6 +195,28 @@ impl TransferManager {
 
     pub async fn execute(&self, plan: InternalPlan) -> Result<Vec<TransferJob>, AppError> {
         match plan.payload {
+            PlanPayload::EditorSave {
+                client,
+                path,
+                expected,
+                original_digest,
+                bytes,
+            } => {
+                self.enqueue_batch(vec![JobSpec {
+                    client,
+                    direction: TransferDirection::Upload,
+                    source: Source::Editor {
+                        bytes,
+                        expected,
+                        original_digest,
+                    },
+                    destination: Destination::Remote {
+                        path,
+                        action: DestinationAction::CreateNew,
+                    },
+                }])
+                .await
+            }
             PlanPayload::Mutation { client, spec } => {
                 execute_mutation(client, spec).await?;
                 Ok(Vec::new())
@@ -704,6 +732,11 @@ fn download_spec(
 }
 fn labels(spec: &JobSpec) -> (String, String, Option<u64>) {
     match (&spec.source, &spec.destination) {
+        (Source::Editor { bytes, .. }, Destination::Remote { path, .. }) => (
+            "Edited text".into(),
+            crate::display_name(path),
+            Some(bytes.len() as u64),
+        ),
         (Source::Local(s), Destination::Remote { path, .. }) => (
             crate::display_name(&s.display_name),
             crate::display_name(path),
@@ -759,6 +792,9 @@ async fn run_transfer(
         return Ok(());
     }
     match (&spec.source, &spec.destination) {
+        (source @ Source::Editor { .. }, Destination::Remote { path, .. }) => {
+            run_editor_save(state, id, spec, path, source, cancel).await
+        }
         (Source::Local(source), destination @ Destination::Remote { .. }) => {
             run_upload(state, id, spec, source, destination, cancel).await
         }
@@ -766,6 +802,155 @@ async fn run_transfer(
             run_download(state, id, spec, source, destination, cancel).await
         }
         _ => Err(transfer_error("Invalid transfer specification.")),
+    }
+}
+
+async fn run_editor_save(
+    state: &Arc<Mutex<ManagerState>>,
+    id: TransferJobId,
+    spec: &JobSpec,
+    destination: &str,
+    source: &Source,
+    cancel: CancellationToken,
+) -> Result<(), AppError> {
+    let Source::Editor {
+        bytes,
+        expected,
+        original_digest,
+    } = source
+    else {
+        return Err(transfer_error("Invalid editor source."));
+    };
+    let client = spec.client.clone();
+    if client.editor_revision(destination).await? != *expected {
+        return Err(AppError::new(
+            ErrorCode::Conflict,
+            "The remote file changed before editor save.",
+        ));
+    }
+    if <[u8; 32]>::from(Sha256::digest(client.read_editor_bytes(destination).await?))
+        != *original_digest
+    {
+        return Err(AppError::new(
+            ErrorCode::Conflict,
+            "The remote file contents changed before editor save.",
+        ));
+    }
+    let parent = crate::parent_remote(destination)?;
+    let staging = crate::join_remote(&parent, &format!(".nexusops-{}.edit.part", id.0.simple()))?;
+    let ownership = StagingOwnership::new();
+    let mut guard = RemoteStagingGuard::new(
+        client.clone(),
+        staging.clone(),
+        ownership.clone(),
+        state.clone(),
+        id,
+    );
+    let mut reader = std::io::Cursor::new(bytes.to_vec());
+    set_state(state, id, TransferState::Transferring);
+    let streamed = match client
+        .upload_staged(
+            &mut reader,
+            &staging,
+            ownership,
+            cancel.clone(),
+            progress(state.clone(), id),
+        )
+        .await
+    {
+        Ok(value) => value,
+        Err(
+            StagedUploadFailure::NotCreated(error)
+            | StagedUploadFailure::CreationOutcomeUnknown(error),
+        ) => return Err(error),
+        Err(StagedUploadFailure::OwnedFailure(error)) => {
+            guard.cleanup().await?;
+            if cancel.is_cancelled() && error.code != ErrorCode::OutcomeUnknown {
+                return Err(AppError::new(
+                    ErrorCode::Cancelled,
+                    "Editor save was cancelled before finalization.",
+                ));
+            }
+            return Err(error);
+        }
+    };
+    if streamed != bytes.len() as u64 {
+        guard.cleanup().await?;
+        return Err(transfer_error(
+            "The editor staging byte count did not match.",
+        ));
+    }
+    if let Err(error) = client.preserve_editor_metadata(&staging, expected).await {
+        guard.cleanup().await?;
+        return Err(error);
+    }
+    let staged_current = client.editor_revision(destination).await;
+    if staged_current.as_ref() != Ok(expected) {
+        guard.cleanup().await?;
+        return match staged_current {
+            Err(error) => Err(error),
+            Ok(_) => Err(AppError::new(
+                ErrorCode::Conflict,
+                "The remote file changed during editor staging.",
+            )),
+        };
+    }
+    let staged_bytes = match client.read_editor_bytes(destination).await {
+        Ok(value) => value,
+        Err(error) => {
+            guard.cleanup().await?;
+            return Err(error);
+        }
+    };
+    if <[u8; 32]>::from(Sha256::digest(staged_bytes)) != *original_digest {
+        guard.cleanup().await?;
+        return Err(AppError::new(
+            ErrorCode::Conflict,
+            "The remote file contents changed during editor staging.",
+        ));
+    }
+    let current = client.editor_revision(destination).await;
+    if current.as_ref() != Ok(expected) {
+        guard.cleanup().await?;
+        return match current {
+            Err(error) => Err(error),
+            Ok(_) => Err(AppError::new(
+                ErrorCode::Conflict,
+                "The remote file changed before editor replacement.",
+            )),
+        };
+    }
+    let final_bytes = match client.read_editor_bytes(destination).await {
+        Ok(value) => value,
+        Err(error) => {
+            guard.cleanup().await?;
+            return Err(error);
+        }
+    };
+    if <[u8; 32]>::from(Sha256::digest(final_bytes)) != *original_digest {
+        guard.cleanup().await?;
+        return Err(AppError::new(
+            ErrorCode::Conflict,
+            "The remote file contents changed before editor replacement.",
+        ));
+    }
+    if let Err(error) = enter_finalizing(state, id, &cancel) {
+        guard.cleanup().await?;
+        return Err(error);
+    }
+    match client.commit_replace(&staging, destination).await {
+        Ok(()) => {
+            guard.disarm();
+            Ok(())
+        }
+        Err(error) => match guard.cleanup().await {
+            Ok(()) => Err(error),
+            Err(_) if error.code == ErrorCode::OutcomeUnknown => Err(AppError::new(
+                ErrorCode::OutcomeUnknown,
+                "Editor replacement and owned staging cleanup could not be confirmed.",
+            )),
+            Err(cleanup_error) => Err(cleanup_error),
+        },
     }
 }
 
@@ -1158,6 +1343,14 @@ mod tests {
         remove_calls: AtomicUsize,
         commit_new_calls: AtomicUsize,
         commit_replace_calls: AtomicUsize,
+        editor_revisions: Mutex<VecDeque<crate::EditorRevision>>,
+        editor_reads: Mutex<VecDeque<Vec<u8>>>,
+        editor_read_calls: AtomicUsize,
+        block_final_editor_read: AtomicBool,
+        final_editor_read_started: Notify,
+        final_editor_read_release: Notify,
+        metadata_calls: AtomicUsize,
+        commit_replace_result: Mutex<Option<Result<(), AppError>>>,
         identity_calls: AtomicUsize,
         rename_calls: AtomicUsize,
         identities: Mutex<VecDeque<Result<Option<crate::EntryIdentity>, AppError>>>,
@@ -1210,6 +1403,14 @@ mod tests {
                 remove_calls: AtomicUsize::new(0),
                 commit_new_calls: AtomicUsize::new(0),
                 commit_replace_calls: AtomicUsize::new(0),
+                editor_revisions: Mutex::new(VecDeque::new()),
+                editor_reads: Mutex::new(VecDeque::new()),
+                editor_read_calls: AtomicUsize::new(0),
+                block_final_editor_read: AtomicBool::new(false),
+                final_editor_read_started: Notify::new(),
+                final_editor_read_release: Notify::new(),
+                metadata_calls: AtomicUsize::new(0),
+                commit_replace_result: Mutex::new(None),
                 identity_calls: AtomicUsize::new(0),
                 rename_calls: AtomicUsize::new(0),
                 identities: Mutex::new(VecDeque::new()),
@@ -1253,6 +1454,37 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Ok(None))
+        }
+        async fn editor_revision(&self, _: &str) -> Result<crate::EditorRevision, AppError> {
+            Ok(self
+                .editor_revisions
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(editor_revision_fixture))
+        }
+        async fn read_editor_bytes(&self, _: &str) -> Result<Vec<u8>, AppError> {
+            if self.editor_read_calls.fetch_add(1, Ordering::SeqCst) == 2
+                && self.block_final_editor_read.load(Ordering::SeqCst)
+            {
+                self.final_editor_read_started.notify_one();
+                self.final_editor_read_release.notified().await;
+            }
+            Ok(self
+                .editor_reads
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| b"old".to_vec()))
+        }
+        async fn preserve_editor_metadata(
+            &self,
+            _: &str,
+            expected: &crate::EditorRevision,
+        ) -> Result<(), AppError> {
+            assert_eq!(expected.raw_mode, 0o100640);
+            self.metadata_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
         async fn create_dir(&self, _: &str) -> Result<(), AppError> {
             Err(unused())
@@ -1356,7 +1588,11 @@ mod tests {
         }
         async fn commit_replace(&self, _: &str, _: &str) -> Result<(), AppError> {
             self.commit_replace_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+            self.commit_replace_result
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Ok(()))
         }
         async fn remove_owned_staging(&self, _: &str) -> Result<crate::StagingCleanup, AppError> {
             self.remove_calls.fetch_add(1, Ordering::SeqCst);
@@ -1367,6 +1603,162 @@ mod tests {
                 .unwrap_or(Ok(crate::StagingCleanup::Removed))
         }
         async fn close(&self) {}
+    }
+
+    fn editor_revision_fixture() -> crate::EditorRevision {
+        crate::EditorRevision {
+            identity: crate::EntryIdentity {
+                kind: RemoteEntryKind::File,
+                size: Some(4),
+                modified: Some(1),
+            },
+            raw_mode: 0o100640,
+            uid: 1000,
+            gid: 1000,
+        }
+    }
+
+    fn editor_spec(client: Arc<CountingClient>) -> JobSpec {
+        JobSpec {
+            client,
+            direction: TransferDirection::Upload,
+            source: Source::Editor {
+                bytes: b"new text".to_vec(),
+                expected: editor_revision_fixture(),
+                original_digest: Sha256::digest(b"old").into(),
+            },
+            destination: Destination::Remote {
+                path: "/tmp/file.txt".into(),
+                action: DestinationAction::CreateNew,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn editor_save_preserves_metadata_and_replaces_once() {
+        let client = CountingClient::new();
+        let manager = TransferManager::new();
+        let spec = editor_spec(client.clone());
+        let job = manager.enqueue(spec).await.unwrap();
+        wait_for_state(&manager, job.id, TransferState::Completed).await;
+        assert_eq!(client.upload_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.metadata_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.commit_replace_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.commit_new_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn editor_changed_during_staging_cleans_owned_file_without_replacement() {
+        let client = CountingClient::new();
+        client.editor_revisions.lock().unwrap().extend([
+            editor_revision_fixture(),
+            crate::EditorRevision {
+                raw_mode: 0o100600,
+                ..editor_revision_fixture()
+            },
+        ]);
+        let manager = TransferManager::new();
+        let job = manager.enqueue(editor_spec(client.clone())).await.unwrap();
+        let failed = wait_for_state(&manager, job.id, TransferState::Failed).await;
+        assert_eq!(failed.error.unwrap().code, ErrorCode::Conflict);
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.commit_replace_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn editor_same_metadata_content_change_is_a_conflict() {
+        let client = CountingClient::new();
+        client
+            .editor_reads
+            .lock()
+            .unwrap()
+            .extend([b"old".to_vec(), b"new".to_vec()]);
+        let manager = TransferManager::new();
+        let job = manager.enqueue(editor_spec(client.clone())).await.unwrap();
+        let failed = wait_for_state(&manager, job.id, TransferState::Failed).await;
+        assert_eq!(failed.error.unwrap().code, ErrorCode::Conflict);
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.commit_replace_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn editor_unknown_replace_is_terminal_and_never_retried() {
+        let client = CountingClient::new();
+        *client.commit_replace_result.lock().unwrap() =
+            Some(Err(AppError::new(ErrorCode::OutcomeUnknown, "Lost reply.")));
+        let manager = TransferManager::new();
+        let job = manager.enqueue(editor_spec(client.clone())).await.unwrap();
+        let unknown = wait_for_state(&manager, job.id, TransferState::OutcomeUnknown).await;
+        assert!(!unknown.retryable);
+        assert_eq!(client.commit_replace_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn ed05_cancellation_during_final_editor_validation_precedes_finalizing() {
+        let client = CountingClient::new();
+        client.block_final_editor_read.store(true, Ordering::SeqCst);
+        let info = client.info();
+        let manager = TransferManager::new();
+        let job = manager.enqueue(editor_spec(client.clone())).await.unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.final_editor_read_started.notified(),
+        )
+        .await
+        .unwrap();
+        let state = manager
+            .list(Some(info.host_id))
+            .into_iter()
+            .find(|item| item.id == job.id)
+            .unwrap()
+            .state;
+        assert_ne!(
+            state,
+            TransferState::Finalizing,
+            "full-file validation is not the commit boundary"
+        );
+        manager
+            .cancel(job.id, info.host_id, info.host_session_id, info.id)
+            .unwrap();
+        client.final_editor_read_release.notify_one();
+        wait_for_state(&manager, job.id, TransferState::Cancelled).await;
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.commit_replace_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn editor_disconnect_quiesces_owned_staging_before_session_close() {
+        let client = CountingClient::new();
+        client.block_upload.store(true, Ordering::SeqCst);
+        let info = client.info();
+        let manager = Arc::new(TransferManager::new());
+        let job = manager.enqueue(editor_spec(client.clone())).await.unwrap();
+        client.upload_started.notified().await;
+        manager.disconnect(info.host_id, info.host_session_id);
+        let waiting = {
+            let manager = manager.clone();
+            tokio::spawn(async move {
+                manager
+                    .quiesce_session(info.host_id, info.host_session_id)
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        client.upload_release.notify_one();
+        waiting.await.unwrap().unwrap();
+        assert_eq!(
+            manager
+                .list(Some(info.host_id))
+                .into_iter()
+                .find(|view| view.id == job.id)
+                .unwrap()
+                .state,
+            TransferState::Cancelled
+        );
+        assert_eq!(client.remove_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.commit_replace_calls.load(Ordering::SeqCst), 0);
     }
 
     fn local_item(path: &std::path::Path) -> crate::LocalItem {

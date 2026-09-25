@@ -14,6 +14,7 @@ import type {
   FileOperationPlan,
   LocalSelectionGrant,
   RemoteEntry,
+  RemoteTextDocument,
   SftpSessionInfo,
   TransferJob,
 } from '@nexusops/protocol';
@@ -99,11 +100,15 @@ function sftpArgs(session: SftpOwnership) {
   return { hostId: session.hostId, hostSessionId: session.hostSessionId, sftpSessionId: session.id };
 }
 
-/** Narrow Files boundary: payload bytes and local paths never enter the renderer. */
+/** Narrow Files boundary: transfer payload/local filesystem bytes remain native-side;
+ * bounded remote editor text is the explicit component-local exception. */
 export const filesApi = {
   open: (hostId: string) => request<SftpSessionInfo>('open_sftp', { hostId }),
   list: (session: SftpOwnership, path: string) => request<DirectoryListing>('list_remote_directory', { ...sftpArgs(session), path }),
   properties: (session: SftpOwnership, path: string) => request<RemoteEntry>('remote_properties', { ...sftpArgs(session), path }),
+  openText: (session: SftpOwnership, path: string) => request<RemoteTextDocument>('open_remote_text_file', { ...sftpArgs(session), path }),
+  planTextSave: (session: SftpOwnership, documentId: string, text: string) => request<FileOperationPlan>('plan_remote_text_save', { ...sftpArgs(session), documentId, text }),
+  discardTextDocument: (session: SftpOwnership, documentId: string) => request<void>('discard_remote_text_document', { ...sftpArgs(session), documentId }),
   chooseUploadFiles: (session: SftpOwnership) => request<LocalSelectionGrant | null>('choose_upload_files', sftpArgs(session)),
   chooseDownloadDirectory: (session: SftpOwnership) => request<LocalSelectionGrant | null>('choose_download_directory', sftpArgs(session)),
   planUpload: (session: SftpOwnership, grantId: string, remoteDirectory: string, conflictPolicy: ConflictPolicy) => request<FileOperationPlan>('plan_upload', { request: { ...sftpArgs(session), grantId, remoteDirectory, conflictPolicy } }),
@@ -113,6 +118,7 @@ export const filesApi = {
   planDelete: (session: SftpOwnership, path: string) => request<FileOperationPlan>('plan_delete', { ...sftpArgs(session), path }),
   execute: (session: SftpOwnership, planId: string) => request<TransferJob[]>('execute_file_plan', { ...sftpArgs(session), planId }),
   discardPlan: (session: SftpOwnership, planId: string) => request<void>('discard_file_plan', { ...sftpArgs(session), planId }),
+  discardEditorPlan: (session: SftpOwnership, planId: string) => request<boolean>('discard_file_plan', { ...sftpArgs(session), planId }),
   discardGrant: (session: SftpOwnership, grantId: string) => request<void>('discard_local_grant', { ...sftpArgs(session), grantId }),
   transfers: (hostId?: string) => request<TransferJob[]>('list_transfers', { hostId: hostId ?? null }),
   cancel: (session: SftpOwnership, jobId: string) => request<void>('cancel_transfer', { ...sftpArgs(session), jobId }),

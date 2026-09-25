@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-remote-text-save"
+description = "Enables the plan_remote_text_save command without any pre-configured scope."
+commands.allow = ["plan_remote_text_save"]
+
+[[permission]]
+identifier = "deny-plan-remote-text-save"
+description = "Denies the plan_remote_text_save command without any pre-configured scope."
+commands.deny = ["plan_remote_text_save"]

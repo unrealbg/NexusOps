@@ -2,12 +2,12 @@ use crate::path::{display_name, join_remote, validate_child_name, validate_remot
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use nexus_model::{
-    AppError, DirectoryListing, ErrorCode, HostId, HostSessionId, RemoteEntry, RemoteEntryKind,
-    SftpExtension, SftpLimits, SftpSessionId, SftpSessionInfo,
+    AppError, DirectoryListing, ErrorCode, HostId, HostSessionId, MAX_REMOTE_EDITOR_BYTES,
+    RemoteEntry, RemoteEntryKind, SftpExtension, SftpLimits, SftpSessionId, SftpSessionInfo,
 };
 use russh_sftp::{
     client::{Config, RawSftpSession, error::Error as SftpError},
-    protocol::{FileAttributes, OpenFlags, Packet, StatusCode},
+    protocol::{FileAttributes, FileType, OpenFlags, Packet, StatusCode},
 };
 use std::{
     collections::HashMap,
@@ -27,6 +27,16 @@ pub struct EntryIdentity {
     pub kind: RemoteEntryKind,
     pub size: Option<u64>,
     pub modified: Option<u32>,
+}
+
+/// SFTP v3 has no inode/CAS token. All exposed save-critical metadata is
+/// compared, including the existing EntryIdentity fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorRevision {
+    pub identity: EntryIdentity,
+    pub raw_mode: u32,
+    pub uid: u32,
+    pub gid: u32,
 }
 
 pub type Progress = Arc<dyn Fn(u64) + Send + Sync>;
@@ -87,6 +97,28 @@ pub trait SftpClient: Send + Sync {
     ) -> Result<DirectoryListing, AppError>;
     async fn stat(&self, path: &str) -> Result<RemoteEntry, AppError>;
     async fn identity(&self, path: &str) -> Result<Option<EntryIdentity>, AppError>;
+    async fn editor_revision(&self, _path: &str) -> Result<EditorRevision, AppError> {
+        Err(AppError::new(
+            ErrorCode::SftpUnavailable,
+            "Remote text editing is unavailable.",
+        ))
+    }
+    async fn read_editor_bytes(&self, _path: &str) -> Result<Vec<u8>, AppError> {
+        Err(AppError::new(
+            ErrorCode::SftpUnavailable,
+            "Remote text editing is unavailable.",
+        ))
+    }
+    async fn preserve_editor_metadata(
+        &self,
+        _staging: &str,
+        _expected: &EditorRevision,
+    ) -> Result<(), AppError> {
+        Err(AppError::new(
+            ErrorCode::SftpUnavailable,
+            "Remote text editing is unavailable.",
+        ))
+    }
     async fn create_dir(&self, path: &str) -> Result<(), AppError>;
     async fn remove_file(&self, path: &str) -> Result<(), AppError>;
     async fn remove_dir(&self, path: &str) -> Result<(), AppError>;
@@ -342,6 +374,181 @@ impl SftpClient for RawSftpClient {
             }
             Err(error) => Err(map_error(error)),
         }
+    }
+
+    async fn editor_revision(&self, path: &str) -> Result<EditorRevision, AppError> {
+        validate_remote_path(path)?;
+        let attrs = self.raw.lstat(path).await.map_err(map_error)?.attrs;
+        if attrs.file_type() != FileType::File {
+            return Err(AppError::new(
+                ErrorCode::FilePolicy,
+                "Only regular non-symlink files can be edited.",
+            ));
+        }
+        let (Some(raw_mode), Some(uid), Some(gid), Some(_size), Some(_)) = (
+            attrs.permissions,
+            attrs.uid,
+            attrs.gid,
+            attrs.size,
+            attrs.mtime,
+        ) else {
+            return Err(AppError::new(
+                ErrorCode::FilePolicy,
+                "Required remote revision or ownership metadata is unavailable.",
+            ));
+        };
+        Ok(EditorRevision {
+            identity: identity(&attrs),
+            raw_mode,
+            uid,
+            gid,
+        })
+    }
+
+    async fn read_editor_bytes(&self, path: &str) -> Result<Vec<u8>, AppError> {
+        validate_remote_path(path)?;
+        let before = self.editor_revision(path).await?;
+        if before
+            .identity
+            .size
+            .is_some_and(|size| size > MAX_REMOTE_EDITOR_BYTES as u64)
+        {
+            return Err(AppError::new(
+                ErrorCode::FilePolicy,
+                "The remote text file exceeds the 1 MiB editor limit.",
+            ));
+        }
+        let handle = self
+            .raw
+            .open(path, OpenFlags::READ, FileAttributes::default())
+            .await
+            .map_err(map_error)?
+            .handle;
+        let mut bytes = Vec::new();
+        let result = async {
+            let opened = self
+                .raw
+                .fstat(handle.clone())
+                .await
+                .map_err(map_error)?
+                .attrs;
+            if identity(&opened) != before.identity
+                || opened.permissions != Some(before.raw_mode)
+                || opened.uid != Some(before.uid)
+                || opened.gid != Some(before.gid)
+            {
+                return Err(AppError::new(
+                    ErrorCode::Conflict,
+                    "The remote text file changed while opening.",
+                ));
+            }
+            while bytes.len() <= MAX_REMOTE_EDITOR_BYTES {
+                let remaining = MAX_REMOTE_EDITOR_BYTES + 1 - bytes.len();
+                let request = self.read_chunk.min(remaining as u32);
+                match self
+                    .raw
+                    .read(handle.clone(), bytes.len() as u64, request)
+                    .await
+                {
+                    Ok(data) if data.data.is_empty() => break,
+                    Ok(data) => {
+                        if data.data.len() > remaining {
+                            return Err(AppError::new(
+                                ErrorCode::FilePolicy,
+                                "The SFTP server exceeded the bounded editor read.",
+                            ));
+                        }
+                        bytes.extend_from_slice(&data.data);
+                    }
+                    Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => {
+                        break;
+                    }
+                    Err(error) => return Err(map_error(error)),
+                }
+            }
+            if bytes.len() > MAX_REMOTE_EDITOR_BYTES {
+                return Err(AppError::new(
+                    ErrorCode::FilePolicy,
+                    "The remote text file exceeds the 1 MiB editor limit.",
+                ));
+            }
+            let finished = self
+                .raw
+                .fstat(handle.clone())
+                .await
+                .map_err(map_error)?
+                .attrs;
+            if identity(&finished) != before.identity
+                || finished.permissions != Some(before.raw_mode)
+                || finished.uid != Some(before.uid)
+                || finished.gid != Some(before.gid)
+            {
+                return Err(AppError::new(
+                    ErrorCode::Conflict,
+                    "The remote text file changed while reading.",
+                ));
+            }
+            Ok(bytes)
+        }
+        .await;
+        let close = self.close_handle(handle).await;
+        let bytes = result?;
+        close?;
+        Ok(bytes)
+    }
+
+    async fn preserve_editor_metadata(
+        &self,
+        staging: &str,
+        expected: &EditorRevision,
+    ) -> Result<(), AppError> {
+        validate_remote_path(staging)?;
+        let current = self.raw.lstat(staging).await.map_err(map_error)?.attrs;
+        if current.file_type() != FileType::File {
+            return Err(AppError::new(
+                ErrorCode::FilePolicy,
+                "The owned editor staging file is no longer regular.",
+            ));
+        }
+        if current.uid != Some(expected.uid) || current.gid != Some(expected.gid) {
+            Self::status_ok(
+                self.raw
+                    .setstat(
+                        staging,
+                        FileAttributes {
+                            uid: Some(expected.uid),
+                            gid: Some(expected.gid),
+                            ..FileAttributes::default()
+                        },
+                    )
+                    .await,
+            )
+            .await?;
+        }
+        Self::status_ok(
+            self.raw
+                .setstat(
+                    staging,
+                    FileAttributes {
+                        permissions: Some(expected.raw_mode & 0o7777),
+                        ..FileAttributes::default()
+                    },
+                )
+                .await,
+        )
+        .await?;
+        let final_attrs = self.raw.lstat(staging).await.map_err(map_error)?.attrs;
+        if final_attrs.file_type() != FileType::File
+            || final_attrs.uid != Some(expected.uid)
+            || final_attrs.gid != Some(expected.gid)
+            || final_attrs.permissions.map(|mode| mode & 0o7777) != Some(expected.raw_mode & 0o7777)
+        {
+            return Err(AppError::new(
+                ErrorCode::FilePolicy,
+                "Remote mode or ownership preservation could not be confirmed.",
+            ));
+        }
+        Ok(())
     }
 
     async fn create_dir(&self, path: &str) -> Result<(), AppError> {
@@ -646,16 +853,14 @@ fn remote_entry(
 }
 
 fn identity(attrs: &FileAttributes) -> EntryIdentity {
-    let kind = if attrs.is_regular() {
-        RemoteEntryKind::File
-    } else if attrs.is_dir() {
-        RemoteEntryKind::Directory
-    } else if attrs.is_symlink() {
-        RemoteEntryKind::Symlink
-    } else if attrs.permissions.is_none() {
-        RemoteEntryKind::Unknown
-    } else {
-        RemoteEntryKind::Other
+    let kind = match attrs.permissions {
+        None => RemoteEntryKind::Unknown,
+        Some(_) => match attrs.file_type() {
+            FileType::File => RemoteEntryKind::File,
+            FileType::Dir => RemoteEntryKind::Directory,
+            FileType::Symlink => RemoteEntryKind::Symlink,
+            FileType::Other => RemoteEntryKind::Other,
+        },
     };
     EntryIdentity {
         kind,
@@ -935,6 +1140,7 @@ mod fault_tests {
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Fault {
+        None,
         OpenDenied,
         WriteDenied,
         ReadDenied,
@@ -943,11 +1149,19 @@ mod fault_tests {
         CommitDenied,
         CommitRace,
         CleanupDenied,
+        DeclaredSmall,
+        EditorDirectory,
+        EditorSymlink,
+        EditorSpecial,
+        EditorUnknown,
+        EditorMetadataDenied,
+        EditorMetadataMismatch,
     }
 
     struct MatrixState {
         fault: Fault,
         files: HashMap<String, Vec<u8>>,
+        modes: HashMap<String, u32>,
         calls: Vec<String>,
         writes: usize,
         reads: usize,
@@ -1007,11 +1221,34 @@ mod fault_tests {
             Ok(Attrs {
                 id,
                 attrs: FileAttributes {
-                    permissions: Some(0o100600),
-                    size: Some(bytes.len() as u64),
+                    permissions: if path == "/fixture/editor" {
+                        match state.fault {
+                            Fault::EditorDirectory => Some(0o040700),
+                            Fault::EditorSymlink => Some(0o120777),
+                            Fault::EditorSpecial => Some(0o020600),
+                            Fault::EditorUnknown => None,
+                            _ => Some(state.modes.get(&path).copied().unwrap_or(0o100600)),
+                        }
+                    } else {
+                        Some(state.modes.get(&path).copied().unwrap_or(0o100600))
+                    },
+                    size: Some(
+                        if state.fault == Fault::DeclaredSmall && path == "/fixture/editor" {
+                            1
+                        } else {
+                            bytes.len() as u64
+                        },
+                    ),
+                    uid: Some(1000),
+                    gid: Some(1000),
+                    mtime: Some(1),
                     ..FileAttributes::default()
                 },
             })
+        }
+
+        async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
+            self.lstat(id, handle).await
         }
 
         async fn open(
@@ -1019,7 +1256,7 @@ mod fault_tests {
             id: u32,
             path: String,
             flags: OpenFlags,
-            _: FileAttributes,
+            attrs: FileAttributes,
         ) -> Result<Handle, Self::Error> {
             let mut state = self.0.lock().unwrap();
             state.calls.push(format!("OPEN {path}"));
@@ -1031,6 +1268,9 @@ mod fault_tests {
                     return Err(StatusCode::Failure);
                 }
                 state.files.insert(path.clone(), Vec::new());
+                state
+                    .modes
+                    .insert(path.clone(), 0o100000 | attrs.permissions.unwrap_or(0o600));
             } else if !state.files.contains_key(&path) {
                 return Err(StatusCode::NoSuchFile);
             }
@@ -1063,7 +1303,7 @@ mod fault_tests {
             id: u32,
             handle: String,
             offset: u64,
-            _: u32,
+            request: u32,
         ) -> Result<Data, Self::Error> {
             let mut state = self.0.lock().unwrap();
             state.calls.push(format!("READ {offset}"));
@@ -1078,7 +1318,16 @@ mod fault_tests {
             }
             Ok(Data {
                 id,
-                data: bytes[start..bytes.len().min(start + 6)].to_vec(),
+                data: bytes[start
+                    ..bytes.len().min(
+                        start
+                            + if handle == "/fixture/editor" {
+                                request as usize
+                            } else {
+                                6
+                            },
+                    )]
+                    .to_vec(),
             })
         }
 
@@ -1092,6 +1341,28 @@ mod fault_tests {
             }
         }
 
+        async fn setstat(
+            &mut self,
+            id: u32,
+            path: String,
+            attrs: FileAttributes,
+        ) -> Result<Status, Self::Error> {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("SETSTAT {path}"));
+            if state.fault == Fault::EditorMetadataDenied {
+                return Err(StatusCode::PermissionDenied);
+            }
+            if !state.files.contains_key(&path) {
+                return Err(StatusCode::NoSuchFile);
+            }
+            if state.fault != Fault::EditorMetadataMismatch
+                && let Some(mode) = attrs.permissions
+            {
+                state.modes.insert(path, 0o100000 | (mode & 0o7777));
+            }
+            Ok(ok(id))
+        }
+
         async fn remove(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
             let mut state = self.0.lock().unwrap();
             state.calls.push(format!("REMOVE {path}"));
@@ -1099,6 +1370,7 @@ mod fault_tests {
                 return Err(StatusCode::PermissionDenied);
             }
             state.files.remove(&path).ok_or(StatusCode::NoSuchFile)?;
+            state.modes.remove(&path);
             Ok(ok(id))
         }
 
@@ -1138,9 +1410,12 @@ mod fault_tests {
                     .get(&source)
                     .ok_or(StatusCode::NoSuchFile)?
                     .clone();
-                state.files.insert(destination, content);
+                state.files.insert(destination.clone(), content);
                 if request == "posix-rename@openssh.com" {
                     state.files.remove(&source);
+                    if let Some(mode) = state.modes.remove(&source) {
+                        state.modes.insert(destination, mode);
+                    }
                 }
                 return Ok(Packet::Status(ok(id)));
             }
@@ -1156,6 +1431,7 @@ mod fault_tests {
                 ("/fixture/source".into(), b"first-second".to_vec()),
                 ("/fixture/staging".into(), b"old-staging".to_vec()),
             ]),
+            modes: HashMap::new(),
             calls: Vec::new(),
             writes: 0,
             reads: 0,
@@ -1170,6 +1446,180 @@ mod fault_tests {
         .unwrap()
         .unwrap();
         (client, state)
+    }
+
+    #[tokio::test]
+    async fn editor_read_enforces_stream_limit_even_when_server_declares_small() {
+        let (client, state) = matrix_client(Fault::DeclaredSmall).await;
+        state.lock().unwrap().files.insert(
+            "/fixture/editor".into(),
+            vec![b'a'; MAX_REMOTE_EDITOR_BYTES + 1],
+        );
+        let error = client
+            .read_editor_bytes("/fixture/editor")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::FilePolicy);
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .any(|call| call == "CLOSE")
+        );
+    }
+
+    #[tokio::test]
+    async fn editor_read_accepts_exact_cap_and_rejects_directory() {
+        let (client, state) = matrix_client(Fault::None).await;
+        state.lock().unwrap().files.insert(
+            "/fixture/editor".into(),
+            vec![b'a'; MAX_REMOTE_EDITOR_BYTES],
+        );
+        assert_eq!(
+            client
+                .read_editor_bytes("/fixture/editor")
+                .await
+                .unwrap()
+                .len(),
+            MAX_REMOTE_EDITOR_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn editor_rejects_nonregular_and_unknown_entries_before_open() {
+        for fault in [
+            Fault::EditorDirectory,
+            Fault::EditorSymlink,
+            Fault::EditorSpecial,
+            Fault::EditorUnknown,
+        ] {
+            let (client, state) = matrix_client(fault).await;
+            state
+                .lock()
+                .unwrap()
+                .files
+                .insert("/fixture/editor".into(), b"text".to_vec());
+            assert_eq!(
+                client
+                    .read_editor_bytes("/fixture/editor")
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::FilePolicy
+            );
+            assert!(
+                !state
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .any(|call| call == "OPEN /fixture/editor")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn editor_metadata_denial_or_readback_mismatch_cleans_owned_staging_without_replace() {
+        use nexus_model::{TextNewline, TransferState};
+        for fault in [Fault::EditorMetadataDenied, Fault::EditorMetadataMismatch] {
+            let (client, state) = matrix_client(fault).await;
+            {
+                let mut fixture = state.lock().unwrap();
+                fixture
+                    .files
+                    .insert("/fixture/editor".into(), b"old".to_vec());
+                fixture.modes.insert("/fixture/editor".into(), 0o100640);
+            }
+            let revision = client.editor_revision("/fixture/editor").await.unwrap();
+            let store = crate::FilePlanStore::default();
+            let document = store
+                .register_editor_document(
+                    client.as_ref(),
+                    "/fixture/editor".into(),
+                    revision,
+                    b"old",
+                    TextNewline::Lf,
+                    false,
+                )
+                .unwrap();
+            let plan = store
+                .plan_editor_save(client, document, "new".into())
+                .await
+                .unwrap();
+            let manager = crate::TransferManager::new();
+            let job = manager
+                .execute(
+                    store
+                        .consume(
+                            plan.id,
+                            plan.host_id,
+                            plan.host_session_id,
+                            plan.sftp_session_id,
+                        )
+                        .unwrap(),
+                )
+                .await
+                .unwrap()[0]
+                .id;
+            let failed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let view = manager
+                        .list(None)
+                        .into_iter()
+                        .find(|item| item.id == job)
+                        .unwrap();
+                    if view.state == TransferState::Failed {
+                        break view;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                failed.error.unwrap().code,
+                ErrorCode::SftpDenied | ErrorCode::FilePolicy
+            ));
+            let fixture = state.lock().unwrap();
+            assert_eq!(fixture.files["/fixture/editor"], b"old");
+            assert!(
+                !fixture
+                    .files
+                    .keys()
+                    .any(|path| path.ends_with(".edit.part"))
+            );
+            assert!(
+                fixture
+                    .calls
+                    .iter()
+                    .any(|call| call.starts_with("SETSTAT "))
+            );
+            assert_eq!(
+                fixture
+                    .calls
+                    .iter()
+                    .filter(|call| call.starts_with("REMOVE "))
+                    .count(),
+                1
+            );
+            assert!(
+                !fixture
+                    .calls
+                    .iter()
+                    .any(|call| call == "EXTENDED posix-rename@openssh.com")
+            );
+        }
+    }
+
+    #[test]
+    fn listing_identity_does_not_misclassify_symlink_as_regular() {
+        let attrs = FileAttributes {
+            permissions: Some(0o120777),
+            ..FileAttributes::default()
+        };
+        assert_eq!(identity(&attrs).kind, RemoteEntryKind::Symlink);
     }
 
     #[tokio::test]

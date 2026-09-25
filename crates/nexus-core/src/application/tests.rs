@@ -702,6 +702,7 @@ struct LifecycleSftpClient {
     identity_calls: AtomicUsize,
     stall_plan_identity: AtomicBool,
     stall_plan_stat: AtomicBool,
+    stall_editor_read: AtomicBool,
     plan_remote_started: Notify,
     plan_remote_release: Notify,
     closed: Notify,
@@ -726,10 +727,16 @@ impl LifecycleSftpClient {
                 host_id,
                 host_session_id,
                 protocol_version: 3,
-                extensions: vec![SftpExtension {
-                    name: "hardlink@openssh.com".into(),
-                    version: "1".into(),
-                }],
+                extensions: vec![
+                    SftpExtension {
+                        name: "hardlink@openssh.com".into(),
+                        version: "1".into(),
+                    },
+                    SftpExtension {
+                        name: "posix-rename@openssh.com".into(),
+                        version: "1".into(),
+                    },
+                ],
                 limits: SftpLimits {
                     max_packet_bytes: None,
                     max_read_bytes: None,
@@ -744,6 +751,7 @@ impl LifecycleSftpClient {
             identity_calls: AtomicUsize::new(0),
             stall_plan_identity: AtomicBool::new(false),
             stall_plan_stat: AtomicBool::new(false),
+            stall_editor_read: AtomicBool::new(false),
             plan_remote_started: Notify::new(),
             plan_remote_release: Notify::new(),
             closed: Notify::new(),
@@ -807,6 +815,38 @@ impl nexus_sftp::SftpClient for LifecycleSftpClient {
                 modified: Some(1),
             }),
         )
+    }
+    async fn editor_revision(&self, path: &str) -> Result<nexus_sftp::EditorRevision, AppError> {
+        if path != "/tmp/editor.txt" {
+            return Err(unused_sftp());
+        }
+        Ok(nexus_sftp::EditorRevision {
+            identity: nexus_sftp::EntryIdentity {
+                kind: RemoteEntryKind::File,
+                size: Some(4),
+                modified: Some(1),
+            },
+            raw_mode: 0o100640,
+            uid: 1000,
+            gid: 1000,
+        })
+    }
+    async fn read_editor_bytes(&self, path: &str) -> Result<Vec<u8>, AppError> {
+        if path != "/tmp/editor.txt" {
+            return Err(unused_sftp());
+        }
+        if self.stall_editor_read.swap(false, Ordering::SeqCst) {
+            self.plan_remote_started.notify_one();
+            self.plan_remote_release.notified().await;
+        }
+        Ok(b"data".to_vec())
+    }
+    async fn preserve_editor_metadata(
+        &self,
+        _: &str,
+        _: &nexus_sftp::EditorRevision,
+    ) -> Result<(), AppError> {
+        Ok(())
     }
     async fn create_dir(&self, _: &str) -> Result<(), AppError> {
         Err(unused_sftp())
@@ -972,6 +1012,229 @@ async fn disconnect_cannot_revoke_before_inflight_upload_plan_is_published() {
             .await
             .is_err()
     );
+}
+
+async fn setup_editor_lifecycle() -> (
+    tempfile::TempDir,
+    Arc<Application>,
+    HostId,
+    HostSessionId,
+    Arc<LifecycleSftpClient>,
+) {
+    let (profile, app, _) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let connection = app
+        .slot(host.id)
+        .await
+        .data
+        .lock()
+        .await
+        .connection_id
+        .unwrap();
+    let client = LifecycleSftpClient::new(host.id, connection);
+    app.sftp_sessions
+        .lock()
+        .await
+        .insert(host.id, client.clone());
+    (profile, app, host.id, connection, client)
+}
+
+#[tokio::test]
+async fn editor_document_and_save_plan_are_revoked_after_reconnect() {
+    let (_profile, app, host, connection, client) = setup_editor_lifecycle().await;
+    let first = app
+        .open_remote_text_file(host, connection, client.info.id, "/tmp/editor.txt".into())
+        .await
+        .unwrap();
+    let plan = app
+        .plan_remote_text_save(
+            host,
+            connection,
+            client.info.id,
+            first.id,
+            "new-data".into(),
+        )
+        .await
+        .unwrap();
+    let still_open = app
+        .open_remote_text_file(host, connection, client.info.id, "/tmp/editor.txt".into())
+        .await
+        .unwrap();
+    app.disconnect_host(host).await.unwrap();
+    app.connect_host(host).await.unwrap();
+    let new_connection = app
+        .slot(host)
+        .await
+        .data
+        .lock()
+        .await
+        .connection_id
+        .unwrap();
+    let new_client = LifecycleSftpClient::new(host, new_connection);
+    app.sftp_sessions
+        .lock()
+        .await
+        .insert(host, new_client.clone());
+    assert_ne!(connection, new_connection);
+    assert!(
+        app.plan_remote_text_save(
+            host,
+            connection,
+            client.info.id,
+            still_open.id,
+            "new-data".into()
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        app.plan_remote_text_save(
+            host,
+            new_connection,
+            new_client.info.id,
+            still_open.id,
+            "new-data".into()
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        app.execute_file_plan(host, connection, client.info.id, plan.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_file_plan(host, new_connection, new_client.info.id, plan.id)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn editor_planning_cannot_leave_authority_after_teardown() {
+    let (_profile, app, host, connection, client) = setup_editor_lifecycle().await;
+    let document = app
+        .open_remote_text_file(host, connection, client.info.id, "/tmp/editor.txt".into())
+        .await
+        .unwrap();
+    client.stall_editor_read.store(true, Ordering::SeqCst);
+    let planning_app = app.clone();
+    let sftp = client.info.id;
+    let planning = tokio::spawn(async move {
+        planning_app
+            .plan_remote_text_save(host, connection, sftp, document.id, "new-data".into())
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.plan_remote_started.notified(),
+    )
+    .await
+    .unwrap();
+    let disconnect_app = app.clone();
+    let disconnecting = tokio::spawn(async move { disconnect_app.disconnect_host(host).await });
+    tokio::task::yield_now().await;
+    assert_eq!(client.closes.load(Ordering::SeqCst), 0);
+    client.plan_remote_release.notify_one();
+    let plan = planning.await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), disconnecting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        app.file_plans
+            .consume(plan.id, host, connection, sftp)
+            .is_err()
+    );
+    assert!(
+        app.execute_file_plan(host, connection, sftp, plan.id)
+            .await
+            .is_err()
+    );
+}
+
+async fn start_stalled_editor_save() -> (
+    tempfile::TempDir,
+    Arc<Application>,
+    HostId,
+    Arc<LifecycleSftpClient>,
+    TransferJobId,
+) {
+    let (profile, app, host, connection, client) = setup_editor_lifecycle().await;
+    let document = app
+        .open_remote_text_file(host, connection, client.info.id, "/tmp/editor.txt".into())
+        .await
+        .unwrap();
+    let plan = app
+        .plan_remote_text_save(
+            host,
+            connection,
+            client.info.id,
+            document.id,
+            "new-data".into(),
+        )
+        .await
+        .unwrap();
+    client.stall_owned_upload.store(true, Ordering::SeqCst);
+    let job = app
+        .execute_file_plan(host, connection, client.info.id, plan.id)
+        .await
+        .unwrap()[0]
+        .id;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.upload_started.notified(),
+    )
+    .await
+    .unwrap();
+    (profile, app, host, client, job)
+}
+
+#[tokio::test]
+async fn editor_save_delete_waits_for_owned_cleanup() {
+    let (_profile, app, host, client, job) = start_stalled_editor_save().await;
+    let deleting_app = app.clone();
+    let deleting = tokio::spawn(async move { deleting_app.delete_host(host).await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.cleanup_started.notified(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.closes.load(Ordering::SeqCst), 0);
+    client.cleanup_release.notify_one();
+    deleting.await.unwrap().unwrap();
+    assert_eq!(
+        wait_for_transfer(&app, job).await.state,
+        TransferState::Cancelled
+    );
+    assert_eq!(client.closes.load(Ordering::SeqCst), 1);
+    assert!(!client.cleanup_after_close.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn editor_save_shutdown_waits_for_owned_cleanup() {
+    let (_profile, app, host, client, job) = start_stalled_editor_save().await;
+    let shutdown_app = app.clone();
+    let shutting_down = tokio::spawn(async move { shutdown_app.shutdown().await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        client.cleanup_started.notified(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.closes.load(Ordering::SeqCst), 0);
+    client.cleanup_release.notify_one();
+    shutting_down.await.unwrap().unwrap();
+    assert_eq!(
+        wait_for_transfer(&app, job).await.state,
+        TransferState::Cancelled
+    );
+    assert_eq!(client.closes.load(Ordering::SeqCst), 1);
+    assert!(!client.cleanup_after_close.load(Ordering::SeqCst));
+    assert!(app.slot(host).await.data.lock().await.cancel.is_cancelled());
 }
 
 async fn finish_plan_before_disconnect(
