@@ -11,6 +11,8 @@ pub enum ReadOnlyCommand {
     LoadAverage,
     Memory,
     RootFilesystem,
+    CpuStat,
+    NetworkDevices,
 }
 
 impl ReadOnlyCommand {
@@ -25,6 +27,8 @@ impl ReadOnlyCommand {
             Self::LoadAverage => "cat /proc/loadavg",
             Self::Memory => "cat /proc/meminfo",
             Self::RootFilesystem => "LC_ALL=C df -Pk /",
+            Self::CpuStat => "cat /proc/stat",
+            Self::NetworkDevices => "cat /proc/net/dev",
         }
     }
 
@@ -38,6 +42,8 @@ impl ReadOnlyCommand {
             Self::LoadAverage => "discovery.load",
             Self::Memory => "discovery.memory",
             Self::RootFilesystem => "discovery.root_filesystem",
+            Self::CpuStat => "monitor.cpu",
+            Self::NetworkDevices => "monitor.network",
         }
     }
 

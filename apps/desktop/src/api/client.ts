@@ -5,6 +5,7 @@ import type {
   Host,
   HostInput,
   HostKeyChallenge,
+  HostMonitorSample,
   HostSession,
   TerminalOutputBatch,
   TerminalSession,
@@ -66,6 +67,12 @@ export const hostApi = {
   trust: (hostId: string, challenge: HostKeyChallenge) =>
     request<void>('trust_host_key', { hostId, challenge }),
   refresh: (hostId: string) => request<void>('refresh_host', { hostId }),
+};
+
+/** Session-bound, fixed-command monitoring boundary. */
+export const monitorApi = {
+  sample: (hostId: string, hostSessionId: string) =>
+    request<HostMonitorSample>('sample_host_monitor', { hostId, hostSessionId }),
 };
 
 type TerminalOwnership = Pick<TerminalSession, 'hostId' | 'hostSessionId' | 'id'>;

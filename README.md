@@ -1,8 +1,8 @@
 # NexusOps
 
-A native, agentless infrastructure control plane. The current milestone provides host management, verified SSH connections, a read-only Linux overview, independent interactive SSH PTY workspaces, and a safe SFTP file workspace with streamed transfers. Windows is the primary development target; the Tauri shell and Rust services support Windows, macOS and Linux.
+A native, agentless infrastructure control plane. The current milestone provides host management, verified SSH connections, read-only live Linux monitoring, independent interactive SSH PTY workspaces, and a safe SFTP file workspace with streamed transfers and a bounded remote text editor. Windows is the primary development target; the Tauri shell and Rust services support Windows, macOS and Linux.
 
-No NexusOps software is installed on the remote machine. A working SSH server with an SFTP subsystem, a Linux user account and standard read-only utilities are sufficient. NexusOps requests no sudo, package installation, or service changes. Remote file writes occur only after an exact one-time file plan is shown and approved.
+No NexusOps software is installed on the remote machine. A working SSH server with an SFTP subsystem, a Linux user account and standard read-only utilities are sufficient. NexusOps requests no sudo, package installation, or service changes. Remote file writes, including text saves, occur only after an exact one-time file plan is shown and approved.
 
 ## Start
 
@@ -13,11 +13,11 @@ npm ci
 npm run tauri -- dev
 ```
 
-Create a host, select password or private-key authentication and save its credentials. Connect, compare the first-contact SHA-256 fingerprint with an independently verified value, and explicitly trust it. A changed key is blocked. Successful connection runs small read-only probes and populates Overview. Hosts can be switched independently; disconnect before editing a connected host.
+Create a host, select password or private-key authentication and save its credentials. Connect, compare the first-contact SHA-256 fingerprint with an independently verified value, and explicitly trust it. A changed key is blocked. Successful connection runs small read-only probes and populates Overview. While a connected Overview is visible, NexusOps samples CPU, memory, swap, root-disk and network counters every five seconds and keeps about ten minutes of history in memory. See [monitoring architecture](docs/architecture/monitoring.md). Hosts can be switched independently; disconnect before editing a connected host.
 
 Select **Terminal** on a connected host to open one or more real `xterm-256color` SSH PTYs. Tabs, resizing, local scrollback search, explicit text clipboard actions, and full-screen terminal programs are supported. Terminal contents and tab metadata remain in memory only. See the [terminal architecture](docs/architecture/terminal.md) for ownership, limits, shortcuts, and sensitive-data handling.
 
-Select **Files** to browse the account's resolved SFTP start directory, inspect metadata, upload/download ordinary files, and perform explicitly approved create, rename, or non-recursive delete actions. Local files and destinations are chosen through native dialogs; paths and payload bytes never enter React. Transfers are staged, bounded, cancellable, and use explicit Skip, Keep both, or supported safe Replace behavior. See [SFTP files architecture](docs/architecture/sftp.md) for the safety contracts and limitations.
+Select **Files** to browse the account's resolved SFTP start directory, inspect metadata, upload/download ordinary files, edit bounded UTF-8 text files, and perform explicitly approved create, rename, or non-recursive delete actions. Local files and destinations are chosen through native dialogs; local handles and transfer payload bytes remain native-side. Bounded remote editor text and display-safe remote paths are explicit typed UI data. Transfers are staged, bounded, cancellable, and use explicit Skip, Keep both, or supported safe Replace behavior. See [SFTP files architecture](docs/architecture/sftp.md) and [remote text editor architecture](docs/architecture/editor.md) for the safety contracts and limitations.
 
 `npm run dev` opens the frontend in a browser for UI work. It intentionally reports that desktop access is unavailable and does not simulate a connection. Services, Containers, Network, Security and Logs are reserved, disabled navigation entries.
 
@@ -54,6 +54,6 @@ npm run tauri -- build --no-bundle
 
 The local SSH integration fixture binds loopback and generates its own keys. It does not require a VPS or system SSH daemon. The OS-keychain integration test is explicitly ignored by default because it needs an unlocked interactive keychain; see [setup and tests](docs/development/setup.md). Goal 01A's security baseline is in its [verification report](docs/validation/goal-01a-report.md). Goal 02A's terminal evidence is in the [terminal report](docs/validation/goal-02a-terminal-report.md).
 
-Architecture, threat model, important limitations and architectural decisions are documented in [architecture](docs/architecture/overview.md), [terminal architecture](docs/architecture/terminal.md), [security](docs/security/threat-model.md) and [ADRs](docs/adr/0001-workspace-and-boundaries.md). There are no remote mutation features, AI execution, SFTP, tunnels, bastions or key-rotation UI.
+Architecture, threat model, important limitations and architectural decisions are documented in [architecture](docs/architecture/overview.md), [monitoring](docs/architecture/monitoring.md), [terminal architecture](docs/architecture/terminal.md), [SFTP files](docs/architecture/sftp.md), [remote text editor](docs/architecture/editor.md), [security](docs/security/threat-model.md) and [ADRs](docs/adr/0001-workspace-and-boundaries.md). There is no AI execution, generic command IPC, sudo integration, remote agent, tunnel, bastion, alerting or key-rotation UI.
 
 Licensed under MIT.

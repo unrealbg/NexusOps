@@ -21,7 +21,7 @@ pub enum RollbackStatus {
     NotRequired,
 }
 
-/// Goal 01's policy admits only reviewed read-only operations.
+/// The structured-operation policy admits only reviewed read-only operations.
 /// Verification is transport-level here; providers verify domain-specific output.
 pub struct OperationEngine {
     timeout: Duration,

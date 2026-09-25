@@ -13,6 +13,7 @@ impl Application {
             data.cancel.cancel();
             data.transport = None;
             let connection_id = data.connection_id.take();
+            data.view.host_session_id = None;
             data.view.state = data.view.state.transition(ConnectionState::Failed)?;
             data.view.error = Some(AppError::new(
                 ErrorCode::Connection,
@@ -26,6 +27,9 @@ impl Application {
         };
         let view = data.view.clone();
         drop(data);
+        if closed_connection.is_some() {
+            self.clear_monitor(id).await;
+        }
         if let Some(connection_id) = closed_connection {
             self.close_sftp(id, connection_id).await?;
             self.terminals
@@ -57,6 +61,7 @@ impl Application {
             data.view.state = state.transition(ConnectionState::Disconnecting)?;
         }
         drop(data);
+        self.clear_monitor(id).await;
         if let Some(connection_id) = connection_id {
             if let Err(error) = self.close_sftp(id, connection_id).await {
                 slot.data.lock().await.view.error = Some(error.clone());

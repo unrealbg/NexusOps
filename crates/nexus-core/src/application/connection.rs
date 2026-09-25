@@ -32,6 +32,7 @@ impl Application {
             drop(data);
             (stored, slot, generation, cancel)
         };
+        self.clear_monitor(id).await;
         let started = Instant::now();
         let outcome = self.establish(&stored, cancel.clone()).await;
         let mut data = slot.data.lock().await;
@@ -46,7 +47,9 @@ impl Application {
                 data.view.discovery = Some(snapshot);
                 data.view.identity = identity;
                 data.transport = Some(transport);
-                data.connection_id = Some(HostSessionId::new());
+                let connection_id = HostSessionId::new();
+                data.connection_id = Some(connection_id);
+                data.view.host_session_id = Some(connection_id);
                 self.record(id, "connection.connect", AuditOutcome::Success, started)?;
                 Ok(())
             }

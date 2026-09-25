@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-sample-host-monitor"
+description = "Enables the sample_host_monitor command without any pre-configured scope."
+commands.allow = ["sample_host_monitor"]
+
+[[permission]]
+identifier = "deny-sample-host-monitor"
+description = "Denies the sample_host_monitor command without any pre-configured scope."
+commands.deny = ["sample_host_monitor"]

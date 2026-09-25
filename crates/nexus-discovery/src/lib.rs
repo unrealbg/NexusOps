@@ -1,10 +1,12 @@
 //! Independent, bounded Linux probes. Untrusted remote output is only parsed as data.
 
 mod capabilities;
+mod monitoring;
 mod parsers;
 mod probes;
 
 pub use capabilities::{CapabilityRegistry, capabilities};
+pub use monitoring::{MonitorBaseline, MonitorReading, derive_sample, observe_monitor};
 pub use probes::{HostProbe, builtin_probes};
 
 use nexus_model::{AppError, DiscoverySnapshot, ErrorCode};

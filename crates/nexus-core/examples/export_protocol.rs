@@ -21,6 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ConnectionState::decl(&config),
         DiscoverySnapshot::decl(&config),
         HostSession::decl(&config),
+        HostMonitorSample::decl(&config),
         HostSessionId::decl(&config),
         TerminalSessionId::decl(&config),
         TerminalSize::decl(&config),

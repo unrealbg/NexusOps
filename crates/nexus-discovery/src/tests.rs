@@ -31,6 +31,8 @@ impl RemoteSession for PartialSession {
             ReadOnlyCommand::LoadAverage => Ok("0.12 0.15 0.13 1/100 999\n".into()),
             ReadOnlyCommand::Memory => Ok("MemTotal: 1000 kB\nMemAvailable: 250 kB\n".into()),
             ReadOnlyCommand::RootFilesystem => Ok("dev 1000 400 550 43% /\n".into()),
+            ReadOnlyCommand::CpuStat => Ok("cpu 1 0 1 8 0 0 0 0\n".into()),
+            ReadOnlyCommand::NetworkDevices => Ok("Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n lo: 1 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0\n".into()),
         }
     }
     async fn disconnect(&self) -> Result<(), AppError> {
