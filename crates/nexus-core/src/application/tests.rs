@@ -92,7 +92,7 @@ impl RemoteSession for TestSession {
                     let permit = self.services.release.acquire().await.expect("release");
                     permit.forget();
                 }
-                "sshd.service loaded active running OpenSSH daemon\n"
+                "Id=sshd.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=OpenSSH daemon\n"
             },
         }.into())
     }

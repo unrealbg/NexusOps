@@ -31,7 +31,7 @@ impl ReadOnlyCommand {
             Self::CpuStat => "cat /proc/stat",
             Self::NetworkDevices => "cat /proc/net/dev",
             Self::SystemServices => {
-                "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-legend --plain --full --all --type=service --no-ask-password list-units"
+                "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=Description show"
             }
         }
     }
@@ -72,7 +72,7 @@ mod tests {
         let command = ReadOnlyCommand::SystemServices;
         assert_eq!(
             command.command(),
-            "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-legend --plain --full --all --type=service --no-ask-password list-units"
+            "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=Description show"
         );
         assert_eq!(command.kind(), "services.list");
         assert_eq!(command.operation().risk, OperationRisk::ReadOnly);
