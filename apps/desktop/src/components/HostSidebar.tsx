@@ -6,7 +6,6 @@ import { ConnectionBadge } from './ConnectionBadge';
 
 const futureSections = [
   ['containers', 'Containers'],
-  ['network', 'Network'],
   ['security', 'Security'],
   ['logs', 'Logs'],
 ] as const;
@@ -57,8 +56,8 @@ export function HostSidebar({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onAdd: () => void;
-  activeSection: 'overview' | 'terminal' | 'files' | 'services';
-  onSection: (section: 'overview' | 'terminal' | 'files' | 'services') => void;
+  activeSection: 'overview' | 'terminal' | 'files' | 'services' | 'network';
+  onSection: (section: 'overview' | 'terminal' | 'files' | 'services' | 'network') => void;
 }) {
   return (
     <aside className="sidebar">
@@ -123,6 +122,15 @@ export function HostSidebar({
         >
           <Icon name="services" />
           Services
+        </button>
+        <button
+          className={`nav-item ${activeSection === 'network' ? 'nav-item--active' : ''}`}
+          aria-current={activeSection === 'network' ? 'page' : undefined}
+          disabled={!selectedId}
+          onClick={() => onSection('network')}
+        >
+          <Icon name="network" />
+          Network
         </button>
         {futureSections.map(([icon, label]) => (
           <button

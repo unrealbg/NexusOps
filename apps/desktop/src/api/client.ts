@@ -6,6 +6,7 @@ import type {
   HostInput,
   HostKeyChallenge,
   HostMonitorSample,
+  NetworkSnapshot,
   ServiceSnapshot,
   HostSession,
   TerminalOutputBatch,
@@ -80,6 +81,12 @@ export const monitorApi = {
 export const servicesApi = {
   list: (hostId: string, hostSessionId: string) =>
     request<ServiceSnapshot>('list_host_services', { hostId, hostSessionId }),
+};
+
+/** One fixed read-only network observation; no renderer-supplied remote arguments. */
+export const networkApi = {
+  list: (hostId: string, hostSessionId: string) =>
+    request<NetworkSnapshot>('list_host_network', { hostId, hostSessionId }),
 };
 
 type TerminalOwnership = Pick<TerminalSession, 'hostId' | 'hostSessionId' | 'id'>;

@@ -6,6 +6,8 @@ No NexusOps software is installed on the remote machine. A working SSH server wi
 
 Services provides an on-demand, read-only snapshot of loaded systemd system services for a connected host. It supports manual Refresh and local filtering, with no service controls or background polling. See [services architecture](docs/architecture/services.md).
 
+Network provides an on-demand, read-only snapshot of Linux interface names, operational states, MTUs and IPv4/IPv6 addresses for a connected host. It uses one fixed `ip -j address show` command, manual Refresh and local filtering, with no network controls or background polling. See [network architecture](docs/architecture/network.md).
+
 ## Start
 
 Install Node 24.15+, Rust 1.98.1 and your platform's [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), then:
@@ -21,7 +23,7 @@ Select **Terminal** on a connected host to open one or more real `xterm-256color
 
 Select **Files** to browse the account's resolved SFTP start directory, inspect metadata, upload/download ordinary files, edit bounded UTF-8 text files, and perform explicitly approved create, rename, or non-recursive delete actions. Local files and destinations are chosen through native dialogs; local handles and transfer payload bytes remain native-side. Bounded remote editor text and display-safe remote paths are explicit typed UI data. Transfers are staged, bounded, cancellable, and use explicit Skip, Keep both, or supported safe Replace behavior. See [SFTP files architecture](docs/architecture/sftp.md) and [remote text editor architecture](docs/architecture/editor.md) for the safety contracts and limitations.
 
-`npm run dev` opens the frontend in a browser for UI work. It intentionally reports that desktop access is unavailable and does not simulate a connection. Containers, Network, Security and Logs are reserved, disabled navigation entries.
+`npm run dev` opens the frontend in a browser for UI work. It intentionally reports that desktop access is unavailable and does not simulate a connection. Containers, Security and Logs are reserved, disabled navigation entries.
 
 ## Workspace
 

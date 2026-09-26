@@ -12,6 +12,7 @@ fn main() {
             "refresh_host",
             "sample_host_monitor",
             "list_host_services",
+            "list_host_network",
             "list_terminals",
             "open_terminal",
             "poll_terminal",

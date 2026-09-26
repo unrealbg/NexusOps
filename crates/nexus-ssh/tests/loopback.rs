@@ -277,6 +277,57 @@ async fn unsupported_service_inventory_is_not_empty_success_and_keeps_ssh_usable
 }
 
 #[tokio::test]
+async fn fixed_network_inventory_uses_production_ssh_and_ignores_link_address() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    let snapshot = nexus_discovery::observe_network(
+        session.as_ref(),
+        CancellationToken::new(),
+        fixture.host.id,
+        HostSessionId::new(),
+    )
+    .await
+    .expect("network inventory");
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].name, "lo");
+    assert_eq!(snapshot.entries[0].addresses[1].address, "::1");
+    assert!(!format!("{snapshot:?}").contains("00:00:00:00:00:00"));
+    assert!(!session.is_closed());
+}
+
+#[tokio::test]
+async fn failing_network_command_keeps_other_fixed_reads_usable() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    fixture.handler.mode.store(3, Ordering::SeqCst);
+    let result = nexus_discovery::observe_network(
+        session.as_ref(),
+        CancellationToken::new(),
+        fixture.host.id,
+        HostSessionId::new(),
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(!session.is_closed());
+    fixture.handler.mode.store(0, Ordering::SeqCst);
+    assert_eq!(
+        session
+            .execute(ReadOnlyCommand::Hostname, CancellationToken::new())
+            .await
+            .unwrap(),
+        "nexus-fixture\n"
+    );
+}
+
+#[tokio::test]
 async fn unknown_key_blocks_before_auth_then_explicit_trust_allows_discovery() {
     let fixture = Fixture::start().await;
     let store = Arc::new(KnownHosts::open(":memory:").expect("pins"));
