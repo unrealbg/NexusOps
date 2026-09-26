@@ -101,6 +101,7 @@ impl Application {
         self.disconnect_inner(id).await?;
         // Metadata first: a crash can leave encrypted garbage, never a host referring to deleted secrets.
         self.repository.delete(id)?;
+        self.service_gates.lock().await.remove(&id);
         self.remove_secret(stored.credential_id).await?;
         self.sessions.lock().await.remove(&id);
         self.remove_monitor(id).await;

@@ -250,6 +250,33 @@ async fn rejected_sftp_subsystem_is_typed_and_leaves_ssh_usable() {
 }
 
 #[tokio::test]
+async fn unsupported_service_inventory_is_not_empty_success_and_keeps_ssh_usable() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    let result = nexus_discovery::observe_services(
+        session.as_ref(),
+        CancellationToken::new(),
+        fixture.host.id,
+        HostSessionId::new(),
+    )
+    .await;
+    let error = result.expect_err("the fixture has no systemd manager");
+    assert!(!error.message.contains("systemctl:"));
+    assert!(!session.is_closed());
+    assert_eq!(
+        session
+            .execute(ReadOnlyCommand::Hostname, CancellationToken::new())
+            .await
+            .expect("other read still works"),
+        "nexus-fixture\n"
+    );
+}
+
+#[tokio::test]
 async fn unknown_key_blocks_before_auth_then_explicit_trust_allows_discovery() {
     let fixture = Fixture::start().await;
     let store = Arc::new(KnownHosts::open(":memory:").expect("pins"));

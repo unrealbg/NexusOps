@@ -11,6 +11,7 @@ import { HostList } from './features/hosts/HostList';
 import { HostOverview } from './features/overview/HostOverview';
 import { TerminalWorkspace } from './features/terminal/TerminalWorkspace';
 import { FilesWorkspace } from './features/files/FilesWorkspace';
+import { ServicesWorkspace } from './features/services/ServicesWorkspace';
 
 type DialogState =
   { type: 'add' } | { type: 'edit'; host: Host } | { type: 'delete'; host: Host } | null;
@@ -22,7 +23,7 @@ export default function App() {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [section, setSection] = useState<'overview' | 'terminal' | 'files'>('overview');
+  const [section, setSection] = useState<'overview' | 'terminal' | 'files' | 'services'>('overview');
   const [terminalHosts, setTerminalHosts] = useState<string[]>([]);
   const [fileHosts, setFileHosts] = useState<string[]>([]);
   const hosts = hostsQuery.data ?? [];
@@ -39,7 +40,7 @@ export default function App() {
     if (host && section === 'files') setFileHosts((current) => current.includes(host.id) ? current : [...current, host.id]);
   }
 
-  function selectSection(next: 'overview' | 'terminal' | 'files') {
+  function selectSection(next: 'overview' | 'terminal' | 'files' | 'services') {
     setSection(next);
     if (next === 'terminal' && selectedHost) visitTerminal(selectedHost);
     if (next === 'files' && selectedHost) setFileHosts((current) => current.includes(selectedHost.id) ? current : [...current, selectedHost.id]);
@@ -88,7 +89,7 @@ export default function App() {
             <button onClick={() => selectHost(null)}>Workspace</button>
             <span>/</span>
             <span>{selectedHost?.displayName ?? 'Overview'}</span>
-            {selectedHost && <span>{section === 'terminal' ? 'Terminal' : section === 'files' ? 'Files' : 'Overview'}</span>}
+            {selectedHost && <span>{section === 'terminal' ? 'Terminal' : section === 'files' ? 'Files' : section === 'services' ? 'Services' : 'Overview'}</span>}
           </div>
           <span className="topbar-label">
             <span className="local-dot" />
@@ -162,12 +163,15 @@ export default function App() {
               </div>
             );
           })}
+          {selectedHost && section === 'services' && (
+            <ServicesWorkspace key={selectedHost.id} host={selectedHost} />
+          )}
         </main>
         <footer className="app-footer">
           <span>
-            NexusOps <span className="footer-divider">/</span> {section === 'files' ? 'SFTP files' : 'Terminal workspace'}
+            NexusOps <span className="footer-divider">/</span> {section === 'files' ? 'SFTP files' : section === 'services' ? 'System services' : 'Terminal workspace'}
           </span>
-          <span>{section === 'files' ? 'Agentless · streamed transfers' : 'Interactive PTY · local scrollback'}</span>
+          <span>{section === 'files' ? 'Agentless · streamed transfers' : section === 'services' ? 'Read-only · on demand' : 'Interactive PTY · local scrollback'}</span>
         </footer>
       </div>
       {dialog && dialog.type !== 'delete' && (

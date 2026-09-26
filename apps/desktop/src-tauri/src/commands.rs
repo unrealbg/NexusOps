@@ -2,7 +2,8 @@ use crate::local_access::LocalAccessService;
 use nexus_core::Application;
 use nexus_model::{
     AppError, Host, HostId, HostInput, HostKeyChallenge, HostMonitorSample, HostSession,
-    HostSessionId, TerminalOutputBatch, TerminalSession, TerminalSessionId, TerminalSize,
+    HostSessionId, ServiceSnapshot, TerminalOutputBatch, TerminalSession, TerminalSessionId,
+    TerminalSize,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -99,6 +100,15 @@ pub async fn sample_host_monitor(
     host_session_id: HostSessionId,
 ) -> Result<HostMonitorSample, AppError> {
     app.sample_host_monitor(host_id, host_session_id).await
+}
+
+#[tauri::command]
+pub async fn list_host_services(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+) -> Result<ServiceSnapshot, AppError> {
+    app.list_host_services(host_id, host_session_id).await
 }
 
 #[tauri::command]

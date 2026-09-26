@@ -33,6 +33,8 @@ While a connected Overview is visible, its typed monitoring client requests boun
 
 Discovery results are cleared at the start of a connection and on disconnect. Refresh is serialized per host and cannot republish data after disconnect or edit. Polling exposes remote closure to the UI. Keepalives detect an unresponsive peer; a stale discovery observation is always timestamped.
 
+The Services workspace requests one fixed, bounded `systemctl` read on mount and on manual Refresh. Core binds the request to the exact host/session and revalidates after SSH I/O. Service rows are component-local, never persisted; see [Services](services.md).
+
 ## Local data
 
 Each OS app-data profile contains `hosts.db`, `known-hosts.db`, `credentials.db`, `profile.lock`, `audit.jsonl` and structured application logs. Metadata uses SQLite schema version 1 and rejects newer schemas. Passwords, keys and passphrases are absent from the metadata schema. The vault stores only AES-256-GCM ciphertext with random nonces, bound to a credential revision ID using authenticated associated data. Its master key is a 32-byte OS secure-store entry, avoiding Windows credential blob size limits for large private keys.
