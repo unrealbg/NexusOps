@@ -3,7 +3,7 @@ use nexus_model::{
     NetworkInterfaceEntry, NetworkSnapshot,
 };
 use nexus_operations::{OperationEngine, ReadOnlyCommand, RemoteSession};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::{collections::HashSet, net::IpAddr};
 use tokio_util::sync::CancellationToken;
 
@@ -33,9 +33,22 @@ struct RawInterface {
 
 #[derive(Deserialize)]
 struct RawAddress {
-    family: String,
+    #[serde(default, deserialize_with = "present")]
+    family: Option<String>,
+    #[serde(default, deserialize_with = "present")]
+    family_index: Option<u32>,
     local: Option<String>,
     prefixlen: Option<u16>,
+}
+
+// Distinguish an absent representation from a present null value. Both
+// representations present, even if one is null, must fail closed.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn unsafe_display(character: char) -> bool {
@@ -53,10 +66,11 @@ fn display_token(value: &str, max_bytes: usize) -> Result<(), AppError> {
 }
 
 fn parse_address(raw: RawAddress) -> Result<Option<NetworkAddressEntry>, AppError> {
-    let family = match raw.family.as_str() {
-        "inet" => NetworkAddressFamily::Ipv4,
-        "inet6" => NetworkAddressFamily::Ipv6,
-        _ => return Ok(None),
+    let family = match (raw.family.as_deref(), raw.family_index) {
+        (Some("inet"), None) => NetworkAddressFamily::Ipv4,
+        (Some("inet6"), None) => NetworkAddressFamily::Ipv6,
+        (Some(_), None) | (None, Some(_)) => return Ok(None),
+        _ => return Err(invalid()),
     };
     let local = raw.local.ok_or_else(invalid)?;
     let prefix = raw.prefixlen.ok_or_else(invalid)?;
@@ -193,6 +207,49 @@ mod tests {
         assert!(parse_network(&input).unwrap()[0].addresses.is_empty());
         let many = vec![unsupported; MAX_ADDRESSES + 1].join(",");
         bad(&format!("[{}]", iface(1, "eth0", &many)));
+    }
+
+    #[test]
+    fn preserves_inet_addresses_and_omits_numeric_unknown_family() {
+        let input = r#"[{"ifindex":2,"ifname":"eth0","addr_info":[{"family":"inet","local":"192.0.2.10","prefixlen":24},{"family":"inet6","local":"2001:0db8::10","prefixlen":64},{"family_index":45,"local":"8","prefixlen":0,"valid_life_time":4294967295}]}]"#;
+        let entries = parse_network(input).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].addresses.len(), 2);
+        assert_eq!(entries[0].addresses[0].address, "192.0.2.10");
+        assert_eq!(entries[0].addresses[1].address, "2001:db8::10");
+        assert!(
+            !serde_json::to_string(&entries)
+                .unwrap()
+                .contains("family_index")
+        );
+    }
+
+    #[test]
+    fn numeric_unknown_families_count_toward_raw_address_limit() {
+        let unsupported = r#"{"family_index":45,"local":"8","prefixlen":0}"#;
+        let at_limit = vec![unsupported; MAX_ADDRESSES].join(",");
+        assert!(
+            parse_network(&format!("[{}]", iface(1, "eth0", &at_limit))).unwrap()[0]
+                .addresses
+                .is_empty()
+        );
+        let over_limit = vec![unsupported; MAX_ADDRESSES + 1].join(",");
+        bad(&format!("[{}]", iface(1, "eth0", &over_limit)));
+    }
+
+    #[test]
+    fn rejects_ambiguous_duplicate_or_missing_address_family_representation() {
+        for address in [
+            r#"{"family_index":45,"family_index":46}"#,
+            r#"{"family":"inet","family_index":45,"local":"192.0.2.1","prefixlen":24}"#,
+            r#"{"family_index":45,"family":"inet","local":"192.0.2.1","prefixlen":24}"#,
+            r#"{"local":"192.0.2.1","prefixlen":24}"#,
+            r#"{"family":null,"family_index":45}"#,
+            r#"{"family_index":null}"#,
+            r#"{"family_index":"45"}"#,
+        ] {
+            bad(&format!("[{}]", iface(1, "eth0", address)));
+        }
     }
 
     #[test]
