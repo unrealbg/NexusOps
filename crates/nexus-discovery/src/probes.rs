@@ -46,6 +46,12 @@ impl HostProbe for LinuxProbe {
                 snapshot.root_total_bytes = Some(total);
                 snapshot.root_used_bytes = Some(used);
             }
+            ReadOnlyCommand::CpuStat | ReadOnlyCommand::NetworkDevices => {
+                return Err(nexus_model::AppError::new(
+                    nexus_model::ErrorCode::Policy,
+                    "Monitoring commands are not discovery probes.",
+                ));
+            }
         }
         Ok(())
     }

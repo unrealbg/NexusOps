@@ -27,6 +27,7 @@ export const snapshot: DiscoverySnapshot = {
 };
 export const disconnected: HostSession = {
   hostId: host.id,
+  hostSessionId: null,
   state: 'disconnected',
   error: null,
   identity: null,
@@ -36,6 +37,7 @@ export const disconnected: HostSession = {
 export const connected: HostSession = {
   ...disconnected,
   state: 'connected',
+  hostSessionId: '11111111-1111-4111-8111-111111111111',
   identity: {
     hostname: host.connection.hostname,
     fingerprint: { algorithm: 'ssh-ed25519', sha256: 'SHA256:test-fingerprint' },

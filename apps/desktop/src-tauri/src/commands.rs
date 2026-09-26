@@ -1,8 +1,8 @@
 use crate::local_access::LocalAccessService;
 use nexus_core::Application;
 use nexus_model::{
-    AppError, Host, HostId, HostInput, HostKeyChallenge, HostSession, HostSessionId,
-    TerminalOutputBatch, TerminalSession, TerminalSessionId, TerminalSize,
+    AppError, Host, HostId, HostInput, HostKeyChallenge, HostMonitorSample, HostSession,
+    HostSessionId, TerminalOutputBatch, TerminalSession, TerminalSessionId, TerminalSize,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -90,6 +90,15 @@ pub async fn trust_host_key(
 #[tauri::command]
 pub async fn refresh_host(app: State<'_, Application>, host_id: HostId) -> Result<(), AppError> {
     app.refresh_host(host_id).await
+}
+
+#[tauri::command]
+pub async fn sample_host_monitor(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+) -> Result<HostMonitorSample, AppError> {
+    app.sample_host_monitor(host_id, host_session_id).await
 }
 
 #[tauri::command]

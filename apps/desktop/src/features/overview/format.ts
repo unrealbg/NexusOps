@@ -37,3 +37,7 @@ export function observedTime(value: string): string {
         second: '2-digit',
       });
 }
+
+export function bytesPerSecond(value: number | null): string {
+  return value === null ? 'Unavailable' : `${bytes(value)}/s`;
+}

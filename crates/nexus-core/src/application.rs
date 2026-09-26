@@ -22,6 +22,8 @@ pub struct Application {
     pub(crate) sftp_startups: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
     pub(crate) file_plans: FilePlanStore,
     pub(crate) transfers: TransferManager,
+    pub(crate) monitor_baselines: Mutex<HashMap<HostId, MonitorState>>,
+    pub(crate) monitor_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
     sessions: Mutex<HashMap<HostId, Arc<SessionSlot>>>,
     mutation: Mutex<()>,
     _profile_lock: Option<File>,
@@ -47,7 +49,14 @@ mod files;
 mod hosts;
 mod identity;
 mod lifecycle;
+mod monitoring;
 mod terminal;
+
+pub(crate) struct MonitorState {
+    pub session_id: HostSessionId,
+    pub baseline: nexus_discovery::MonitorBaseline,
+    pub observed_at: Instant,
+}
 #[cfg(test)]
 mod tests;
 impl Application {
@@ -92,6 +101,8 @@ impl Application {
             sftp_startups: Mutex::new(HashMap::new()),
             file_plans: FilePlanStore::default(),
             transfers: TransferManager::new(),
+            monitor_baselines: Mutex::new(HashMap::new()),
+            monitor_gates: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             mutation: Mutex::new(()),
             _profile_lock: Some(lock),
@@ -164,6 +175,8 @@ impl Application {
         }
         self.transfers.quiesce_all().await?;
         self.terminals.shutdown().await;
+        self.monitor_baselines.lock().await.clear();
+        self.monitor_gates.lock().await.clear();
         for slot in slots {
             let mut data = slot.data.lock().await;
             data.cancel.cancel();

@@ -10,6 +10,7 @@ fn main() {
             "get_session",
             "trust_host_key",
             "refresh_host",
+            "sample_host_monitor",
             "list_terminals",
             "open_terminal",
             "poll_terminal",

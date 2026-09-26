@@ -7,6 +7,7 @@ import { ConnectionBadge } from '../../components/ConnectionBadge';
 import { Icon } from '../../components/Icon';
 import { DiscoveryDetails } from './DiscoveryDetails';
 import { HostKeyNotice } from './HostKeyNotice';
+import { LiveMonitoring } from './LiveMonitoring';
 
 export function HostOverview({
   host,
@@ -155,6 +156,14 @@ export function HostOverview({
         <div className="state-panel">
           <Spinner label="Closing the SSH session…" />
         </div>
+      )}
+      {session && (state === 'connected' || state === 'disconnected' || state === 'failed') && (
+        <LiveMonitoring
+          hostId={host.id}
+          hostSessionId={session.hostSessionId}
+          connected={state === 'connected'}
+          visible
+        />
       )}
       {state === 'connected' &&
         session &&

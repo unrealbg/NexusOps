@@ -1,4 +1,4 @@
-use crate::{AppError, ErrorCode, HostId};
+use crate::{AppError, ErrorCode, HostId, HostSessionId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -81,6 +81,7 @@ pub struct DiscoverySnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct HostSession {
     pub host_id: HostId,
+    pub host_session_id: Option<HostSessionId>,
     pub state: ConnectionState,
     pub error: Option<AppError>,
     pub identity: Option<HostIdentity>,
@@ -91,6 +92,7 @@ impl HostSession {
     pub fn disconnected(host_id: HostId) -> Self {
         Self {
             host_id,
+            host_session_id: None,
             state: ConnectionState::Disconnected,
             error: None,
             identity: None,

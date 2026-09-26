@@ -19,6 +19,11 @@ struct TestProvider {
     stall: AtomicBool,
     started: Notify,
     release: Notify,
+    monitor: Arc<MonitorControl>,
+}
+struct MonitorControl {
+    stall: AtomicBool,
+    started: Notify,
 }
 #[async_trait]
 impl ConnectionProvider for TestProvider {
@@ -33,11 +38,17 @@ impl ConnectionProvider for TestProvider {
             // Intentionally ignore cancellation to exercise the application generation guard.
             self.release.notified().await;
         }
-        Ok(Arc::new(TestSession { cancel }))
+        Ok(Arc::new(TestSession {
+            cancel,
+            monitor: self.monitor.clone(),
+            monitor_counter: AtomicUsize::new(0),
+        }))
     }
 }
 struct TestSession {
     cancel: CancellationToken,
+    monitor: Arc<MonitorControl>,
+    monitor_counter: AtomicUsize,
 }
 #[async_trait]
 impl RemoteSession for TestSession {
@@ -46,6 +57,10 @@ impl RemoteSession for TestSession {
         command: ReadOnlyCommand,
         _: CancellationToken,
     ) -> Result<String, AppError> {
+        if command == ReadOnlyCommand::CpuStat && self.monitor.stall.swap(false, Ordering::SeqCst) {
+            self.monitor.started.notify_one();
+            std::future::pending::<()>().await;
+        }
         Ok(match command {
             ReadOnlyCommand::Hostname=>"test-linux\n",
             ReadOnlyCommand::OsRelease=>"NAME=Linux\nVERSION_ID=1\n",
@@ -53,8 +68,16 @@ impl RemoteSession for TestSession {
             ReadOnlyCommand::Architecture=>"x86_64\n",
             ReadOnlyCommand::Uptime=>"3600.0 1.0\n",
             ReadOnlyCommand::LoadAverage=>"0.1 0.2 0.3 1/100 1\n",
-            ReadOnlyCommand::Memory=>"MemTotal: 8192 kB\nMemAvailable: 4096 kB\n",
+            ReadOnlyCommand::Memory=>"MemTotal: 8192 kB\nMemAvailable: 4096 kB\nSwapTotal: 1024 kB\nSwapFree: 768 kB\n",
             ReadOnlyCommand::RootFilesystem=>"Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/root 8192 4096 4096 50% /\n",
+            ReadOnlyCommand::CpuStat => {
+                let sample = self.monitor_counter.fetch_add(1, Ordering::SeqCst) as u64;
+                return Ok(format!("cpu {} 0 50 {} 10 0 0 0\n", 100 + sample * 50, 850 + sample * 50));
+            }
+            ReadOnlyCommand::NetworkDevices => {
+                let sample = self.monitor_counter.load(Ordering::SeqCst).saturating_sub(1) as u64;
+                return Ok(format!("Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n lo: 10 0 0 0 0 0 0 0 20 0 0 0 0 0 0 0\n eth0: {} 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0\n", 1000 + sample * 500, 2000 + sample * 1000));
+            }
         }.into())
     }
     async fn disconnect(&self) -> Result<(), AppError> {
@@ -130,6 +153,10 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         stall: AtomicBool::new(stall),
         started: Notify::new(),
         release: Notify::new(),
+        monitor: Arc::new(MonitorControl {
+            stall: AtomicBool::new(false),
+            started: Notify::new(),
+        }),
     });
     let application = Application {
         repository: Arc::new(HostRepository::open(dir.path().join("hosts.db")).expect("hosts")),
@@ -145,6 +172,8 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         sftp_startups: Mutex::new(HashMap::new()),
         file_plans: nexus_sftp::FilePlanStore::default(),
         transfers: nexus_sftp::TransferManager::new(),
+        monitor_baselines: Mutex::new(HashMap::new()),
+        monitor_gates: Mutex::new(HashMap::new()),
         mutation: Mutex::new(()),
         sessions: Mutex::new(HashMap::new()),
         _profile_lock: None,
@@ -291,6 +320,111 @@ async fn cancellation_cannot_publish_stale_results_and_hosts_are_independent() {
 }
 
 #[tokio::test]
+async fn monitoring_is_owned_by_exact_session_and_isolated_by_host() {
+    let (_dir, app, _) = setup(false);
+    let first = app
+        .save_host(input(), Some(credential()))
+        .await
+        .expect("first");
+    let second = app
+        .save_host(input(), Some(credential()))
+        .await
+        .expect("second");
+    app.connect_host(first.id).await.expect("connect first");
+    app.connect_host(second.id).await.expect("connect second");
+    let first_session = app
+        .get_session(first.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let second_session = app
+        .get_session(second.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+
+    assert_eq!(
+        app.sample_host_monitor(first.id, second_session)
+            .await
+            .expect_err("foreign session")
+            .code,
+        ErrorCode::Conflict
+    );
+    let first_sample = app
+        .sample_host_monitor(first.id, first_session)
+        .await
+        .unwrap();
+    let second_sample = app
+        .sample_host_monitor(second.id, second_session)
+        .await
+        .unwrap();
+    assert!(first_sample.cpu_usage_percent.is_none());
+    assert!(second_sample.cpu_usage_percent.is_none());
+    assert_eq!(app.monitor_baselines.lock().await.len(), 2);
+    let next = app
+        .sample_host_monitor(first.id, first_session)
+        .await
+        .unwrap();
+    assert_eq!(next.cpu_usage_percent, Some(50.0));
+}
+
+#[tokio::test]
+async fn disconnect_cancels_delayed_monitoring_and_reconnect_resets_baseline() {
+    let (_dir, app, provider) = setup(false);
+    let host = app
+        .save_host(input(), Some(credential()))
+        .await
+        .expect("host");
+    app.connect_host(host.id).await.expect("connect");
+    let old_session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    app.sample_host_monitor(host.id, old_session).await.unwrap();
+    provider.monitor.stall.store(true, Ordering::SeqCst);
+    let sample_app = app.clone();
+    let task =
+        tokio::spawn(async move { sample_app.sample_host_monitor(host.id, old_session).await });
+    provider.monitor.started.notified().await;
+    app.disconnect_host(host.id).await.expect("disconnect");
+    assert_eq!(
+        task.await.unwrap().expect_err("cancelled sample").code,
+        ErrorCode::Cancelled
+    );
+    assert!(!app.monitor_baselines.lock().await.contains_key(&host.id));
+
+    app.connect_host(host.id).await.expect("reconnect");
+    let new_session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    assert_ne!(old_session, new_session);
+    assert_eq!(
+        app.sample_host_monitor(host.id, old_session)
+            .await
+            .expect_err("old ownership")
+            .code,
+        ErrorCode::Conflict
+    );
+    assert!(
+        app.sample_host_monitor(host.id, new_session)
+            .await
+            .unwrap()
+            .cpu_usage_percent
+            .is_none()
+    );
+    app.delete_host(host.id).await.expect("delete");
+    assert!(!app.monitor_baselines.lock().await.contains_key(&host.id));
+    assert!(!app.monitor_gates.lock().await.contains_key(&host.id));
+}
+
+#[tokio::test]
 async fn repeated_connect_and_shutdown_leave_no_live_or_stale_session() {
     let (_dir, app, provider) = setup(true);
     let host = app
@@ -333,7 +467,19 @@ async fn repeated_connect_and_shutdown_leave_no_live_or_stale_session() {
         .connect_host(connected_host.id)
         .await
         .expect("connect");
+    let connection_id = connected_app
+        .get_session(connected_host.id)
+        .await
+        .expect("connected session")
+        .host_session_id
+        .expect("connection identity");
+    connected_app
+        .sample_host_monitor(connected_host.id, connection_id)
+        .await
+        .expect("monitor baseline");
     connected_app.shutdown().await.unwrap();
+    assert!(connected_app.monitor_baselines.lock().await.is_empty());
+    assert!(connected_app.monitor_gates.lock().await.is_empty());
     assert_eq!(
         connected_app
             .get_session(connected_host.id)

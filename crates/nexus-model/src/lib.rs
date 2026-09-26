@@ -1,11 +1,13 @@
 //! Transport-independent domain and IPC data. Credentials deliberately live elsewhere.
 mod error;
 mod host;
+mod monitoring;
 mod session;
 mod sftp;
 mod terminal;
 pub use error::*;
 pub use host::*;
+pub use monitoring::*;
 pub use session::*;
 pub use sftp::*;
 pub use terminal::*;

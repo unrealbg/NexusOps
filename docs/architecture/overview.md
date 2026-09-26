@@ -1,6 +1,6 @@
 # Architecture
 
-NexusOps separates transport-independent domain data, application orchestration, infrastructure probes and the desktop adapter. Rust is the source of truth for the wire model. `export_protocol` produces the checked-in TypeScript declarations; CI rejects drift. Components consume the typed application client, not `invoke` directly. Registered IPC commands are narrow host, discovery, terminal, SFTP file-operation, transfer, and native-selection actions; there is no generic command or filesystem IPC.
+NexusOps separates transport-independent domain data, application orchestration, infrastructure probes and the desktop adapter. Rust is the source of truth for the wire model. `export_protocol` produces the checked-in TypeScript declarations; CI rejects drift. Components consume the typed application client, not `invoke` directly. Registered IPC commands are narrow host, discovery, session-bound monitoring, terminal, SFTP file-operation, transfer, and native-selection actions; there is no generic command or filesystem IPC.
 
 ```mermaid
 flowchart TD
@@ -29,6 +29,8 @@ The diagram shows execution flow, not Cargo dependency direction. `nexus-core` c
 5. Authenticate, then run the operation engine's fixed read-only probes. Optional failures are safe warnings. Successful data is published only if the session generation still matches.
 6. Disconnect cancels the host token, invalidates the generation and closes its transport. Lifetime guards also close I/O if a connection future is dropped. Each host owns its own token, mutable view and transport.
 
+While a connected Overview is visible, its typed monitoring client requests bounded fixed-command observations. Core serializes samples per host, binds counter baselines to the current `HostSessionId`, and revalidates the session generation before publishing. Disconnect and replacement remove the baseline. The renderer keeps at most 120 session-owned samples in component memory; see [Live host monitoring](monitoring.md).
+
 Discovery results are cleared at the start of a connection and on disconnect. Refresh is serialized per host and cannot republish data after disconnect or edit. Polling exposes remote closure to the UI. Keepalives detect an unresponsive peer; a stale discovery observation is always timestamped.
 
 ## Local data
@@ -43,7 +45,7 @@ Audit events contain host ID, UTC timestamp, operation identity and risk, actor,
 
 ## Frontend state and extension points
 
-TanStack Query owns host metadata/session snapshots. Zustand owns selection only. Goal 02C remote text remains in component-local memory and its short-lived typed save authority; see [Remote text editor](editor.md). Credentials remain in uncontrolled form controls and one short-lived IPC payload; save bypasses mutation caches. Components are grouped into shell, hosts, connection and overview concerns. CSS tokens and primitives permit future light themes; only the dark theme is shipped.
+TanStack Query owns host metadata/session snapshots. Zustand owns selection only. Goal 02C remote text remains in component-local memory and its short-lived typed save authority; see [Remote text editor](editor.md). Live monitoring history is likewise component-local, bounded, and cleared by host/session identity rather than persisted. Credentials remain in uncontrolled form controls and one short-lived IPC payload; save bypasses mutation caches. Components are grouped into shell, hosts, connection and overview concerns. CSS tokens and primitives permit future light themes; only the dark theme is shipped.
 
 Capabilities use a validated registry and observed facts. Future service/container providers can add capability identifiers without changing SSH. The operation engine currently accepts only its private fixed-command plans with `ReadOnly` risk, supports validation and verification, and reports rollback as unnecessary. File mutations use the adjacent one-shot typed-plan boundary described in [SFTP files architecture](sftp.md). The fixed discovery engine still rejects write risk and tampered kinds.
 

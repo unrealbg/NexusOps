@@ -75,6 +75,7 @@ impl Application {
             data.view = HostSession::disconnected(host.id);
             data.connection_id = None;
         }
+        self.clear_monitor(host.id).await;
         if previous.is_some() {
             self.terminals.remove_host(host.id).await;
         }
@@ -102,6 +103,7 @@ impl Application {
         self.repository.delete(id)?;
         self.remove_secret(stored.credential_id).await?;
         self.sessions.lock().await.remove(&id);
+        self.remove_monitor(id).await;
         self.terminals.remove_host(id).await;
         self.record(id, "host.delete", AuditOutcome::Success, started)
     }

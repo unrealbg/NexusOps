@@ -10,6 +10,8 @@ Push-Location $ProjectRoot
 try {
     cargo test -p nexus-ssh --test openssh_interop openssh_phase_a --locked -- --ignored --exact --nocapture
     if ($LASTEXITCODE -ne 0) { throw "OpenSSH phase A failed" }
+    cargo test -p nexus-ssh --test openssh_monitoring openssh_monitoring_interoperability --locked -- --ignored --exact --nocapture
+    if ($LASTEXITCODE -ne 0) { throw "OpenSSH monitoring interoperability failed" }
     cargo test -p nexus-ssh --test openssh_terminal openssh_terminal_pty_interoperability --locked -- --ignored --exact --nocapture
     if ($LASTEXITCODE -ne 0) { throw "OpenSSH terminal interoperability failed" }
     cargo test -p nexus-ssh --test openssh_sftp openssh_sftp_streaming_interoperability --locked -- --ignored --exact --nocapture
