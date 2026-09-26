@@ -2,12 +2,14 @@
 mod error;
 mod host;
 mod monitoring;
+mod services;
 mod session;
 mod sftp;
 mod terminal;
 pub use error::*;
 pub use host::*;
 pub use monitoring::*;
+pub use services::*;
 pub use session::*;
 pub use sftp::*;
 pub use terminal::*;

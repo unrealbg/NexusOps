@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-host-services"
+description = "Enables the list_host_services command without any pre-configured scope."
+commands.allow = ["list_host_services"]
+
+[[permission]]
+identifier = "deny-list-host-services"
+description = "Denies the list_host_services command without any pre-configured scope."
+commands.deny = ["list_host_services"]

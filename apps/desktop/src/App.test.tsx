@@ -41,17 +41,28 @@ beforeEach(() => {
 });
 
 describe('workspace flows', () => {
+  it('enables only Services among reserved navigation when a host is selected', async () => {
+    vi.mocked(hostApi.list).mockResolvedValue([host]);
+    renderApp();
+    await userEvent.click(await screen.findByRole('button', { name: 'Open Test gateway' }));
+    const services = screen.getByRole('button', { name: 'Services' });
+    expect(services).toBeEnabled();
+    await userEvent.click(services);
+    expect(await screen.findByText('Connect this host to inspect system services.')).toBeInTheDocument();
+    for (const label of ['Containers', 'Network', 'Security', 'Logs'])
+      expect(screen.getByRole('button', { name: `${label} (coming soon)` })).toBeDisabled();
+  });
   it('has an honest empty state and marks future navigation unavailable', async () => {
     renderApp();
     expect(await screen.findByText('Your next server starts here.')).toBeInTheDocument();
     for (const label of [
-      'Services',
       'Containers',
       'Network',
       'Security',
       'Logs',
     ])
       expect(screen.getByRole('button', { name: `${label} (coming soon)` })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Services' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Terminal' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Files' })).toBeDisabled();
   });

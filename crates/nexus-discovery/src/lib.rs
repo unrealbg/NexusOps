@@ -4,10 +4,12 @@ mod capabilities;
 mod monitoring;
 mod parsers;
 mod probes;
+mod services;
 
 pub use capabilities::{CapabilityRegistry, capabilities};
 pub use monitoring::{MonitorBaseline, MonitorReading, derive_sample, observe_monitor};
 pub use probes::{HostProbe, builtin_probes};
+pub use services::{observe_services, parse_services};
 
 use nexus_model::{AppError, DiscoverySnapshot, ErrorCode};
 use nexus_operations::{OperationEngine, RemoteSession};

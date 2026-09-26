@@ -20,10 +20,16 @@ struct TestProvider {
     started: Notify,
     release: Notify,
     monitor: Arc<MonitorControl>,
+    services: Arc<ServiceControl>,
 }
 struct MonitorControl {
     stall: AtomicBool,
     started: Notify,
+}
+struct ServiceControl {
+    stall: AtomicBool,
+    entered: Semaphore,
+    release: Semaphore,
 }
 #[async_trait]
 impl ConnectionProvider for TestProvider {
@@ -41,6 +47,7 @@ impl ConnectionProvider for TestProvider {
         Ok(Arc::new(TestSession {
             cancel,
             monitor: self.monitor.clone(),
+            services: self.services.clone(),
             monitor_counter: AtomicUsize::new(0),
         }))
     }
@@ -48,6 +55,7 @@ impl ConnectionProvider for TestProvider {
 struct TestSession {
     cancel: CancellationToken,
     monitor: Arc<MonitorControl>,
+    services: Arc<ServiceControl>,
     monitor_counter: AtomicUsize,
 }
 #[async_trait]
@@ -78,6 +86,14 @@ impl RemoteSession for TestSession {
                 let sample = self.monitor_counter.load(Ordering::SeqCst).saturating_sub(1) as u64;
                 return Ok(format!("Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n lo: 10 0 0 0 0 0 0 0 20 0 0 0 0 0 0 0\n eth0: {} 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0\n", 1000 + sample * 500, 2000 + sample * 1000));
             }
+            ReadOnlyCommand::SystemServices => {
+                if self.services.stall.load(Ordering::SeqCst) {
+                    self.services.entered.add_permits(1);
+                    let permit = self.services.release.acquire().await.expect("release");
+                    permit.forget();
+                }
+                "sshd.service loaded active running OpenSSH daemon\n"
+            },
         }.into())
     }
     async fn disconnect(&self) -> Result<(), AppError> {
@@ -157,6 +173,11 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
             stall: AtomicBool::new(false),
             started: Notify::new(),
         }),
+        services: Arc::new(ServiceControl {
+            stall: AtomicBool::new(false),
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }),
     });
     let application = Application {
         repository: Arc::new(HostRepository::open(dir.path().join("hosts.db")).expect("hosts")),
@@ -174,6 +195,8 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         transfers: nexus_sftp::TransferManager::new(),
         monitor_baselines: Mutex::new(HashMap::new()),
         monitor_gates: Mutex::new(HashMap::new()),
+        service_gates: Mutex::new(HashMap::new()),
+        service_limit: Semaphore::new(4),
         mutation: Mutex::new(()),
         sessions: Mutex::new(HashMap::new()),
         _profile_lock: None,
@@ -368,6 +391,207 @@ async fn monitoring_is_owned_by_exact_session_and_isolated_by_host() {
         .await
         .unwrap();
     assert_eq!(next.cpu_usage_percent, Some(50.0));
+}
+
+#[tokio::test]
+async fn services_require_exact_session_and_keep_hosts_independent() {
+    let (_dir, app, _) = setup(false);
+    let first = app.save_host(input(), Some(credential())).await.unwrap();
+    let second = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(first.id).await.unwrap();
+    app.connect_host(second.id).await.unwrap();
+    let first_session = app
+        .get_session(first.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let second_session = app
+        .get_session(second.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    assert_eq!(
+        app.list_host_services(first.id, second_session)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    let first_snapshot = app
+        .list_host_services(first.id, first_session)
+        .await
+        .unwrap();
+    let second_snapshot = app
+        .list_host_services(second.id, second_session)
+        .await
+        .unwrap();
+    assert_eq!(first_snapshot.host_session_id, first_session);
+    assert_eq!(second_snapshot.host_id, second.id);
+    assert_eq!(first_snapshot.entries[0].unit, "sshd.service");
+    assert_eq!(app.service_gates.lock().await.len(), 2);
+    app.delete_host(first.id).await.unwrap();
+    assert!(!app.service_gates.lock().await.contains_key(&first.id));
+    assert!(
+        app.list_host_services(second.id, second_session)
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn services_reject_busy_and_delayed_old_session_after_disconnect_reconnect() {
+    let (_dir, app, provider) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let old_session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    provider.services.stall.store(true, Ordering::SeqCst);
+    let request_app = app.clone();
+    let task =
+        tokio::spawn(async move { request_app.list_host_services(host.id, old_session).await });
+    provider.services.entered.acquire().await.unwrap().forget();
+    assert_eq!(
+        app.list_host_services(host.id, old_session)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    app.disconnect_host(host.id).await.unwrap();
+    assert_eq!(task.await.unwrap().unwrap_err().code, ErrorCode::Cancelled);
+    provider.services.stall.store(false, Ordering::SeqCst);
+    app.connect_host(host.id).await.unwrap();
+    let new_session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    assert_ne!(old_session, new_session);
+    assert_eq!(
+        app.list_host_services(host.id, old_session)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert!(app.list_host_services(host.id, new_session).await.is_ok());
+}
+
+#[tokio::test]
+async fn services_global_limit_is_non_queuing_and_shutdown_clears_gates() {
+    let (_dir, app, provider) = setup(false);
+    let mut hosts = Vec::new();
+    for _ in 0..5 {
+        let host = app.save_host(input(), Some(credential())).await.unwrap();
+        app.connect_host(host.id).await.unwrap();
+        let session = app
+            .get_session(host.id)
+            .await
+            .unwrap()
+            .host_session_id
+            .unwrap();
+        hosts.push((host.id, session));
+    }
+    provider.services.stall.store(true, Ordering::SeqCst);
+    let tasks = hosts[..4]
+        .iter()
+        .map(|(host, session)| {
+            let app = app.clone();
+            let (host, session) = (*host, *session);
+            tokio::spawn(async move { app.list_host_services(host, session).await })
+        })
+        .collect::<Vec<_>>();
+    for _ in 0..4 {
+        provider.services.entered.acquire().await.unwrap().forget();
+    }
+    assert_eq!(
+        app.list_host_services(hosts[4].0, hosts[4].1)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    provider.services.release.add_permits(4);
+    for task in tasks {
+        assert!(task.await.unwrap().is_ok());
+    }
+    app.shutdown().await.unwrap();
+    assert!(app.service_gates.lock().await.is_empty());
+    assert_eq!(
+        app.list_host_services(hosts[0].0, hosts[0].1)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+}
+
+#[tokio::test]
+async fn services_remote_closure_and_host_edit_cannot_restore_old_inventory() {
+    let (_dir, app, provider) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let first_session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    provider.services.stall.store(true, Ordering::SeqCst);
+    let request_app = app.clone();
+    let request =
+        tokio::spawn(async move { request_app.list_host_services(host.id, first_session).await });
+    provider.services.entered.acquire().await.unwrap().forget();
+    app.slot(host.id).await.data.lock().await.cancel.cancel();
+    assert_eq!(
+        app.get_session(host.id).await.unwrap().state,
+        ConnectionState::Failed
+    );
+    assert_eq!(
+        request.await.unwrap().unwrap_err().code,
+        ErrorCode::Cancelled
+    );
+    assert_eq!(
+        app.list_host_services(host.id, first_session)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+
+    provider.services.stall.store(false, Ordering::SeqCst);
+    app.disconnect_host(host.id).await.unwrap();
+    let mut edited = input();
+    edited.id = Some(host.id);
+    edited.display_name = "Renamed host".into();
+    app.save_host(edited, None).await.unwrap();
+    assert_eq!(
+        app.list_host_services(host.id, first_session)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    app.connect_host(host.id).await.unwrap();
+    let second_session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    assert_ne!(first_session, second_session);
+    assert!(
+        app.list_host_services(host.id, second_session)
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]

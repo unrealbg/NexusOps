@@ -6,6 +6,7 @@ import type {
   HostInput,
   HostKeyChallenge,
   HostMonitorSample,
+  ServiceSnapshot,
   HostSession,
   TerminalOutputBatch,
   TerminalSession,
@@ -73,6 +74,12 @@ export const hostApi = {
 export const monitorApi = {
   sample: (hostId: string, hostSessionId: string) =>
     request<HostMonitorSample>('sample_host_monitor', { hostId, hostSessionId }),
+};
+
+/** Fixed read-only, session-bound systemd inventory; filtering stays in the component. */
+export const servicesApi = {
+  list: (hostId: string, hostSessionId: string) =>
+    request<ServiceSnapshot>('list_host_services', { hostId, hostSessionId }),
 };
 
 type TerminalOwnership = Pick<TerminalSession, 'hostId' | 'hostSessionId' | 'id'>;

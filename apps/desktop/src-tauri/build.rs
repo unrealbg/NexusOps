@@ -11,6 +11,7 @@ fn main() {
             "trust_host_key",
             "refresh_host",
             "sample_host_monitor",
+            "list_host_services",
             "list_terminals",
             "open_terminal",
             "poll_terminal",
