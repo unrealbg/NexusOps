@@ -26,14 +26,8 @@ Freshness uses the sample UTC timestamp. The UI shows warming until the first re
 
 Monitoring currently supports Linux hosts exposing the expected procfs records and a POSIX-compatible `df -P`. It monitors aggregate CPU, RAM, swap, the root filesystem, and aggregate non-loopback network bytes only. It does not inspect payloads, sockets, processes, services, containers, logs, other mounts, or persistent telemetry, and it does not alert.
 
-## Owner native checklist (pending source review)
+## Native Windows acceptance
 
-- Connect and confirm Overview starts monitoring without another action.
-- Confirm the first CPU/network sample warms up and later samples populate.
-- Confirm charts update without layout breakage and memory, swap, and root-disk values are plausible.
-- Confirm actually idle network traffic can show `0 B/s`.
-- Confirm Terminal and Files remain responsive while Overview polling is active.
-- Disconnect and confirm updates stop; reconnect and confirm a fresh history.
-- Switch between two hosts and confirm histories never mix.
+Native Windows acceptance passed on a production Tauri executable built from source-reviewed HEAD `ab02ecc649d3774fd1d29d5d298188678d17456c`. The [PR #4 acceptance evidence](https://github.com/unrealbg/NexusOps/pull/4#issuecomment-5844628069) records automatic monitoring, first-sample warm-up, subsequent CPU/network values, plausible memory/swap/root-disk values, valid `0 B/s`, responsive Terminal and Files workspaces, disconnect/reconnect and remote-closure behavior, and an 11-minute-plus soak. The 120-sample history cap is covered by a deterministic component regression.
 
-Native Windows acceptance remains pending until a separately built, source-reviewed candidate is provided.
+Multi-host isolation and forced sampling delays longer than 15 seconds were **NOT EXECUTED** in native Windows acceptance because the environment lacked a second safe Linux host and a safe deterministic delay mechanism.
