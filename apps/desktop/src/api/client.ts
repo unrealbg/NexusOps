@@ -8,6 +8,7 @@ import type {
   HostMonitorSample,
   NetworkSnapshot,
   ServiceSnapshot,
+  SshEndpointTrust,
   HostSession,
   TerminalOutputBatch,
   TerminalSession,
@@ -90,6 +91,11 @@ export const networkApi = {
 };
 
 type TerminalOwnership = Pick<TerminalSession, 'hostId' | 'hostSessionId' | 'id'>;
+
+/** Local endpoint metadata only; no connection, credential access, or remote observation. */
+export const securityApi = {
+  get: (hostId: string) => request<SshEndpointTrust>('get_host_ssh_trust', { hostId }),
+};
 
 function ownershipArgs(session: TerminalOwnership) {
   return {

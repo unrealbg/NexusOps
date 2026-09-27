@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { CredentialInput, Host, HostInput } from '@nexusops/protocol';
+import { SecurityWorkspace } from './features/security/SecurityWorkspace';
 import { Button, Modal, Notice, Spinner } from '@nexusops/ui';
 import { hostApi, applicationError } from './api/client';
 import { hostKeys, useHosts } from './api/queries';
@@ -24,7 +25,7 @@ export default function App() {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [section, setSection] = useState<'overview' | 'terminal' | 'files' | 'services' | 'network'>('overview');
+  const [section, setSection] = useState<'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security'>('overview');
   const [terminalHosts, setTerminalHosts] = useState<string[]>([]);
   const [fileHosts, setFileHosts] = useState<string[]>([]);
   const hosts = hostsQuery.data ?? [];
@@ -41,7 +42,7 @@ export default function App() {
     if (host && section === 'files') setFileHosts((current) => current.includes(host.id) ? current : [...current, host.id]);
   }
 
-  function selectSection(next: 'overview' | 'terminal' | 'files' | 'services' | 'network') {
+  function selectSection(next: 'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security') {
     setSection(next);
     if (next === 'terminal' && selectedHost) visitTerminal(selectedHost);
     if (next === 'files' && selectedHost) setFileHosts((current) => current.includes(selectedHost.id) ? current : [...current, selectedHost.id]);
@@ -90,7 +91,7 @@ export default function App() {
             <button onClick={() => selectHost(null)}>Workspace</button>
             <span>/</span>
             <span>{selectedHost?.displayName ?? 'Overview'}</span>
-            {selectedHost && <span>{section === 'terminal' ? 'Terminal' : section === 'files' ? 'Files' : section === 'services' ? 'Services' : section === 'network' ? 'Network' : 'Overview'}</span>}
+            {selectedHost && <span>{section === 'terminal' ? 'Terminal' : section === 'files' ? 'Files' : section === 'services' ? 'Services' : section === 'network' ? 'Network' : section === 'security' ? 'Security' : 'Overview'}</span>}
           </div>
           <span className="topbar-label">
             <span className="local-dot" />
@@ -170,12 +171,15 @@ export default function App() {
           {selectedHost && section === 'network' && (
             <NetworkWorkspace key={selectedHost.id} host={selectedHost} />
           )}
+          {selectedHost && section === 'security' && (
+            <SecurityWorkspace key={selectedHost.id} host={selectedHost} />
+          )}
         </main>
         <footer className="app-footer">
           <span>
-            NexusOps <span className="footer-divider">/</span> {section === 'files' ? 'SFTP files' : section === 'services' ? 'System services' : section === 'network' ? 'Network interfaces' : 'Terminal workspace'}
+            NexusOps <span className="footer-divider">/</span> {section === 'files' ? 'SFTP files' : section === 'services' ? 'System services' : section === 'network' ? 'Network interfaces' : section === 'security' ? 'SSH endpoint trust' : 'Terminal workspace'}
           </span>
-          <span>{section === 'files' ? 'Agentless · streamed transfers' : section === 'services' || section === 'network' ? 'Read-only · on demand' : 'Interactive PTY · local scrollback'}</span>
+          <span>{section === 'security' ? 'Local trust metadata · on demand' : section === 'files' ? 'Agentless · streamed transfers' : section === 'services' || section === 'network' ? 'Read-only · on demand' : 'Interactive PTY · local scrollback'}</span>
         </footer>
       </div>
       {dialog && dialog.type !== 'delete' && (

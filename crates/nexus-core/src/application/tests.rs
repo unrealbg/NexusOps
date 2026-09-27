@@ -9,6 +9,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
+mod security;
+
 struct TestKey;
 impl KeyProvider for TestKey {
     fn key(&self) -> Result<Zeroizing<Vec<u8>>, AppError> {

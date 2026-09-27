@@ -4,12 +4,13 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Host } from '@nexusops/protocol';
 import App from './App';
-import { hostApi } from './api/client';
+import { hostApi, securityApi } from './api/client';
 import { useSelection } from './state/selection';
 import { connected, disconnected, host } from './test/fixtures';
 
 vi.mock('./api/client', async (original) => ({
   ...(await original<typeof import('./api/client')>()),
+  securityApi: { get: vi.fn() },
   hostApi: {
     list: vi.fn(),
     save: vi.fn(),
@@ -38,10 +39,11 @@ beforeEach(() => {
   useSelection.setState({ hostId: null });
   vi.mocked(hostApi.list).mockResolvedValue([]);
   vi.mocked(hostApi.session).mockResolvedValue(disconnected);
+  vi.mocked(securityApi.get).mockResolvedValue({ hostId: host.id, hostname: host.connection.hostname, port: host.connection.port, authentication: host.connection.authentication, endpointPin: null });
 });
 
 describe('workspace flows', () => {
-  it('enables Services and Network while leaving other navigation reserved', async () => {
+  it('enables Services, Network and Security while leaving Containers and Logs reserved', async () => {
     vi.mocked(hostApi.list).mockResolvedValue([host]);
     renderApp();
     await userEvent.click(await screen.findByRole('button', { name: 'Open Test gateway' }));
@@ -53,7 +55,12 @@ describe('workspace flows', () => {
     expect(network).toBeEnabled();
     await userEvent.click(network);
     expect(await screen.findByText('Connect this host to inspect network interfaces.')).toBeInTheDocument();
-    for (const label of ['Containers', 'Security', 'Logs'])
+    const security = screen.getByRole('button', { name: 'Security' });
+    expect(security).toBeEnabled();
+    await userEvent.click(security);
+    expect(await screen.findByRole('heading', { name: 'Security' })).toBeInTheDocument();
+    expect(await screen.findByText('Not pinned')).toBeInTheDocument();
+    for (const label of ['Containers', 'Logs'])
       expect(screen.getByRole('button', { name: `${label} (coming soon)` })).toBeDisabled();
   });
   it('has an honest empty state and marks future navigation unavailable', async () => {
@@ -61,11 +68,11 @@ describe('workspace flows', () => {
     expect(await screen.findByText('Your next server starts here.')).toBeInTheDocument();
     for (const label of [
       'Containers',
-      'Security',
       'Logs',
     ])
       expect(screen.getByRole('button', { name: `${label} (coming soon)` })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Services' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Security' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Network' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Terminal' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Files' })).toBeDisabled();

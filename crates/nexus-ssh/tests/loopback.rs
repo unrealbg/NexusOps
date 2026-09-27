@@ -34,6 +34,7 @@ use zeroize::Zeroizing;
 
 #[derive(Clone)]
 struct FixtureHandler {
+    connection_count: Arc<AtomicUsize>,
     auth_attempts: Arc<AtomicUsize>,
     command_count: Arc<AtomicUsize>,
     channel_closes: Arc<AtomicUsize>,
@@ -44,6 +45,7 @@ struct FixtureHandler {
 impl server::Server for FixtureHandler {
     type Handler = Self;
     fn new_client(&mut self, _: Option<std::net::SocketAddr>) -> Self {
+        self.connection_count.fetch_add(1, Ordering::SeqCst);
         self.clone()
     }
 }
@@ -158,6 +160,7 @@ impl Fixture {
             .expect("loopback listener");
         let port = listener.local_addr().expect("address").port();
         let handler = FixtureHandler {
+            connection_count: Arc::new(AtomicUsize::new(0)),
             auth_attempts: Arc::new(AtomicUsize::new(0)),
             command_count: Arc::new(AtomicUsize::new(0)),
             channel_closes: Arc::new(AtomicUsize::new(0)),
@@ -361,6 +364,29 @@ async fn unknown_key_blocks_before_auth_then_explicit_trust_allows_discovery() {
         snapshot.warnings
     );
     assert_eq!(fixture.handler.command_count.load(Ordering::SeqCst), 8);
+    // The same production pin accessor used by the local trust getter adds no SSH work.
+    let before = (
+        fixture.handler.connection_count.load(Ordering::SeqCst),
+        fixture.handler.auth_attempts.load(Ordering::SeqCst),
+        fixture.handler.command_count.load(Ordering::SeqCst),
+    );
+    assert_eq!(
+        store
+            .fingerprint(
+                &fixture.host.connection.hostname,
+                fixture.host.connection.port
+            )
+            .unwrap(),
+        Some(fixture.fingerprint.clone())
+    );
+    assert_eq!(
+        (
+            fixture.handler.connection_count.load(Ordering::SeqCst),
+            fixture.handler.auth_attempts.load(Ordering::SeqCst),
+            fixture.handler.command_count.load(Ordering::SeqCst),
+        ),
+        before
+    );
     session.disconnect().await.expect("disconnect");
     assert!(session.is_closed());
 }
