@@ -13,6 +13,7 @@ import { HostOverview } from './features/overview/HostOverview';
 import { TerminalWorkspace } from './features/terminal/TerminalWorkspace';
 import { FilesWorkspace } from './features/files/FilesWorkspace';
 import { ServicesWorkspace } from './features/services/ServicesWorkspace';
+import { LogsWorkspace } from './features/logs/LogsWorkspace';
 import { NetworkWorkspace } from './features/network/NetworkWorkspace';
 
 type DialogState =
@@ -25,7 +26,7 @@ export default function App() {
   const [dialog, setDialog] = useState<DialogState>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [section, setSection] = useState<'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security'>('overview');
+  const [section, setSection] = useState<'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security' | 'logs'>('overview');
   const [terminalHosts, setTerminalHosts] = useState<string[]>([]);
   const [fileHosts, setFileHosts] = useState<string[]>([]);
   const hosts = hostsQuery.data ?? [];
@@ -42,7 +43,7 @@ export default function App() {
     if (host && section === 'files') setFileHosts((current) => current.includes(host.id) ? current : [...current, host.id]);
   }
 
-  function selectSection(next: 'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security') {
+  function selectSection(next: 'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security' | 'logs') {
     setSection(next);
     if (next === 'terminal' && selectedHost) visitTerminal(selectedHost);
     if (next === 'files' && selectedHost) setFileHosts((current) => current.includes(selectedHost.id) ? current : [...current, selectedHost.id]);
@@ -91,7 +92,7 @@ export default function App() {
             <button onClick={() => selectHost(null)}>Workspace</button>
             <span>/</span>
             <span>{selectedHost?.displayName ?? 'Overview'}</span>
-            {selectedHost && <span>{section === 'terminal' ? 'Terminal' : section === 'files' ? 'Files' : section === 'services' ? 'Services' : section === 'network' ? 'Network' : section === 'security' ? 'Security' : 'Overview'}</span>}
+            {selectedHost && <span>{section === 'terminal' ? 'Terminal' : section === 'files' ? 'Files' : section === 'services' ? 'Services' : section === 'network' ? 'Network' : section === 'security' ? 'Security' : section === 'logs' ? 'Logs' : 'Overview'}</span>}
           </div>
           <span className="topbar-label">
             <span className="local-dot" />
@@ -168,6 +169,7 @@ export default function App() {
           {selectedHost && section === 'services' && (
             <ServicesWorkspace key={selectedHost.id} host={selectedHost} />
           )}
+          {selectedHost && section === 'logs' && <LogsWorkspace key={selectedHost.id} host={selectedHost} />}
           {selectedHost && section === 'network' && (
             <NetworkWorkspace key={selectedHost.id} host={selectedHost} />
           )}

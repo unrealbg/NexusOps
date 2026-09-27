@@ -2,8 +2,8 @@ use crate::local_access::LocalAccessService;
 use nexus_core::Application;
 use nexus_model::{
     AppError, Host, HostId, HostInput, HostKeyChallenge, HostMonitorSample, HostSession,
-    HostSessionId, NetworkSnapshot, ServiceSnapshot, SshEndpointTrust, TerminalOutputBatch,
-    TerminalSession, TerminalSessionId, TerminalSize,
+    HostSessionId, NetworkSnapshot, ServiceSnapshot, SshEndpointTrust, SystemJournalSnapshot,
+    TerminalOutputBatch, TerminalSession, TerminalSessionId, TerminalSize,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -125,6 +125,15 @@ pub async fn list_host_network(
     host_session_id: HostSessionId,
 ) -> Result<NetworkSnapshot, AppError> {
     app.list_host_network(host_id, host_session_id).await
+}
+
+#[tauri::command]
+pub async fn list_host_logs(
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+) -> Result<SystemJournalSnapshot, AppError> {
+    app.list_host_logs(host_id, host_session_id).await
 }
 
 #[tauri::command]

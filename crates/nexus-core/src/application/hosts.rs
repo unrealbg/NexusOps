@@ -103,6 +103,7 @@ impl Application {
         self.repository.delete(id)?;
         self.service_gates.lock().await.remove(&id);
         self.network_gates.lock().await.remove(&id);
+        self.log_gates.lock().await.remove(&id);
         self.remove_secret(stored.credential_id).await?;
         self.sessions.lock().await.remove(&id);
         self.remove_monitor(id).await;

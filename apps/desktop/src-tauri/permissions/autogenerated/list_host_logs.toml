@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-host-logs"
+description = "Enables the list_host_logs command without any pre-configured scope."
+commands.allow = ["list_host_logs"]
+
+[[permission]]
+identifier = "deny-list-host-logs"
+description = "Denies the list_host_logs command without any pre-configured scope."
+commands.deny = ["list_host_logs"]

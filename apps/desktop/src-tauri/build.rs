@@ -14,6 +14,7 @@ fn main() {
             "sample_host_monitor",
             "list_host_services",
             "list_host_network",
+            "list_host_logs",
             "list_terminals",
             "open_terminal",
             "poll_terminal",

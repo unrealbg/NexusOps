@@ -152,6 +152,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn journal_enforces_identity_risk_and_unchanged_engine_bounds() {
+        let engine = OperationEngine::default();
+        assert_eq!(engine.timeout, Duration::from_secs(8));
+        assert_eq!(engine.max_output_bytes, 64 * 1024);
+        let session = session("");
+        let mut plan = engine.plan(ReadOnlyCommand::SystemJournal);
+        plan.operation.kind = "services.list".into();
+        assert_eq!(
+            engine
+                .execute(&session, &plan, CancellationToken::new())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Policy
+        );
+        plan.operation.kind = "logs.list".into();
+        for risk in [
+            OperationRisk::Low,
+            OperationRisk::Moderate,
+            OperationRisk::High,
+            OperationRisk::Destructive,
+        ] {
+            plan.operation.risk = risk;
+            assert_eq!(
+                engine
+                    .execute(&session, &plan, CancellationToken::new())
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Policy
+            );
+        }
+        assert_eq!(session.calls.load(Ordering::Relaxed), 0);
+        let plan = engine.plan(ReadOnlyCommand::SystemJournal);
+        assert!(engine.verify(&plan, &"x".repeat(64 * 1024)).is_ok());
+        assert!(engine.verify(&plan, &"x".repeat(64 * 1024 + 1)).is_err());
+        assert!(engine.verify(&plan, "\0").is_err());
+    }
+
+    #[tokio::test]
     async fn rejects_every_write_risk_before_execution() {
         let engine = OperationEngine::default();
         let session = session("host\n");

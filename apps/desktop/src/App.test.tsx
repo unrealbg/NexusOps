@@ -4,13 +4,14 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Host } from '@nexusops/protocol';
 import App from './App';
-import { hostApi, securityApi } from './api/client';
+import { hostApi, securityApi, logsApi } from './api/client';
 import { useSelection } from './state/selection';
 import { connected, disconnected, host } from './test/fixtures';
 
 vi.mock('./api/client', async (original) => ({
   ...(await original<typeof import('./api/client')>()),
   securityApi: { get: vi.fn() },
+  logsApi: { list: vi.fn() },
   hostApi: {
     list: vi.fn(),
     save: vi.fn(),
@@ -43,7 +44,27 @@ beforeEach(() => {
 });
 
 describe('workspace flows', () => {
-  it('enables Services, Network and Security while leaving Containers and Logs reserved', async () => {
+  it('keeps journal content out of query, mutation, selection and browser storage', async () => {
+    const canary = 'synthetic logs memory-only assertion';
+    vi.mocked(hostApi.list).mockResolvedValue([host]);
+    vi.mocked(hostApi.session).mockResolvedValue(connected);
+    vi.mocked(logsApi.list).mockResolvedValue({ hostId: host.id, hostSessionId: connected.hostSessionId!, observedAt: '2026-09-27T10:00:00Z', entries: [
+      { timestamp: '2026-09-27T10:00:00.000000Z', priority: 'info', unit: null, identifier: null, messageState: 'text', message: canary },
+    ] });
+    const localWrite = vi.spyOn(Storage.prototype, 'setItem');
+    const client = renderApp();
+    await userEvent.click(await screen.findByRole('button', { name: 'Open Test gateway' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Logs' }));
+    expect(await screen.findByText(canary)).toBeInTheDocument();
+    expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state))).not.toContain(canary);
+    expect(JSON.stringify(client.getMutationCache().getAll().map((mutation) => mutation.state))).not.toContain(canary);
+    expect(JSON.stringify(useSelection.getState())).not.toContain(canary);
+    expect(localWrite).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Security' }));
+    expect(screen.queryByText(canary)).not.toBeInTheDocument();
+    localWrite.mockRestore();
+  });
+  it('enables Services, Network, Security and Logs while leaving Containers reserved', async () => {
     vi.mocked(hostApi.list).mockResolvedValue([host]);
     renderApp();
     await userEvent.click(await screen.findByRole('button', { name: 'Open Test gateway' }));
@@ -60,7 +81,12 @@ describe('workspace flows', () => {
     await userEvent.click(security);
     expect(await screen.findByRole('heading', { name: 'Security' })).toBeInTheDocument();
     expect(await screen.findByText('Not pinned')).toBeInTheDocument();
-    for (const label of ['Containers', 'Logs'])
+    const logs = screen.getByRole('button', { name: 'Logs' });
+    expect(logs).toBeEnabled();
+    await userEvent.click(logs);
+    expect(await screen.findByText('Connect this host to inspect recent system journal entries.')).toBeInTheDocument();
+    expect(logsApi.list).not.toHaveBeenCalled();
+    for (const label of ['Containers'])
       expect(screen.getByRole('button', { name: `${label} (coming soon)` })).toBeDisabled();
   });
   it('has an honest empty state and marks future navigation unavailable', async () => {
@@ -68,10 +94,10 @@ describe('workspace flows', () => {
     expect(await screen.findByText('Your next server starts here.')).toBeInTheDocument();
     for (const label of [
       'Containers',
-      'Logs',
     ])
       expect(screen.getByRole('button', { name: `${label} (coming soon)` })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Services' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Logs' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Security' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Network' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Terminal' })).toBeDisabled();

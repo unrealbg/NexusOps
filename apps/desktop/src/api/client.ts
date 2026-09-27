@@ -7,6 +7,7 @@ import type {
   HostKeyChallenge,
   HostMonitorSample,
   NetworkSnapshot,
+  SystemJournalSnapshot,
   ServiceSnapshot,
   SshEndpointTrust,
   HostSession,
@@ -88,6 +89,12 @@ export const servicesApi = {
 export const networkApi = {
   list: (hostId: string, hostSessionId: string) =>
     request<NetworkSnapshot>('list_host_network', { hostId, hostSessionId }),
+};
+
+/** Sensitive, session-owned journal snapshot; never cache or persist the result. */
+export const logsApi = {
+  list: (hostId: string, hostSessionId: string) =>
+    request<SystemJournalSnapshot>('list_host_logs', { hostId, hostSessionId }),
 };
 
 type TerminalOwnership = Pick<TerminalSession, 'hostId' | 'hostSessionId' | 'id'>;

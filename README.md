@@ -10,6 +10,8 @@ Network provides an on-demand, read-only snapshot of Linux interface names, oper
 
 Security displays local SSH endpoint pins and the configured authentication method, including while offline. It composes those facts with the existing session state to report verification at session establishment. It reads no credentials, starts no connection, sends no remote commands and adds no pin mutations or security score. Endpoint pins are read on entry or manual Refresh; existing session polling is reused unchanged. See [SSH endpoint trust architecture](docs/architecture/security.md).
 
+Logs provides a bounded, read-only snapshot of up to ten accessible system journal entries from the current boot. It uses one fixed journalctl command with existing account permissions, no sudo or follow/polling, and manual Refresh. Potentially sensitive messages stay in component memory, are normalized for inert display and cannot be copied/exported through Logs. See [Logs architecture](docs/architecture/logs.md).
+
 ## Start
 
 Install Node 24.15+, Rust 1.98.1 and your platform's [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), then:
@@ -25,7 +27,7 @@ Select **Terminal** on a connected host to open one or more real `xterm-256color
 
 Select **Files** to browse the account's resolved SFTP start directory, inspect metadata, upload/download ordinary files, edit bounded UTF-8 text files, and perform explicitly approved create, rename, or non-recursive delete actions. Local files and destinations are chosen through native dialogs; local handles and transfer payload bytes remain native-side. Bounded remote editor text and display-safe remote paths are explicit typed UI data. Transfers are staged, bounded, cancellable, and use explicit Skip, Keep both, or supported safe Replace behavior. See [SFTP files architecture](docs/architecture/sftp.md) and [remote text editor architecture](docs/architecture/editor.md) for the safety contracts and limitations.
 
-`npm run dev` opens the frontend in a browser for UI work. It intentionally reports that desktop access is unavailable and does not simulate a connection. Containers and Logs are reserved, disabled navigation entries.
+`npm run dev` opens the frontend in a browser for UI work. It intentionally reports that desktop access is unavailable and does not simulate a connection. Containers is the only reserved, disabled navigation entry.
 
 ## Workspace
 
