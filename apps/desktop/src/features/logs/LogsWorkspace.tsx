@@ -11,17 +11,22 @@ const priorities: Record<JournalPriority, string> = {
 const unavailable = 'System journal entries are unavailable for this connection.';
 
 export function LogsWorkspace({ host }: { host: Host }) {
-  const session = useHostSession(host.id).data;
+  const sessionQuery = useHostSession(host.id);
+  const session = !sessionQuery.isError && sessionQuery.data?.hostId === host.id ? sessionQuery.data : null;
   const sessionId = session?.state === 'connected' ? session.hostSessionId : null;
   // Removing/replacing this child releases all sensitive rows and request state.
-  // An old owner's snapshot cannot survive a disconnect or be rebound on reconnect.
+  // Retained query data is not authority after an error; recovery needs a fresh read.
   return sessionId ? <ConnectedLogs key={`${host.id}:${sessionId}`} host={host} sessionId={sessionId} /> : (
     <section aria-labelledby="logs-title">
       <header className="page-heading">
-        <div><div className="eyebrow">READ-ONLY JOURNAL</div><h1 id="logs-title">Logs</h1><p>{host.displayName} · Disconnected</p></div>
+        <div><div className="eyebrow">READ-ONLY JOURNAL</div><h1 id="logs-title">Logs</h1><p>{host.displayName}</p></div>
         <Button disabled>Refresh</Button>
       </header>
-      <p>Connect this host to inspect recent system journal entries.</p>
+      <p>{sessionQuery.isPending && !sessionQuery.isError && !sessionQuery.data
+        ? 'Reading connection state…'
+        : !session || session.state === 'connected'
+          ? 'Current SSH session state is unavailable.'
+          : 'Connect this host to inspect recent system journal entries.'}</p>
     </section>
   );
 }
