@@ -35,6 +35,8 @@ Discovery results are cleared at the start of a connection and on disconnect. Re
 
 The Services workspace requests one fixed, bounded `systemctl` read on mount and on manual Refresh. Core binds the request to the exact host/session and revalidates after SSH I/O. Service rows are component-local, never persisted; see [Services](services.md).
 
+The Network workspace requests one fixed, bounded `ip -j address show` read on mount and on manual Refresh. It publishes only validated interface and IP address fields after exact host/session and generation revalidation. Snapshots stay component-local and are never persisted; see [Network](network.md).
+
 ## Local data
 
 Each OS app-data profile contains `hosts.db`, `known-hosts.db`, `credentials.db`, `profile.lock`, `audit.jsonl` and structured application logs. Metadata uses SQLite schema version 1 and rejects newer schemas. Passwords, keys and passphrases are absent from the metadata schema. The vault stores only AES-256-GCM ciphertext with random nonces, bound to a credential revision ID using authenticated associated data. Its master key is a 32-byte OS secure-store entry, avoiding Windows credential blob size limits for large private keys.

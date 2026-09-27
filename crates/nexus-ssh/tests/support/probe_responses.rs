@@ -17,6 +17,9 @@ pub fn response(command: &[u8]) -> Option<&'static str> {
         b"LC_ALL=C df -Pk /" => Some(
             "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/test 1000000 250000 750000 25% /\n",
         ),
+        b"LC_ALL=C ip -j address show" => Some(
+            "[{\"ifindex\":1,\"ifname\":\"lo\",\"mtu\":65536,\"operstate\":\"UNKNOWN\",\"address\":\"00:00:00:00:00:00\",\"addr_info\":[{\"family\":\"inet\",\"local\":\"127.0.0.1\",\"prefixlen\":8},{\"family\":\"inet6\",\"local\":\"::1\",\"prefixlen\":128}]}]",
+        ),
         _ => None,
     }
 }

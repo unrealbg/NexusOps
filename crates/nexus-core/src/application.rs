@@ -26,6 +26,8 @@ pub struct Application {
     pub(crate) monitor_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
     pub(crate) service_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
     pub(crate) service_limit: Semaphore,
+    pub(crate) network_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
+    pub(crate) network_limit: Semaphore,
     sessions: Mutex<HashMap<HostId, Arc<SessionSlot>>>,
     mutation: Mutex<()>,
     _profile_lock: Option<File>,
@@ -52,6 +54,7 @@ mod hosts;
 mod identity;
 mod lifecycle;
 mod monitoring;
+mod network;
 mod services;
 mod terminal;
 
@@ -108,6 +111,8 @@ impl Application {
             monitor_gates: Mutex::new(HashMap::new()),
             service_gates: Mutex::new(HashMap::new()),
             service_limit: Semaphore::new(4),
+            network_gates: Mutex::new(HashMap::new()),
+            network_limit: Semaphore::new(4),
             sessions: Mutex::new(HashMap::new()),
             mutation: Mutex::new(()),
             _profile_lock: Some(lock),
@@ -183,6 +188,7 @@ impl Application {
         self.monitor_baselines.lock().await.clear();
         self.monitor_gates.lock().await.clear();
         self.service_gates.lock().await.clear();
+        self.network_gates.lock().await.clear();
         for slot in slots {
             let mut data = slot.data.lock().await;
             data.cancel.cancel();

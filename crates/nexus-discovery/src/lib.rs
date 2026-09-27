@@ -2,12 +2,14 @@
 
 mod capabilities;
 mod monitoring;
+mod network;
 mod parsers;
 mod probes;
 mod services;
 
 pub use capabilities::{CapabilityRegistry, capabilities};
 pub use monitoring::{MonitorBaseline, MonitorReading, derive_sample, observe_monitor};
+pub use network::{observe_network, parse_network};
 pub use probes::{HostProbe, builtin_probes};
 pub use services::{observe_services, parse_services};
 

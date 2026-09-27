@@ -13,6 +13,7 @@ pub enum ReadOnlyCommand {
     RootFilesystem,
     CpuStat,
     NetworkDevices,
+    NetworkAddresses,
     SystemServices,
 }
 
@@ -30,6 +31,7 @@ impl ReadOnlyCommand {
             Self::RootFilesystem => "LC_ALL=C df -Pk /",
             Self::CpuStat => "cat /proc/stat",
             Self::NetworkDevices => "cat /proc/net/dev",
+            Self::NetworkAddresses => "LC_ALL=C ip -j address show",
             Self::SystemServices => {
                 "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=Description show"
             }
@@ -48,6 +50,7 @@ impl ReadOnlyCommand {
             Self::RootFilesystem => "discovery.root_filesystem",
             Self::CpuStat => "monitor.cpu",
             Self::NetworkDevices => "monitor.network",
+            Self::NetworkAddresses => "network.list",
             Self::SystemServices => "services.list",
         }
     }
@@ -79,6 +82,21 @@ mod tests {
         let engine = OperationEngine::default();
         let mut plan = engine.plan(command);
         plan.operation.kind = "discovery.hostname".into();
+        assert_eq!(engine.validate(&plan).unwrap_err().code, ErrorCode::Policy);
+        plan.operation.kind = command.kind().into();
+        plan.operation.risk = OperationRisk::Low;
+        assert_eq!(engine.validate(&plan).unwrap_err().code, ErrorCode::Policy);
+    }
+
+    #[test]
+    fn network_inventory_is_one_fixed_read_only_operation() {
+        let command = ReadOnlyCommand::NetworkAddresses;
+        assert_eq!(command.command(), "LC_ALL=C ip -j address show");
+        assert_eq!(command.kind(), "network.list");
+        assert_eq!(command.operation().risk, OperationRisk::ReadOnly);
+        let engine = OperationEngine::default();
+        let mut plan = engine.plan(command);
+        plan.operation.kind = "monitor.network".into();
         assert_eq!(engine.validate(&plan).unwrap_err().code, ErrorCode::Policy);
         plan.operation.kind = command.kind().into();
         plan.operation.risk = OperationRisk::Low;
