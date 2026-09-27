@@ -55,6 +55,7 @@ mod identity;
 mod lifecycle;
 mod monitoring;
 mod network;
+mod security;
 mod services;
 mod terminal;
 

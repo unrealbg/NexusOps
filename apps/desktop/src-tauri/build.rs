@@ -8,6 +8,7 @@ fn main() {
             "disconnect_host",
             "reconnect_host",
             "get_session",
+            "get_host_ssh_trust",
             "trust_host_key",
             "refresh_host",
             "sample_host_monitor",

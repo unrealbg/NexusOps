@@ -37,6 +37,8 @@ The Services workspace requests one fixed, bounded `systemctl` read on mount and
 
 The Network workspace requests one fixed, bounded `ip -j address show` read on mount and on manual Refresh. It publishes only validated interface and IP address fields after exact host/session and generation revalidation. Snapshots stay component-local and are never persisted; see [Network](network.md).
 
+The Security workspace reads validated local endpoint pin and configured authentication metadata through `get_host_ssh_trust(HostId)`, serialized with edits/deletion/trust by the existing metadata gate. It performs no remote operation, credential access, mutation, or audit write. Component-local trust snapshots are read on entry/manual Refresh and cleared on failure or configuration changes. Existing `HostSession` polling remains the sole session-state model. Identity is local pin metadata recorded after a verified connect, not a separately captured remote fingerprint; see [SSH endpoint trust](security.md).
+
 ## Local data
 
 Each OS app-data profile contains `hosts.db`, `known-hosts.db`, `credentials.db`, `profile.lock`, `audit.jsonl` and structured application logs. Metadata uses SQLite schema version 1 and rejects newer schemas. Passwords, keys and passphrases are absent from the metadata schema. The vault stores only AES-256-GCM ciphertext with random nonces, bound to a credential revision ID using authenticated associated data. Its master key is a 32-byte OS secure-store entry, avoiding Windows credential blob size limits for large private keys.

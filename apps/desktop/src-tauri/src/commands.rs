@@ -2,8 +2,8 @@ use crate::local_access::LocalAccessService;
 use nexus_core::Application;
 use nexus_model::{
     AppError, Host, HostId, HostInput, HostKeyChallenge, HostMonitorSample, HostSession,
-    HostSessionId, NetworkSnapshot, ServiceSnapshot, TerminalOutputBatch, TerminalSession,
-    TerminalSessionId, TerminalSize,
+    HostSessionId, NetworkSnapshot, ServiceSnapshot, SshEndpointTrust, TerminalOutputBatch,
+    TerminalSession, TerminalSessionId, TerminalSize,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -79,6 +79,13 @@ pub async fn get_session(
     host_id: HostId,
 ) -> Result<HostSession, AppError> {
     app.get_session(host_id).await
+}
+#[tauri::command]
+pub async fn get_host_ssh_trust(
+    app: State<'_, Application>,
+    host_id: HostId,
+) -> Result<SshEndpointTrust, AppError> {
+    app.get_host_ssh_trust(host_id).await
 }
 #[tauri::command]
 pub async fn trust_host_key(

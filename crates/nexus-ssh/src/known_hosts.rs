@@ -45,7 +45,7 @@ impl KnownHosts {
         compare_pin(hostname, port, fingerprint, stored)
     }
 
-    /// Read the currently pinned identity for safe connection-status presentation.
+    /// Read bounded, validated local pin metadata; absence is distinct from invalid storage.
     pub fn fingerprint(
         &self,
         hostname: &str,
@@ -53,7 +53,16 @@ impl KnownHosts {
     ) -> Result<Option<HostFingerprint>, AppError> {
         let hostname = canonical_endpoint(hostname, port)?;
         let connection = self.connection.lock().map_err(|_| poisoned_database())?;
-        read_pin(&connection, &hostname, port)
+        let pin = read_pin(&connection, &hostname, port)?;
+        if let Some(pin) = &pin {
+            validate_fingerprint(&pin.algorithm, &pin.sha256).map_err(|_| {
+                AppError::new(
+                    ErrorCode::Persistence,
+                    "The trusted SSH host key store is invalid.",
+                )
+            })?;
+        }
+        Ok(pin)
     }
 
     /// Commit an explicitly accepted challenge. The application service is responsible
@@ -206,6 +215,54 @@ mod tests {
             algorithm: "ssh-ed25519".into(),
             sha256: format!("SHA256:{}", ch.to_string().repeat(43)),
         }
+    }
+
+    #[test]
+    fn persisted_pin_read_rejects_tampered_values_as_storage_errors() {
+        let store = KnownHosts::open(":memory:").unwrap();
+        assert_eq!(store.fingerprint("host", 22).unwrap(), None);
+        let valid = fingerprint('A');
+        for (algorithm, digest) in [
+            ("x".repeat(129), valid.sha256.clone()),
+            ("ssh\ned25519".into(), valid.sha256.clone()),
+            ("ssh\u{202e}ed25519".into(), valid.sha256.clone()),
+            (
+                valid.algorithm.clone(),
+                format!("SHA512:{}", "A".repeat(43)),
+            ),
+            (
+                valid.algorithm.clone(),
+                format!("SHA256:{}", "A".repeat(44)),
+            ),
+            (
+                valid.algorithm.clone(),
+                format!("SHA256:{}", "!".repeat(43)),
+            ),
+        ] {
+            store
+                .connection
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT OR REPLACE INTO ssh_host_keys VALUES ('host',22,?1,?2)",
+                    params![algorithm, digest],
+                )
+                .unwrap();
+            let error = store.fingerprint("host", 22).unwrap_err();
+            assert_eq!(error.code, ErrorCode::Persistence);
+            assert_eq!(error.message, "The trusted SSH host key store is invalid.");
+            assert!(error.host_key.is_none());
+        }
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE ssh_host_keys SET algorithm=?1, fingerprint=?2",
+                params![valid.algorithm, valid.sha256],
+            )
+            .unwrap();
+        assert_eq!(store.fingerprint("HOST.", 22).unwrap(), Some(valid));
     }
 
     #[test]

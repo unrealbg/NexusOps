@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         HostKeyChallenge::decl(&config),
         HostFingerprint::decl(&config),
         HostIdentity::decl(&config),
+        SshEndpointTrust::decl(&config),
         HostCapability::decl(&config),
         ConnectionState::decl(&config),
         DiscoverySnapshot::decl(&config),

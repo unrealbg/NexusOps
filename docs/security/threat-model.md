@@ -10,6 +10,14 @@ russh verifies the actual negotiated host key before sending credentials. Pins b
 
 TOFU cannot prove the identity of a first-contact endpoint under active attack. The user must compare the fingerprint through an independent trusted channel. Changed keys are blocked and cannot be accepted through the first-contact API. Legitimate key rotation and multi-key algorithm migration need deliberate out-of-band verification; no automatic rotation or unsafe override is implemented. Deleting a host configuration preserves endpoint pins.
 
+## SSH trust information view
+
+Security reads endpoint pins as local persisted trust state, without any `SecretStore` access, new connection, remote command, pin mutation, audit event, or snapshot persistence. The configured authentication method is metadata only, not proof that a credential exists or works. The narrow getter validates stored host configuration and bounded pin values and fails with a fixed storage error on corruption; failure is never presented as Not pinned. Pins remain scoped to canonical hostname plus port, so delete/recreate can retain a pin while a different alias or port has separate state.
+
+A displayed offline pin is not a fresh observation of the remote server. An active Connected session reached Connected only after the SSH transport verified the presented raw host key against the endpoint pin. `HostSession.identity` currently contains local pin metadata recorded after that successful verified connection; it is not an independently captured second handshake measurement. The UI claims verification at session establishment only for a matching Connected session with identity and session ID. Remote closure, missing/mismatched metadata, or session-query error removes that claim. Pin-read/refresh failure removes prior trust data. Existing session polling is reused; pin metadata has no background polling.
+
+A malicious local account that can modify NexusOps profile storage can tamper with host/pin metadata, including syntactically valid values. Security is not an attestation of local OS integrity or a security/compliance score. See [SSH endpoint trust architecture](../architecture/security.md).
+
 ## Credential handling
 
 `SecretStore` is the only persistence API for credentials. The production vault stores AES-256-GCM ciphertext in SQLite, with random nonces and authenticated revision identifiers. Windows Credential Manager, macOS Keychain or Linux Secret Service stores the vault key through keyring 4's platform-backed API. There is no plaintext fallback. Large private keys do not depend on the OS's per-secret blob limit. A locked or unavailable keychain fails with `secureStorage`.

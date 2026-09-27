@@ -10,6 +10,7 @@ export type AppError = { code: ErrorCode, message: string, hostKey: HostKeyChall
 export type HostKeyChallenge = { hostname: string, port: number, algorithm: string, fingerprint: string, previousFingerprint: string | null, };
 export type HostFingerprint = { algorithm: string, sha256: string, };
 export type HostIdentity = { hostname: string, fingerprint: HostFingerprint, };
+export type SshEndpointTrust = { hostId: HostId, hostname: string, port: number, authentication: AuthenticationMethod, endpointPin: HostFingerprint | null, };
 export type HostCapability = { id: string, available: boolean, };
 export type ConnectionState = "disconnected" | "connecting" | "awaitingTrust" | "connected" | "disconnecting" | "failed";
 export type DiscoverySnapshot = { hostname: string | null, os: string | null, osVersion: string | null, kernel: string | null, architecture: string | null, uptimeSeconds: number | null, loadOne: number | null, memoryTotalBytes: number | null, memoryUsedBytes: number | null, rootTotalBytes: number | null, rootUsedBytes: number | null, observedAt: string, warnings: Array<AppError>, };
