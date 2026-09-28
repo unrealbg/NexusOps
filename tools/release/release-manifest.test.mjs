@@ -1,5 +1,14 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  unlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -19,7 +28,7 @@ const binary = 'nexus-desktop.exe';
 const original = Buffer.from('NexusOps synthetic executable bytes');
 
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'nexusops-release-manifest-'));
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'nexusops-release-manifest-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const stage = join(root, 'stage');
   await mkdir(stage);
@@ -133,7 +142,7 @@ for (const [name, tamper] of [
 }
 
 test('generator rejects an extra file before writing a manifest', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'nexusops-release-staging-'));
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'nexusops-release-staging-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, binary), original);
   await writeFile(join(root, 'secret.key'), 'synthetic');

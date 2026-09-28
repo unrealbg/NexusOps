@@ -19,7 +19,7 @@ Never describe an attested but unsigned executable as code-signed, updater-signe
 
 ## Flat staging and deterministic manifest
 
-The manual workflow builds on Windows, Ubuntu and macOS, then copies **only** the native production executable into a fresh directory under the runner's temporary area. It never uploads `target/` or the repository root. The allowlist is `nexus-desktop.exe` on Windows and `nexus-desktop` on Linux/macOS. Staging rejects unexpected files, directories and detectable links/reparse paths. It never copies profiles, databases, logs, screenshots, fixture data, key material or `.env` files.
+The manual workflow builds on Windows, Ubuntu and macOS, then copies **only** the native production executable into a fresh directory under the canonical runner temporary area. Canonicalizing the trusted temporary parent avoids OS aliases such as macOS `/var` while the staging root and entries still reject detectable links/reparse paths. It never uploads `target/` or the repository root. The allowlist is `nexus-desktop.exe` on Windows and `nexus-desktop` on Linux/macOS. Staging rejects unexpected files and directories. It never copies profiles, databases, logs, screenshots, fixture data, key material or `.env` files.
 
 Architecture comes from the `rustc -vV` host triple, checked against the current platform. Only `x86_64` and `aarch64` are accepted. Other architectures fail until deliberately supported. The workflow artifact name is derived from NexusOps, the verified version, platform, architecture and short source SHA; it is not free-form user input.
 

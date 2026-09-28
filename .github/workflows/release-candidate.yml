@@ -60,7 +60,9 @@ jobs:
       - name: Stage only the production executable
         id: stage
         shell: bash
-        run: node tools/release/stage-release-candidate.mjs --stage "$RUNNER_TEMP/nexusops-release-stage"
+        run: |
+          canonical_temp="$(node --input-type=module -e 'import { realpathSync } from "node:fs"; process.stdout.write(realpathSync(process.env.RUNNER_TEMP));')"
+          node tools/release/stage-release-candidate.mjs --stage "$canonical_temp/nexusops-release-stage"
       - name: Create and verify deterministic manifest
         shell: bash
         env:
