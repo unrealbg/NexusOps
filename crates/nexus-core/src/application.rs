@@ -32,6 +32,7 @@ pub struct Application {
     pub(crate) log_limit: Semaphore,
     pub(crate) container_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
     pub(crate) container_limit: Semaphore,
+    rotation_plans: Mutex<HashMap<HostId, RotationAuthority>>,
     sessions: Mutex<HashMap<HostId, Arc<SessionSlot>>>,
     mutation: Mutex<()>,
     _profile_lock: Option<File>,
@@ -61,6 +62,7 @@ mod lifecycle;
 mod logs;
 mod monitoring;
 mod network;
+mod rotation;
 mod security;
 mod services;
 mod terminal;
@@ -69,6 +71,11 @@ pub(crate) struct MonitorState {
     pub session_id: HostSessionId,
     pub baseline: nexus_discovery::MonitorBaseline,
     pub observed_at: Instant,
+}
+pub(crate) struct RotationAuthority {
+    pub plan: HostKeyRotationPlan,
+    pub generation: u64,
+    pub expires_at: Instant,
 }
 #[cfg(test)]
 mod tests;
@@ -124,6 +131,7 @@ impl Application {
             log_limit: Semaphore::new(4),
             container_gates: Mutex::new(HashMap::new()),
             container_limit: Semaphore::new(4),
+            rotation_plans: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             mutation: Mutex::new(()),
             _profile_lock: Some(lock),
@@ -150,7 +158,7 @@ impl Application {
                 id: HostId::new().to_string(),
                 kind: kind.into(),
                 risk: match kind {
-                    "identity.trust" => OperationRisk::High,
+                    "identity.trust" | "identity.rotate" => OperationRisk::High,
                     "host.save" | "host.delete" => OperationRisk::Low,
                     "file.create_directory" => OperationRisk::Low,
                     "file.rename" | "file.transfer.accepted" => OperationRisk::Moderate,
@@ -166,6 +174,7 @@ impl Application {
     /// Quiesces transfers before closing the SFTP channels and SSH transports.
     pub async fn shutdown(&self) -> Result<(), AppError> {
         let _mutation = self.mutation.lock().await;
+        self.rotation_plans.lock().await.clear();
         let slots = self
             .sessions
             .lock()

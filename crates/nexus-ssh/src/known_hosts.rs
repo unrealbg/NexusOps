@@ -10,6 +10,11 @@ pub struct KnownHosts {
 }
 
 impl KnownHosts {
+    /// Canonical endpoint spelling used by persisted pins and blocked challenges.
+    pub fn canonical_hostname(hostname: &str, port: u16) -> Result<String, AppError> {
+        canonical_endpoint(hostname, port)
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AppError> {
         let connection = Connection::open(path).map_err(database_error)?;
         connection
@@ -95,6 +100,64 @@ impl KnownHosts {
         }
         transaction.commit().map_err(database_error)
     }
+
+    /// Compare-and-swap a persisted endpoint pin. This is application-only authority;
+    /// no renderer command accepts fingerprint or endpoint arguments for mutation.
+    pub fn rotate(
+        &self,
+        hostname: &str,
+        port: u16,
+        expected_current: &HostFingerprint,
+        replacement: &HostFingerprint,
+    ) -> Result<(), AppError> {
+        let hostname = canonical_endpoint(hostname, port)?;
+        validate_fingerprint(&expected_current.algorithm, &expected_current.sha256)?;
+        validate_fingerprint(&replacement.algorithm, &replacement.sha256)?;
+        if expected_current == replacement {
+            return Err(rotation_conflict());
+        }
+        let mut connection = self.connection.lock().map_err(|_| poisoned_database())?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let stored = read_pin(&transaction, &hostname, port)?;
+        if let Some(pin) = &stored {
+            validate_fingerprint(&pin.algorithm, &pin.sha256).map_err(|_| {
+                AppError::new(
+                    ErrorCode::Persistence,
+                    "The trusted SSH host key store is invalid.",
+                )
+            })?;
+        }
+        if stored.as_ref() != Some(expected_current) {
+            return Err(rotation_conflict());
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE ssh_host_keys SET algorithm=?1, fingerprint=?2
+                 WHERE hostname=?3 AND port=?4 AND algorithm=?5 AND fingerprint=?6",
+                params![
+                    replacement.algorithm,
+                    replacement.sha256,
+                    hostname,
+                    port,
+                    expected_current.algorithm,
+                    expected_current.sha256,
+                ],
+            )
+            .map_err(database_error)?;
+        if updated != 1 {
+            return Err(rotation_conflict());
+        }
+        transaction.commit().map_err(database_error)
+    }
+}
+
+fn rotation_conflict() -> AppError {
+    AppError::new(
+        ErrorCode::Conflict,
+        "The trusted SSH host key changed. Review a new rotation plan.",
+    )
 }
 
 fn read_pin(
@@ -418,5 +481,197 @@ mod tests {
             .or_else(|| second_result.err())
             .expect("one rejection");
         assert_eq!(rejection.code, ErrorCode::ChangedHostKey);
+    }
+
+    #[test]
+    fn rotation_is_exact_endpoint_cas_and_persists_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pins.db");
+        let store = KnownHosts::open(&path).unwrap();
+        let old = fingerprint('A');
+        let next = fingerprint('B');
+        store
+            .trust(
+                &store
+                    .verify("HOST.", 22, &old)
+                    .unwrap_err()
+                    .host_key
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            store.rotate("other", 22, &old, &next).unwrap_err().code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            store.rotate("host", 2222, &old, &next).unwrap_err().code,
+            ErrorCode::Conflict
+        );
+        let mut wrong_algorithm = old.clone();
+        wrong_algorithm.algorithm = "ecdsa-sha2-nistp256".into();
+        assert_eq!(
+            store
+                .rotate("host", 22, &wrong_algorithm, &next)
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            store
+                .rotate("host", 22, &fingerprint('C'), &next)
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            store.rotate("host", 22, &old, &old).unwrap_err().code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(store.fingerprint("host", 22).unwrap(), Some(old.clone()));
+        store.rotate("HOST.", 22, &old, &next).unwrap();
+        assert_eq!(
+            store
+                .rotate("host", 22, &old, &fingerprint('C'))
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(store.fingerprint("host", 22).unwrap(), Some(next.clone()));
+        assert_eq!(store.fingerprint("other", 22).unwrap(), None);
+        assert_eq!(store.fingerprint("host", 2222).unwrap(), None);
+        drop(store);
+        assert_eq!(
+            KnownHosts::open(&path)
+                .unwrap()
+                .fingerprint("host", 22)
+                .unwrap(),
+            Some(next)
+        );
+    }
+
+    #[test]
+    fn rotation_allows_algorithm_or_digest_change_but_rejects_invalid_values() {
+        let store = KnownHosts::open(":memory:").unwrap();
+        let old = fingerprint('A');
+        store
+            .trust(
+                &store
+                    .verify("host", 22, &old)
+                    .unwrap_err()
+                    .host_key
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut algorithm_only = old.clone();
+        algorithm_only.algorithm = "ecdsa-sha2-nistp256".into();
+        assert_eq!(
+            store.verify("host", 22, &algorithm_only).unwrap_err().code,
+            ErrorCode::ChangedHostKey
+        );
+        store.rotate("host", 22, &old, &algorithm_only).unwrap();
+        let digest_only = HostFingerprint {
+            algorithm: algorithm_only.algorithm.clone(),
+            sha256: fingerprint('B').sha256,
+        };
+        store
+            .rotate("host", 22, &algorithm_only, &digest_only)
+            .unwrap();
+        for bad in [
+            HostFingerprint {
+                algorithm: "bad\nvalue".into(),
+                sha256: digest_only.sha256.clone(),
+            },
+            HostFingerprint {
+                algorithm: "ssh-ed25519".into(),
+                sha256: "SHA256:short".into(),
+            },
+        ] {
+            assert_eq!(
+                store.rotate("host", 22, &bad, &old).unwrap_err().code,
+                ErrorCode::Validation
+            );
+            assert_eq!(
+                store
+                    .rotate("host", 22, &digest_only, &bad)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Validation
+            );
+        }
+        assert_eq!(store.fingerprint("host", 22).unwrap(), Some(digest_only));
+    }
+
+    #[test]
+    fn rotation_fails_closed_for_missing_or_corrupt_storage() {
+        let store = KnownHosts::open(":memory:").unwrap();
+        let old = fingerprint('A');
+        let next = fingerprint('B');
+        assert_eq!(
+            store.rotate("host", 22, &old, &next).unwrap_err().code,
+            ErrorCode::Conflict
+        );
+        store
+            .trust(
+                &store
+                    .verify("host", 22, &old)
+                    .unwrap_err()
+                    .host_key
+                    .unwrap(),
+            )
+            .unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute("UPDATE ssh_host_keys SET fingerprint='corrupt'", [])
+            .unwrap();
+        let error = store.rotate("host", 22, &old, &next).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Persistence);
+        assert!(!error.message.contains("corrupt"));
+    }
+
+    #[test]
+    fn racing_rotations_on_separate_connections_have_one_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pins.db");
+        let first = KnownHosts::open(&path).unwrap();
+        let second = KnownHosts::open(&path).unwrap();
+        let old = fingerprint('A');
+        first
+            .trust(
+                &first
+                    .verify("host", 22, &old)
+                    .unwrap_err()
+                    .host_key
+                    .unwrap(),
+            )
+            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let race = std::thread::spawn({
+            let barrier = barrier.clone();
+            let old = old.clone();
+            move || {
+                barrier.wait();
+                first.rotate("host", 22, &old, &fingerprint('B'))
+            }
+        });
+        barrier.wait();
+        let second_result = second.rotate("host", 22, &old, &fingerprint('C'));
+        let first_result = race.join().unwrap();
+        assert_ne!(first_result.is_ok(), second_result.is_ok());
+        assert_eq!(
+            first_result
+                .err()
+                .or_else(|| second_result.err())
+                .unwrap()
+                .code,
+            ErrorCode::Conflict
+        );
+        let winner = KnownHosts::open(&path)
+            .unwrap()
+            .fingerprint("host", 22)
+            .unwrap()
+            .unwrap();
+        assert!(winner == fingerprint('B') || winner == fingerprint('C'));
     }
 }

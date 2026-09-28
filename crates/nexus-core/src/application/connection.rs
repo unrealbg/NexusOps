@@ -5,6 +5,7 @@ impl Application {
         let (stored, slot, generation, cancel) = {
             let _mutation = self.mutation.lock().await;
             let stored = self.repository.get(id)?;
+            self.rotation_plans.lock().await.remove(&id);
             let slot = self.slot(id).await;
             let mut data = slot.data.lock().await;
             if matches!(

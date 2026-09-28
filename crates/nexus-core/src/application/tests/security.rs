@@ -1,7 +1,7 @@
 use super::*;
 use std::{future::Future, task::Poll};
 
-struct Forbidden;
+pub(super) struct Forbidden;
 impl SecretStore for Forbidden {
     fn get(&self, _: HostId) -> Result<Credential, AppError> {
         panic!("trust read accessed secrets")

@@ -10,6 +10,8 @@ fn main() {
             "get_session",
             "get_host_ssh_trust",
             "trust_host_key",
+            "plan_host_key_rotation",
+            "execute_host_key_rotation",
             "refresh_host",
             "sample_host_monitor",
             "list_host_services",

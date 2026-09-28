@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-execute-host-key-rotation"
+description = "Enables the execute_host_key_rotation command without any pre-configured scope."
+commands.allow = ["execute_host_key_rotation"]
+
+[[permission]]
+identifier = "deny-execute-host-key-rotation"
+description = "Denies the execute_host_key_rotation command without any pre-configured scope."
+commands.deny = ["execute_host_key_rotation"]

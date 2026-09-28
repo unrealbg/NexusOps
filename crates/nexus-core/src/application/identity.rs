@@ -21,6 +21,7 @@ impl Application {
             ));
         }
         self.known_hosts.trust(&challenge)?;
+        self.rotation_plans.lock().await.remove(&id);
         data.view.state = data.view.state.transition(ConnectionState::Disconnected)?;
         data.view.error = None;
         self.record(id, "identity.trust", AuditOutcome::Success, started)

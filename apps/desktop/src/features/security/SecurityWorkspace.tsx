@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Host, HostSession, SshEndpointTrust } from '@nexusops/protocol';
-import { Button, Notice, Spinner } from '@nexusops/ui';
+import type { Host, HostKeyRotationPlan, HostSession, SshEndpointTrust } from '@nexusops/protocol';
+import { Button, Modal, Notice, Spinner } from '@nexusops/ui';
 import { securityApi } from '../../api/client';
 import { useHostSession } from '../../api/queries';
 
@@ -27,6 +27,15 @@ const connectionLabels = {
   connected: 'Connected', disconnecting: 'Disconnecting', failed: 'Failed',
 };
 
+function canonicalHostname(hostname: string): string | null {
+  try {
+    const authority = hostname.includes(':') ? `[${hostname}]` : hostname;
+    return new URL(`ssh://${authority}`).hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 export function SecurityWorkspace({ host }: { host: Host }) {
   const { hostname, port, authentication } = host.connection;
   // A configuration revisit starts a new local read; even an earlier same-config result
@@ -42,6 +51,16 @@ function EndpointTrust({ host }: { host: Host }) {
   const inFlight = useRef(false);
   const [result, setResult] = useState<{ owner: string; trust: SshEndpointTrust | null } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [rotation, setRotation] = useState<{ owner: string; plan: HostKeyRotationPlan } | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [planning, setPlanning] = useState(false);
+  const [executing, setExecuting] = useState(false);
+  const [rotationNotice, setRotationNotice] = useState<string | null>(null);
+  const rotationEpoch = useRef(0);
+  const requestSequence = useRef(0);
+  const activeRequest = useRef<number | null>(null);
+  const executionActive = useRef(false);
+  const rotated = useRef(false);
 
   const read = useCallback((current: number) => {
     inFlight.current = true;
@@ -76,11 +95,100 @@ function EndpointTrust({ host }: { host: Host }) {
   const session = !sessionQuery.isError && sessionQuery.data?.hostId === host.id
     ? sessionQuery.data : null;
   const endpoint = hostname.includes(':') ? `[${hostname}]:${port}` : `${hostname}:${port}`;
+  const changed = session?.state === 'failed' && session.error?.code === 'changedHostKey'
+    && session.error.hostKey?.previousFingerprint ? session.error.hostKey : null;
+  const rotationOwner = changed ? JSON.stringify([
+    owner, session?.hostSessionId, session?.error?.code, changed.hostname, changed.port,
+    changed.algorithm, changed.fingerprint, changed.previousFingerprint,
+  ]) : null;
+  const liveRotation = rotation?.owner === rotationOwner ? rotation.plan : null;
+
+  useEffect(() => {
+    rotationEpoch.current += 1;
+    activeRequest.current = null;
+    const epoch = rotationEpoch.current;
+    queueMicrotask(() => {
+      if (rotationEpoch.current !== epoch) return;
+      setRotation(null);
+      setConfirmed(false);
+      setPlanning(false);
+      if (rotationOwner || !rotated.current) setRotationNotice(null);
+      if (rotationOwner) rotated.current = false;
+    });
+    return () => { rotationEpoch.current += 1; activeRequest.current = null; };
+  }, [rotationOwner]);
 
   function refresh() {
     if (inFlight.current) return;
     setRefreshing(true);
     read(++generation.current);
+  }
+
+  function refreshTrust() {
+    setRefreshing(true);
+    read(++generation.current);
+  }
+
+  async function reviewRotation() {
+    if (!rotationOwner || activeRequest.current !== null || executionActive.current) return;
+    const requestId = ++requestSequence.current;
+    const epoch = rotationEpoch.current;
+    activeRequest.current = requestId;
+    setPlanning(true);
+    setRotationNotice(null);
+    try {
+      const plan = await securityApi.planRotation(host.id);
+      if (rotationEpoch.current !== epoch || activeRequest.current !== requestId) return;
+      if (plan.hostId !== host.id || plan.hostname !== canonicalHostname(hostname)
+          || plan.port !== port) {
+        setRotationNotice('The rotation plan did not match this host. Review the connection again.');
+        return;
+      }
+      setConfirmed(false);
+      setRotation({ owner: rotationOwner, plan });
+    } catch {
+      if (rotationEpoch.current === epoch && activeRequest.current === requestId) {
+        setRotationNotice('The key change could not be prepared. Reconnect and review it again.');
+      }
+    } finally {
+      if (activeRequest.current === requestId) {
+        activeRequest.current = null;
+        setPlanning(false);
+      }
+    }
+  }
+
+  function closeRotation() {
+    if (executionActive.current) return;
+    setRotation(null);
+    setConfirmed(false);
+  }
+
+  async function executeRotation() {
+    if (!liveRotation || !confirmed || executionActive.current || !rotationOwner) return;
+    executionActive.current = true;
+    setExecuting(true);
+    const epoch = rotationEpoch.current;
+    try {
+      await securityApi.executeRotation(host.id, liveRotation.id);
+      if (rotationEpoch.current !== epoch) return;
+      setRotation(null);
+      setConfirmed(false);
+      rotated.current = true;
+      setRotationNotice('Local endpoint pin replaced. Reconnect normally to verify the new server key before authentication.');
+      refreshTrust();
+      void sessionQuery.refetch?.();
+    } catch {
+      if (rotationEpoch.current !== epoch) return;
+      setRotation(null);
+      setConfirmed(false);
+      setRotationNotice('The rotation result needs review. Local endpoint trust is being reread; prepare a new plan only after checking the current pin.');
+      refreshTrust();
+      void sessionQuery.refetch?.();
+    } finally {
+      executionActive.current = false;
+      if (rotationEpoch.current === epoch) setExecuting(false);
+    }
   }
 
   return (
@@ -91,6 +199,7 @@ function EndpointTrust({ host }: { host: Host }) {
       </header>
       {pending && <Spinner label="Reading local endpoint trust…" />}
       {unavailable && <Notice>Endpoint trust is unavailable. Refresh to retry.</Notice>}
+      {rotationNotice && <Notice tone="warning">{rotationNotice}</Notice>}
       <div className="overview-columns">
       {trust && (
         <section className="panel" aria-labelledby="endpoint-trust-title">
@@ -112,12 +221,31 @@ function EndpointTrust({ host }: { host: Host }) {
         <div className="detail-list">{session ? <>
           <p>Connection state: {connectionLabels[session.state]}</p>
           <p>{sessionStatus(session, trust)}</p>
-          {session.error?.code === 'changedHostKey' && (
-            <Notice>Connection blocked because the presented host key did not match the endpoint pin.</Notice>
-          )}
+          {session.error?.code === 'changedHostKey' && <Notice>
+            Connection blocked because the presented host key did not match the endpoint pin.
+            {changed && <div><Button onClick={() => void reviewRotation()} disabled={planning || executing}>
+              Review key change
+            </Button></div>}
+          </Notice>}
         </> : <Notice tone="neutral">Current SSH session state is unavailable.</Notice>}</div>
       </section>
       </div>
+      {liveRotation && <Modal title="Review SSH host-key change" onClose={closeRotation} wide>
+        <p className="dialog-description">The presented key was observed during a connection attempt that NexusOps blocked because it did not match the stored endpoint pin. Verify the new fingerprint through an independent trusted channel before replacing the local pin.</p>
+        <dl className="trust-details">
+          <div><dt>Configured endpoint</dt><dd>{endpoint}</dd></div>
+          <div><dt>Currently trusted algorithm</dt><dd>{liveRotation.currentFingerprint.algorithm}</dd></div>
+          <div><dt>Currently trusted SHA-256</dt><dd className="fingerprint">{liveRotation.currentFingerprint.sha256}</dd></div>
+          <div><dt>Presented during blocked connection algorithm</dt><dd>{liveRotation.presentedFingerprint.algorithm}</dd></div>
+          <div><dt>Presented during blocked connection SHA-256</dt><dd className="fingerprint">{liveRotation.presentedFingerprint.sha256}</dd></div>
+          <div><dt>Plan expires</dt><dd>{new Date(liveRotation.expiresAtUnixMs).toLocaleString()}</dd></div>
+        </dl>
+        <label className="field"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} disabled={executing} /> I independently verified the new fingerprint.</label>
+        <div className="modal-actions">
+          <Button onClick={closeRotation} disabled={executing}>Cancel</Button>
+          <Button variant="danger" onClick={() => void executeRotation()} disabled={!confirmed || executing}>Replace endpoint pin</Button>
+        </div>
+      </Modal>}
     </section>
   );
 }
