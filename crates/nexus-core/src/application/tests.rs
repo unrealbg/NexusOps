@@ -9,6 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
+mod logs;
 mod security;
 
 struct TestKey;
@@ -24,6 +25,7 @@ struct TestProvider {
     monitor: Arc<MonitorControl>,
     services: Arc<ServiceControl>,
     network: Arc<ServiceControl>,
+    logs: Arc<ServiceControl>,
 }
 struct MonitorControl {
     stall: AtomicBool,
@@ -52,6 +54,7 @@ impl ConnectionProvider for TestProvider {
             monitor: self.monitor.clone(),
             services: self.services.clone(),
             network: self.network.clone(),
+            logs: self.logs.clone(),
             monitor_counter: AtomicUsize::new(0),
         }))
     }
@@ -61,6 +64,7 @@ struct TestSession {
     monitor: Arc<MonitorControl>,
     services: Arc<ServiceControl>,
     network: Arc<ServiceControl>,
+    logs: Arc<ServiceControl>,
     monitor_counter: AtomicUsize,
 }
 #[async_trait]
@@ -91,6 +95,14 @@ impl RemoteSession for TestSession {
                 let sample = self.monitor_counter.load(Ordering::SeqCst).saturating_sub(1) as u64;
                 return Ok(format!("Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n lo: 10 0 0 0 0 0 0 0 20 0 0 0 0 0 0 0\n eth0: {} 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0\n", 1000 + sample * 500, 2000 + sample * 1000));
             }
+            ReadOnlyCommand::SystemJournal => {
+                if self.logs.stall.load(Ordering::SeqCst) {
+                    self.logs.entered.add_permits(1);
+                    let permit = self.logs.release.acquire().await.expect("release");
+                    permit.forget();
+                }
+                r#"{"__REALTIME_TIMESTAMP":"1000000","MESSAGE":"synthetic journal message","PRIORITY":"6"}"#
+            },
             ReadOnlyCommand::SystemServices => {
                 if self.services.stall.load(Ordering::SeqCst) {
                     self.services.entered.add_permits(1);
@@ -191,6 +203,11 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
         }),
+        logs: Arc::new(ServiceControl {
+            stall: AtomicBool::new(false),
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }),
         network: Arc::new(ServiceControl {
             stall: AtomicBool::new(false),
             entered: Semaphore::new(0),
@@ -217,6 +234,8 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         service_limit: Semaphore::new(4),
         network_gates: Mutex::new(HashMap::new()),
         network_limit: Semaphore::new(4),
+        log_gates: Mutex::new(HashMap::new()),
+        log_limit: Semaphore::new(4),
         mutation: Mutex::new(()),
         sessions: Mutex::new(HashMap::new()),
         _profile_lock: None,

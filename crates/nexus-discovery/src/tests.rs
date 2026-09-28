@@ -33,7 +33,7 @@ impl RemoteSession for PartialSession {
             ReadOnlyCommand::RootFilesystem => Ok("dev 1000 400 550 43% /\n".into()),
             ReadOnlyCommand::CpuStat => Ok("cpu 1 0 1 8 0 0 0 0\n".into()),
             ReadOnlyCommand::NetworkDevices => Ok("Inter-| Receive | Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n lo: 1 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0\n".into()),
-            ReadOnlyCommand::SystemServices | ReadOnlyCommand::NetworkAddresses => {
+            ReadOnlyCommand::SystemServices | ReadOnlyCommand::NetworkAddresses | ReadOnlyCommand::SystemJournal => {
                 panic!("on-demand inventory is not a connection probe")
             }
         }

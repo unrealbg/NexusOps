@@ -15,6 +15,7 @@ pub enum ReadOnlyCommand {
     NetworkDevices,
     NetworkAddresses,
     SystemServices,
+    SystemJournal,
 }
 
 impl ReadOnlyCommand {
@@ -32,6 +33,9 @@ impl ReadOnlyCommand {
             Self::CpuStat => "cat /proc/stat",
             Self::NetworkDevices => "cat /proc/net/dev",
             Self::NetworkAddresses => "LC_ALL=C ip -j address show",
+            Self::SystemJournal => {
+                "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 journalctl --system --no-pager --quiet --boot=0 --reverse --lines=10 --output=json --output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,SYSLOG_IDENTIFIER"
+            }
             Self::SystemServices => {
                 "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=Description show"
             }
@@ -52,6 +56,7 @@ impl ReadOnlyCommand {
             Self::NetworkDevices => "monitor.network",
             Self::NetworkAddresses => "network.list",
             Self::SystemServices => "services.list",
+            Self::SystemJournal => "logs.list",
         }
     }
 
@@ -69,6 +74,17 @@ mod tests {
     use super::*;
     use crate::OperationEngine;
     use nexus_model::ErrorCode;
+
+    #[test]
+    fn journal_is_one_fixed_read_only_operation() {
+        let command = ReadOnlyCommand::SystemJournal;
+        assert_eq!(
+            command.command(),
+            "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 journalctl --system --no-pager --quiet --boot=0 --reverse --lines=10 --output=json --output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,SYSLOG_IDENTIFIER"
+        );
+        assert_eq!(command.kind(), "logs.list");
+        assert_eq!(command.operation().risk, OperationRisk::ReadOnly);
+    }
 
     #[test]
     fn service_inventory_is_one_fixed_read_only_operation() {
