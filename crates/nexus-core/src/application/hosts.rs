@@ -67,6 +67,7 @@ impl Application {
             }
             return Err(error);
         }
+        self.rotation_plans.lock().await.remove(&host.id);
         // Invalidate pending trust immediately after the metadata commit, even if cleanup fails.
         {
             let mut data = slot.data.lock().await;
@@ -101,6 +102,7 @@ impl Application {
         self.disconnect_inner(id).await?;
         // Metadata first: a crash can leave encrypted garbage, never a host referring to deleted secrets.
         self.repository.delete(id)?;
+        self.rotation_plans.lock().await.remove(&id);
         self.service_gates.lock().await.remove(&id);
         self.network_gates.lock().await.remove(&id);
         self.log_gates.lock().await.remove(&id);

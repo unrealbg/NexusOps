@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-host-key-rotation"
+description = "Enables the plan_host_key_rotation command without any pre-configured scope."
+commands.allow = ["plan_host_key_rotation"]
+
+[[permission]]
+identifier = "deny-plan-host-key-rotation"
+description = "Denies the plan_host_key_rotation command without any pre-configured scope."
+commands.deny = ["plan_host_key_rotation"]

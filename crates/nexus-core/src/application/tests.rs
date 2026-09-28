@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 
 mod containers;
 mod logs;
+mod rotation;
 mod security;
 
 struct TestKey;
@@ -255,6 +256,7 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         log_limit: Semaphore::new(4),
         container_gates: Mutex::new(HashMap::new()),
         container_limit: Semaphore::new(4),
+        rotation_plans: Mutex::new(HashMap::new()),
         mutation: Mutex::new(()),
         sessions: Mutex::new(HashMap::new()),
         _profile_lock: None,

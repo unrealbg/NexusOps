@@ -44,6 +44,7 @@ impl Application {
         self.disconnect_inner(id).await
     }
     pub(super) async fn disconnect_inner(&self, id: HostId) -> Result<(), AppError> {
+        self.rotation_plans.lock().await.remove(&id);
         let started = Instant::now();
         let slot = self.slot(id).await;
         let mut data = slot.data.lock().await;

@@ -565,13 +565,77 @@ async fn changed_actual_server_key_is_rejected_before_authentication() {
             previous_fingerprint: None,
         })
         .expect("old pin");
-    let error = SshProvider::new(store)
+    let provider = SshProvider::new(store.clone());
+    let error = provider
         .connect(&fixture.host, password(), CancellationToken::new())
         .await
         .err()
         .expect("changed key");
     assert_eq!(error.code, ErrorCode::ChangedHostKey);
     assert_eq!(fixture.handler.auth_attempts.load(Ordering::SeqCst), 0);
+    let challenge = error.host_key.expect("blocked handshake challenge");
+    assert_eq!(challenge.fingerprint, fixture.fingerprint.sha256);
+    assert_eq!(
+        store.trust(&challenge).unwrap_err().code,
+        ErrorCode::ChangedHostKey
+    );
+    let before = (
+        fixture.handler.connection_count.load(Ordering::SeqCst),
+        fixture.handler.auth_attempts.load(Ordering::SeqCst),
+        fixture.handler.command_count.load(Ordering::SeqCst),
+    );
+    let old = store
+        .fingerprint("127.0.0.1", fixture.host.connection.port)
+        .unwrap()
+        .unwrap();
+    store
+        .rotate(
+            "127.0.0.1",
+            fixture.host.connection.port,
+            &old,
+            &fixture.fingerprint,
+        )
+        .expect("local CAS replacement");
+    assert_eq!(
+        (
+            fixture.handler.connection_count.load(Ordering::SeqCst),
+            fixture.handler.auth_attempts.load(Ordering::SeqCst),
+            fixture.handler.command_count.load(Ordering::SeqCst),
+        ),
+        before,
+        "local pin replacement must not touch SSH"
+    );
+    let session = provider
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("ordinary fresh connect verifies replacement before auth");
+    assert_eq!(
+        fixture.handler.auth_attempts.load(Ordering::SeqCst),
+        before.1 + 1
+    );
+    session.disconnect().await.expect("close verified session");
+    let wrong = HostFingerprint {
+        algorithm: fixture.fingerprint.algorithm.clone(),
+        sha256: format!("SHA256:{}", "C".repeat(43)),
+    };
+    store
+        .rotate(
+            "127.0.0.1",
+            fixture.host.connection.port,
+            &fixture.fingerprint,
+            &wrong,
+        )
+        .expect("test-controlled pin change");
+    let error = provider
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .err()
+        .expect("new mismatch still blocks");
+    assert_eq!(error.code, ErrorCode::ChangedHostKey);
+    assert_eq!(
+        fixture.handler.auth_attempts.load(Ordering::SeqCst),
+        before.1 + 1
+    );
 }
 
 #[tokio::test]

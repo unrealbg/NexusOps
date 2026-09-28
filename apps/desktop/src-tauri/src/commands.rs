@@ -1,9 +1,10 @@
 use crate::local_access::LocalAccessService;
 use nexus_core::Application;
 use nexus_model::{
-    AppError, ContainerSnapshot, Host, HostId, HostInput, HostKeyChallenge, HostMonitorSample,
-    HostSession, HostSessionId, NetworkSnapshot, ServiceSnapshot, SshEndpointTrust,
-    SystemJournalSnapshot, TerminalOutputBatch, TerminalSession, TerminalSessionId, TerminalSize,
+    AppError, ContainerSnapshot, Host, HostId, HostInput, HostKeyChallenge, HostKeyRotationPlan,
+    HostKeyRotationPlanId, HostMonitorSample, HostSession, HostSessionId, NetworkSnapshot,
+    ServiceSnapshot, SshEndpointTrust, SystemJournalSnapshot, TerminalOutputBatch, TerminalSession,
+    TerminalSessionId, TerminalSize,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -94,6 +95,21 @@ pub async fn trust_host_key(
     challenge: HostKeyChallenge,
 ) -> Result<(), AppError> {
     app.trust_host_key(host_id, challenge).await
+}
+#[tauri::command]
+pub async fn plan_host_key_rotation(
+    app: State<'_, Application>,
+    host_id: HostId,
+) -> Result<HostKeyRotationPlan, AppError> {
+    app.plan_host_key_rotation(host_id).await
+}
+#[tauri::command]
+pub async fn execute_host_key_rotation(
+    app: State<'_, Application>,
+    host_id: HostId,
+    plan_id: HostKeyRotationPlanId,
+) -> Result<(), AppError> {
+    app.execute_host_key_rotation(host_id, plan_id).await
 }
 #[tauri::command]
 pub async fn refresh_host(app: State<'_, Application>, host_id: HostId) -> Result<(), AppError> {

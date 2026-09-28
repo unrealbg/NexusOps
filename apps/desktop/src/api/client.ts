@@ -5,6 +5,7 @@ import type {
   Host,
   HostInput,
   HostKeyChallenge,
+  HostKeyRotationPlan,
   HostMonitorSample,
   NetworkSnapshot,
   SystemJournalSnapshot,
@@ -109,6 +110,9 @@ type TerminalOwnership = Pick<TerminalSession, 'hostId' | 'hostSessionId' | 'id'
 /** Local endpoint metadata only; no connection, credential access, or remote observation. */
 export const securityApi = {
   get: (hostId: string) => request<SshEndpointTrust>('get_host_ssh_trust', { hostId }),
+  planRotation: (hostId: string) => request<HostKeyRotationPlan>('plan_host_key_rotation', { hostId }),
+  executeRotation: (hostId: string, planId: string) =>
+    request<void>('execute_host_key_rotation', { hostId, planId }),
 };
 
 function ownershipArgs(session: TerminalOwnership) {
