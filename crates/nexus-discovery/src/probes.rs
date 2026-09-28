@@ -50,6 +50,7 @@ impl HostProbe for LinuxProbe {
             | ReadOnlyCommand::NetworkDevices
             | ReadOnlyCommand::NetworkAddresses
             | ReadOnlyCommand::SystemJournal
+            | ReadOnlyCommand::DockerContainers
             | ReadOnlyCommand::SystemServices => {
                 return Err(nexus_model::AppError::new(
                     nexus_model::ErrorCode::Policy,

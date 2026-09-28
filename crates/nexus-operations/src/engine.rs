@@ -192,6 +192,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn docker_inventory_rejects_tampering_before_remote_execution_with_existing_bounds() {
+        let engine = OperationEngine::default();
+        assert_eq!(engine.timeout, Duration::from_secs(8));
+        assert_eq!(engine.max_output_bytes, 64 * 1024);
+        let session = session("");
+        let mut plan = engine.plan(ReadOnlyCommand::DockerContainers);
+        plan.operation.kind = "unreviewed.docker".into();
+        assert_eq!(
+            engine
+                .execute(&session, &plan, CancellationToken::new())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Policy
+        );
+        plan.operation.kind = "containers.list".into();
+        for risk in [
+            OperationRisk::Low,
+            OperationRisk::Moderate,
+            OperationRisk::High,
+            OperationRisk::Destructive,
+        ] {
+            plan.operation.risk = risk;
+            assert_eq!(
+                engine
+                    .execute(&session, &plan, CancellationToken::new())
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Policy
+            );
+        }
+        assert_eq!(session.calls.load(Ordering::Relaxed), 0);
+        let valid = engine.plan(ReadOnlyCommand::DockerContainers);
+        assert!(engine.verify(&valid, &"x".repeat(64 * 1024)).is_ok());
+        assert!(engine.verify(&valid, &"x".repeat(64 * 1024 + 1)).is_err());
+    }
+
+    #[tokio::test]
     async fn rejects_every_write_risk_before_execution() {
         let engine = OperationEngine::default();
         let session = session("host\n");

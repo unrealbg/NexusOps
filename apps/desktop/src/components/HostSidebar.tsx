@@ -4,10 +4,6 @@ import { Icon } from './Icon';
 import { useHostSession } from '../api/queries';
 import { ConnectionBadge } from './ConnectionBadge';
 
-const futureSections = [
-  ['containers', 'Containers'],
-] as const;
-
 function HostItem({
   host,
   selected,
@@ -54,8 +50,8 @@ export function HostSidebar({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onAdd: () => void;
-  activeSection: 'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security' | 'logs';
-  onSection: (section: 'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security' | 'logs') => void;
+  activeSection: 'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security' | 'logs' | 'containers';
+  onSection: (section: 'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security' | 'logs' | 'containers') => void;
 }) {
   return (
     <aside className="sidebar">
@@ -148,19 +144,15 @@ export function HostSidebar({
           <Icon name="logs" />
           Logs
         </button>
-        {futureSections.map(([icon, label]) => (
-          <button
-            key={label}
-            className="nav-item"
-            disabled
-            aria-label={`${label} (coming soon)`}
-            title={`${label} is planned for a future release`}
-          >
-            <Icon name={icon} />
-            <span>{label}</span>
-            <span className="nav-future">Soon</span>
-          </button>
-        ))}
+        <button
+          className={`nav-item ${activeSection === 'containers' ? 'nav-item--active' : ''}`}
+          aria-current={activeSection === 'containers' ? 'page' : undefined}
+          disabled={!selectedId}
+          onClick={() => onSection('containers')}
+        >
+          <Icon name="containers" />
+          Containers
+        </button>
       </nav>
       <div className="sidebar-hosts-heading">
         <span>

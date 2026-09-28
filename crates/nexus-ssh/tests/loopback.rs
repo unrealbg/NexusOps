@@ -38,6 +38,7 @@ struct FixtureHandler {
     auth_attempts: Arc<AtomicUsize>,
     command_count: Arc<AtomicUsize>,
     journal_commands: Arc<AtomicUsize>,
+    docker_commands: Arc<AtomicUsize>,
     channel_closes: Arc<AtomicUsize>,
     mode: Arc<AtomicU8>,
     approved_key: PublicKey,
@@ -111,6 +112,9 @@ impl server::Handler for FixtureHandler {
         if command == b"LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 journalctl --system --no-pager --quiet --boot=0 --reverse --lines=10 --output=json --output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,SYSLOG_IDENTIFIER" {
             self.journal_commands.fetch_add(1, Ordering::SeqCst);
         }
+        if command == ReadOnlyCommand::DockerContainers.command().as_bytes() {
+            self.docker_commands.fetch_add(1, Ordering::SeqCst);
+        }
         session.channel_success(channel)?;
         match self.mode.load(Ordering::SeqCst) {
             1 => {
@@ -121,6 +125,7 @@ impl server::Handler for FixtureHandler {
             4 => {
                 session.data(channel, &b"{malformed synthetic journal data}"[..])?;
             }
+            5 => {} // Valid successful empty Docker inventory.
             3 => {
                 session.exit_status_request(channel, 1)?;
                 session.close(channel)?;
@@ -171,6 +176,7 @@ impl Fixture {
             auth_attempts: Arc::new(AtomicUsize::new(0)),
             command_count: Arc::new(AtomicUsize::new(0)),
             journal_commands: Arc::new(AtomicUsize::new(0)),
+            docker_commands: Arc::new(AtomicUsize::new(0)),
             channel_closes: Arc::new(AtomicUsize::new(0)),
             mode: Arc::new(AtomicU8::new(0)),
             approved_key: user_key.public_key().clone(),
@@ -379,6 +385,82 @@ async fn journal_malformed_oversized_and_unavailable_responses_are_safe_failures
         .await
         .is_ok()
     );
+}
+
+#[tokio::test]
+async fn docker_inventory_uses_only_the_exact_fixed_command_over_production_ssh() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .unwrap();
+    let id = HostSessionId::new();
+    let snapshot = nexus_discovery::observe_docker_containers(
+        session.as_ref(),
+        CancellationToken::new(),
+        fixture.host.id,
+        id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot.host_id, fixture.host.id);
+    assert_eq!(snapshot.host_session_id, id);
+    assert_eq!(snapshot.entries.len(), 1);
+    assert_eq!(snapshot.entries[0].name, "synthetic-container");
+    assert_eq!(fixture.handler.docker_commands.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.handler.command_count.load(Ordering::SeqCst), 1);
+    assert!(probe_responses::response(b"docker container ls").is_none());
+    assert!(
+        probe_responses::response(b"docker --host tcp://127.0.0.1:2375 container ls").is_none()
+    );
+}
+
+#[tokio::test]
+async fn docker_empty_and_failure_responses_do_not_break_other_fixed_ssh_reads() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .unwrap();
+    fixture.handler.mode.store(5, Ordering::SeqCst);
+    let empty = nexus_discovery::observe_docker_containers(
+        session.as_ref(),
+        CancellationToken::new(),
+        fixture.host.id,
+        HostSessionId::new(),
+    )
+    .await
+    .unwrap();
+    assert!(empty.entries.is_empty());
+
+    for mode in [4, 1, 3] {
+        fixture.handler.mode.store(mode, Ordering::SeqCst);
+        let error = nexus_discovery::observe_docker_containers(
+            session.as_ref(),
+            CancellationToken::new(),
+            fixture.host.id,
+            HostSessionId::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.message,
+            "Docker container inventory is unavailable for this connection."
+        );
+        assert!(!session.is_closed());
+    }
+    assert_eq!(fixture.handler.docker_commands.load(Ordering::SeqCst), 4);
+    fixture.handler.mode.store(0, Ordering::SeqCst);
+    assert_eq!(
+        session
+            .execute(ReadOnlyCommand::Hostname, CancellationToken::new())
+            .await
+            .unwrap(),
+        "nexus-fixture\n"
+    );
+    assert_eq!(fixture.handler.docker_commands.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]
