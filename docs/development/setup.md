@@ -74,6 +74,8 @@ npm run typecheck
 
 CI runs frontend checks, Rust formatting/Clippy/tests, protocol verification and a production Tauri executable build on Windows, macOS and Linux. The CI file's presence is not evidence that remote GitHub runs have passed; consult the workflow runs for a pushed repository.
 
+Goal 04B adds `npm run release:verify` and `npm run test:release` to normal Quality CI. These check product-version consistency and synthetic release-tool regressions without publishing anything. The separate [release integrity foundation](../release/release-integrity.md) documents deterministic staging, SHA-256 manifests and the owner-invoked candidate workflow. Do not run that manual workflow as part of normal development or source review: it uploads artifacts and creates external attestations.
+
 ## Data and troubleshooting
 
 Tauri resolves the per-user app-data directory for `org.nexusops.desktop`. Typical locations are `%APPDATA%/org.nexusops.desktop` on Windows, `~/Library/Application Support/org.nexusops.desktop` on macOS and `$XDG_DATA_HOME/org.nexusops.desktop` (or `~/.local/share/...`) on Linux. Use the OS keychain unlock UI for `secureStorage` errors. Never work around them by saving credentials to config files.

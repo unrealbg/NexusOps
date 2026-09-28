@@ -90,6 +90,12 @@ The release bootstrap accepts an alternate test profile only through `NEXUSOPS_T
 
 Ed25519 is the supported client-key type in the Windows alpha. Optional RSA support is disabled because the current upstream RSA implementation has an unfixed RustSec timing-side-channel advisory. Other parsed key formats are not claimed as verified support.
 
+## Release supply-chain boundary
+
+Goal 04B adds development tooling and a manual GitHub Actions candidate workflow, not runtime update authority. Exact SemVer comparisons fail on a mismatched Cargo, Tauri, npm or lockfile version. A clean checked-out Git commit and matching `GITHUB_SHA` bind the manifest to intended source. A flat allowlist excludes repository trees, local profiles, databases, logs, fixture data and keys from staging. An independent verifier rejects unexpected or substituted artifacts, missing or duplicate names, size/hash changes, path traversal and noncanonical manifest data. Immutable full-SHA action pins reduce moving-ref risk; checkout does not retain its credential.
+
+The workflow still trusts GitHub account access, workflow configuration, hosted runners, action code and package/build inputs. A compromised account could dispatch or alter a future run; a malicious or misconfigured CI step or compromised runner could build different bytes while claiming an expected source. An artifact attestation binds the produced bytes to GitHub's workflow identity and source claim through GitHub/OIDC/Sigstore, but does not prove that the build was honest, reproducible or vulnerability-free. A SHA-256 manifest alone does not authenticate a publisher. Artifact substitution is detected only when the recipient verifies a trusted manifest or attestation against the downloaded bytes. The executable remains unsigned at the OS level, and no Tauri updater signature exists. No production release secret is generated or stored in this milestone. The manual workflow has no release/tag/package write permission and is not invoked during implementation; see [release integrity](../release/release-integrity.md).
+
 ## Outside the current milestone
 
 AI/plugin policy, recursive file operations and sync, binary editing, force overwrite or collaborative editing, certificate authorities, SSH agent forwarding, jump hosts, persistent or shared terminal sessions, vault export/recovery, hardware-backed keys, signed installers/updaters, telemetry, secure deletion of encrypted orphan records and an independent security audit. No compliance or complete resistance to local malware is claimed.
