@@ -1,6 +1,7 @@
 //! Independent, bounded Linux probes. Untrusted remote output is only parsed as data.
 
 mod capabilities;
+mod containers;
 mod logs;
 mod monitoring;
 mod network;
@@ -9,6 +10,7 @@ mod probes;
 mod services;
 
 pub use capabilities::{CapabilityRegistry, capabilities};
+pub use containers::{observe_docker_containers, parse_docker_containers};
 pub use logs::{observe_system_journal, parse_system_journal};
 pub use monitoring::{MonitorBaseline, MonitorReading, derive_sample, observe_monitor};
 pub use network::{observe_network, parse_network};

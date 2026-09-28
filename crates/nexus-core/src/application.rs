@@ -30,6 +30,8 @@ pub struct Application {
     pub(crate) network_limit: Semaphore,
     pub(crate) log_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
     pub(crate) log_limit: Semaphore,
+    pub(crate) container_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
+    pub(crate) container_limit: Semaphore,
     sessions: Mutex<HashMap<HostId, Arc<SessionSlot>>>,
     mutation: Mutex<()>,
     _profile_lock: Option<File>,
@@ -51,6 +53,7 @@ fn error_outcome(error: &AppError) -> AuditOutcome {
     }
 }
 mod connection;
+mod containers;
 mod files;
 mod hosts;
 mod identity;
@@ -119,6 +122,8 @@ impl Application {
             network_limit: Semaphore::new(4),
             log_gates: Mutex::new(HashMap::new()),
             log_limit: Semaphore::new(4),
+            container_gates: Mutex::new(HashMap::new()),
+            container_limit: Semaphore::new(4),
             sessions: Mutex::new(HashMap::new()),
             mutation: Mutex::new(()),
             _profile_lock: Some(lock),
@@ -196,6 +201,7 @@ impl Application {
         self.service_gates.lock().await.clear();
         self.network_gates.lock().await.clear();
         self.log_gates.lock().await.clear();
+        self.container_gates.lock().await.clear();
         for slot in slots {
             let mut data = slot.data.lock().await;
             data.cancel.cancel();

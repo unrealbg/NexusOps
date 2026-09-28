@@ -8,6 +8,7 @@ import type {
   HostMonitorSample,
   NetworkSnapshot,
   SystemJournalSnapshot,
+  ContainerSnapshot,
   ServiceSnapshot,
   SshEndpointTrust,
   HostSession,
@@ -95,6 +96,12 @@ export const networkApi = {
 export const logsApi = {
   list: (hostId: string, hostSessionId: string) =>
     request<SystemJournalSnapshot>('list_host_logs', { hostId, hostSessionId }),
+};
+
+/** One fixed, session-bound Docker system-socket read; metadata remains component-local. */
+export const containersApi = {
+  list: (hostId: string, hostSessionId: string) =>
+    request<ContainerSnapshot>('list_host_containers', { hostId, hostSessionId }),
 };
 
 type TerminalOwnership = Pick<TerminalSession, 'hostId' | 'hostSessionId' | 'id'>;

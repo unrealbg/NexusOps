@@ -16,6 +16,7 @@ pub enum ReadOnlyCommand {
     NetworkAddresses,
     SystemServices,
     SystemJournal,
+    DockerContainers,
 }
 
 impl ReadOnlyCommand {
@@ -35,6 +36,9 @@ impl ReadOnlyCommand {
             Self::NetworkAddresses => "LC_ALL=C ip -j address show",
             Self::SystemJournal => {
                 "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 journalctl --system --no-pager --quiet --boot=0 --reverse --lines=10 --output=json --output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,SYSLOG_IDENTIFIER"
+            }
+            Self::DockerContainers => {
+                r#"LC_ALL=C docker --host unix:///var/run/docker.sock container ls --last 64 --no-trunc --format '{"id":{{json .ID}},"image":{{json .Image}},"name":{{json .Names}},"state":{{json .State}},"status":{{json .Status}},"ports":{{json .Ports}},"networks":{{json .Networks}}}'"#
             }
             Self::SystemServices => {
                 "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=Description show"
@@ -57,6 +61,7 @@ impl ReadOnlyCommand {
             Self::NetworkAddresses => "network.list",
             Self::SystemServices => "services.list",
             Self::SystemJournal => "logs.list",
+            Self::DockerContainers => "containers.list",
         }
     }
 
@@ -74,6 +79,31 @@ mod tests {
     use super::*;
     use crate::OperationEngine;
     use nexus_model::ErrorCode;
+
+    #[test]
+    fn docker_inventory_is_one_fixed_read_only_operation() {
+        let command = ReadOnlyCommand::DockerContainers;
+        assert_eq!(
+            command.command(),
+            r#"LC_ALL=C docker --host unix:///var/run/docker.sock container ls --last 64 --no-trunc --format '{"id":{{json .ID}},"image":{{json .Image}},"name":{{json .Names}},"state":{{json .State}},"status":{{json .Status}},"ports":{{json .Ports}},"networks":{{json .Networks}}}'"#
+        );
+        assert_eq!(command.kind(), "containers.list");
+        assert_eq!(command.operation().risk, OperationRisk::ReadOnly);
+        let engine = OperationEngine::default();
+        let mut plan = engine.plan(command);
+        plan.operation.kind = "logs.list".into();
+        assert_eq!(engine.validate(&plan).unwrap_err().code, ErrorCode::Policy);
+        plan.operation.kind = command.kind().into();
+        for risk in [
+            OperationRisk::Low,
+            OperationRisk::Moderate,
+            OperationRisk::High,
+            OperationRisk::Destructive,
+        ] {
+            plan.operation.risk = risk;
+            assert_eq!(engine.validate(&plan).unwrap_err().code, ErrorCode::Policy);
+        }
+    }
 
     #[test]
     fn journal_is_one_fixed_read_only_operation() {

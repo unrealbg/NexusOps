@@ -9,6 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
+mod containers;
 mod logs;
 mod security;
 
@@ -26,6 +27,7 @@ struct TestProvider {
     services: Arc<ServiceControl>,
     network: Arc<ServiceControl>,
     logs: Arc<ServiceControl>,
+    containers: Arc<ServiceControl>,
 }
 struct MonitorControl {
     stall: AtomicBool,
@@ -55,6 +57,7 @@ impl ConnectionProvider for TestProvider {
             services: self.services.clone(),
             network: self.network.clone(),
             logs: self.logs.clone(),
+            containers: self.containers.clone(),
             monitor_counter: AtomicUsize::new(0),
         }))
     }
@@ -65,6 +68,7 @@ struct TestSession {
     services: Arc<ServiceControl>,
     network: Arc<ServiceControl>,
     logs: Arc<ServiceControl>,
+    containers: Arc<ServiceControl>,
     monitor_counter: AtomicUsize,
 }
 #[async_trait]
@@ -102,6 +106,14 @@ impl RemoteSession for TestSession {
                     permit.forget();
                 }
                 r#"{"__REALTIME_TIMESTAMP":"1000000","MESSAGE":"synthetic journal message","PRIORITY":"6"}"#
+            },
+            ReadOnlyCommand::DockerContainers => {
+                if self.containers.stall.load(Ordering::SeqCst) {
+                    self.containers.entered.add_permits(1);
+                    let permit = self.containers.release.acquire().await.expect("release");
+                    permit.forget();
+                }
+                r#"{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","image":"example:1","name":"synthetic-container","state":"running","status":"Up 1 minute","ports":"","networks":"bridge"}"#
             },
             ReadOnlyCommand::SystemServices => {
                 if self.services.stall.load(Ordering::SeqCst) {
@@ -208,6 +220,11 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
         }),
+        containers: Arc::new(ServiceControl {
+            stall: AtomicBool::new(false),
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }),
         network: Arc::new(ServiceControl {
             stall: AtomicBool::new(false),
             entered: Semaphore::new(0),
@@ -236,6 +253,8 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         network_limit: Semaphore::new(4),
         log_gates: Mutex::new(HashMap::new()),
         log_limit: Semaphore::new(4),
+        container_gates: Mutex::new(HashMap::new()),
+        container_limit: Semaphore::new(4),
         mutation: Mutex::new(()),
         sessions: Mutex::new(HashMap::new()),
         _profile_lock: None,

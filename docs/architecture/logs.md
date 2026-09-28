@@ -1,6 +1,6 @@
 # System journal snapshots
 
-Logs is a bounded read-only view of potentially sensitive system journal content for the selected connected Linux host. Opening the workspace makes one request; manual Refresh makes one more. There is no journal polling, focus refetch, follow stream, pagination or historical storage. Containers remains reserved.
+Logs is a bounded read-only view of potentially sensitive system journal content for the selected connected Linux host. Opening the workspace makes one request; manual Refresh makes one more. There is no journal polling, focus refetch, follow stream, pagination or historical storage.
 
 ## Authority and bounds
 

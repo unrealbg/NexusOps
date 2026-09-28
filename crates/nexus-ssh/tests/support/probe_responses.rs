@@ -20,6 +20,9 @@ pub fn response(command: &[u8]) -> Option<&'static str> {
         b"LC_ALL=C ip -j address show" => Some(
             "[{\"ifindex\":1,\"ifname\":\"lo\",\"mtu\":65536,\"operstate\":\"UNKNOWN\",\"address\":\"00:00:00:00:00:00\",\"addr_info\":[{\"family\":\"inet\",\"local\":\"127.0.0.1\",\"prefixlen\":8},{\"family\":\"inet6\",\"local\":\"::1\",\"prefixlen\":128}]}]",
         ),
+        b"LC_ALL=C docker --host unix:///var/run/docker.sock container ls --last 64 --no-trunc --format '{\"id\":{{json .ID}},\"image\":{{json .Image}},\"name\":{{json .Names}},\"state\":{{json .State}},\"status\":{{json .Status}},\"ports\":{{json .Ports}},\"networks\":{{json .Networks}}}'" => Some(
+            "{\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"image\":\"fixture/image:1\",\"name\":\"synthetic-container\",\"state\":\"running\",\"status\":\"Up 2 minutes\",\"ports\":\"\",\"networks\":\"bridge\"}\n",
+        ),
         b"LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 journalctl --system --no-pager --quiet --boot=0 --reverse --lines=10 --output=json --output-fields=MESSAGE,PRIORITY,_SYSTEMD_UNIT,SYSLOG_IDENTIFIER" => Some(
             "{\"__REALTIME_TIMESTAMP\":\"1000000\",\"PRIORITY\":\"6\",\"MESSAGE\":\"synthetic journal entry\"}\n{\"__REALTIME_TIMESTAMP\":\"0\",\"MESSAGE\":null}\n",
         ),

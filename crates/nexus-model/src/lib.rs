@@ -1,4 +1,5 @@
 //! Transport-independent domain and IPC data. Credentials deliberately live elsewhere.
+mod containers;
 mod error;
 mod host;
 mod logs;
@@ -9,6 +10,7 @@ mod services;
 mod session;
 mod sftp;
 mod terminal;
+pub use containers::*;
 pub use error::*;
 pub use host::*;
 pub use logs::*;
