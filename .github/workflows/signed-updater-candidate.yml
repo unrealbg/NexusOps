@@ -1,0 +1,145 @@
+name: Signed updater candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+
+jobs:
+  candidate:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      # actions/checkout v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      # actions/setup-node v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Verify exact clean source
+        run: node tools/release/verify-release-source.mjs
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev
+      - name: Require hosted rustup and install fixed Rust toolchain
+        shell: bash
+        run: |
+          command -v rustup >/dev/null || { echo 'Preinstalled rustup is required' >&2; exit 1; }
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy --no-self-update
+          rustc --version | grep -Eq '^rustc 1\.98\.1 '
+          cargo --version | grep -Eq '^cargo 1\.98\.1 '
+          rustup component list --toolchain 1.98.1 --installed | grep -Eq '^rustfmt-'
+          rustup component list --toolchain 1.98.1 --installed | grep -Eq '^clippy-'
+      - run: npm ci
+      - run: npm run test:release
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --lib --bins --locked -q
+      - run: cargo test -p nexus-ssh --test loopback --locked
+      - run: npm run release:verify
+      - run: cargo run -p nexus-core --example export_protocol --locked -- --check
+      - name: Build production executable without signing secrets (Windows)
+        if: runner.os == 'Windows'
+        run: .\node_modules\.bin\tauri.cmd build --no-bundle -- --locked
+      - name: Build production executable without signing secrets (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: ./node_modules/.bin/tauri build --no-bundle -- --locked
+      - name: Prepare temporary public-key-only bundle configuration
+        id: config
+        shell: bash
+        run: |
+          canonical_temp="$(node --input-type=module -e 'import { realpathSync } from "node:fs"; process.stdout.write(realpathSync(process.env.RUNNER_TEMP));')"
+          node tools/release/prepare-updater-bundle-config.mjs --output "$canonical_temp/nexusops-updater-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
+      - name: Bundle unsigned NSIS updater (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          BUNDLE_CONFIG: ${{ steps.config.outputs.config_path }}
+        run: |
+          ./node_modules/.bin/tauri.cmd bundle --bundles nsis --no-sign --config "$BUNDLE_CONFIG"
+      - name: Bundle unsigned AppImage updater (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          BUNDLE_CONFIG: ${{ steps.config.outputs.config_path }}
+        run: |
+          ./node_modules/.bin/tauri bundle --bundles appimage --no-sign --config "$BUNDLE_CONFIG"
+      - name: Bundle unsigned macOS updater archive
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          BUNDLE_CONFIG: ${{ steps.config.outputs.config_path }}
+        run: |
+          ./node_modules/.bin/tauri bundle --bundles app --no-sign --config "$BUNDLE_CONFIG"
+      - name: Stage one unsigned updater payload
+        id: stage
+        shell: bash
+        run: |
+          canonical_temp="$(node --input-type=module -e 'import { realpathSync } from "node:fs"; process.stdout.write(realpathSync(process.env.RUNNER_TEMP));')"
+          node tools/release/stage-updater-artifact.mjs --stage "$canonical_temp/nexusops-signed-updater-stage"
+      - name: Sign staged NSIS payload (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          STAGED_ARTIFACT: ${{ steps.stage.outputs.artifact_path }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node tools/release/require-updater-signing-env.mjs
+          ./node_modules/.bin/tauri.cmd signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"
+      - name: Sign staged AppImage payload (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          STAGED_ARTIFACT: ${{ steps.stage.outputs.artifact_path }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node tools/release/require-updater-signing-env.mjs
+          ./node_modules/.bin/tauri signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"
+      - name: Sign staged macOS payload
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          STAGED_ARTIFACT: ${{ steps.stage.outputs.artifact_path }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node tools/release/require-updater-signing-env.mjs
+          ./node_modules/.bin/tauri signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"
+      - name: Create and verify deterministic signed-candidate metadata
+        shell: bash
+        env:
+          STAGE_DIR: ${{ steps.stage.outputs.stage_dir }}
+        run: |
+          node tools/release/create-signed-updater-candidate.mjs --stage "$STAGE_DIR"
+          node tools/release/verify-signed-updater-candidate.mjs --stage "$STAGE_DIR"
+      # actions/attest v4; subjects are exactly the updater payload, signature, and metadata.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: |
+            ${{ steps.stage.outputs.artifact_path }}
+            ${{ steps.stage.outputs.signature_path }}
+            ${{ steps.stage.outputs.stage_dir }}/signed-updater-candidate.json
+      # actions/upload-artifact v4; upload only the verified, flat staging directory.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.stage.outputs.artifact_name }}
+          path: ${{ steps.stage.outputs.stage_dir }}/*
+          if-no-files-found: error
+          compression-level: 0

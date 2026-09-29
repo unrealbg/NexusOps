@@ -66,6 +66,8 @@ The local SSH integration fixture binds loopback and generates its own keys. It 
 
 The [release integrity foundation](docs/release/release-integrity.md) verifies version consistency and deterministic SHA-256 manifests for a native production executable. Its provenance workflow is manual and does not publish a GitHub Release or add an updater to NexusOps.
 
+The [signed updater artifact foundation](docs/release/signed-updater-artifacts.md) prepares Tauri 2.12 version-bound signatures with an owner-held private key and a reviewable public key. Its separate candidate workflow is manual; the application has no runtime updater, update endpoint, download/install permission or `latest.json`.
+
 Architecture, threat model, important limitations and architectural decisions are documented in [architecture](docs/architecture/overview.md), [monitoring](docs/architecture/monitoring.md), [terminal architecture](docs/architecture/terminal.md), [SFTP files](docs/architecture/sftp.md), [remote text editor](docs/architecture/editor.md), [security](docs/security/threat-model.md) and [ADRs](docs/adr/0001-workspace-and-boundaries.md). There is no AI execution, generic command IPC, sudo integration, remote agent, tunnel, bastion or alerting.
 
 Licensed under MIT.
