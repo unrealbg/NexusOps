@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { releaseArtifactName, verifyReleaseSource } from './release-common.mjs';
+import { REPOSITORY_ROOT, releaseArtifactName, verifyReleaseSource } from './release-common.mjs';
 
 function git(root, args) {
   return execFileSync('git', args, {
@@ -62,4 +62,26 @@ test('release artifact name is derived only from verified metadata', () => {
       }),
     /invalid release artifact/,
   );
+});
+
+test('manual release workflow fails closed without preinstalled rustup and has no live bootstrap', async () => {
+  const workflow = await readFile(
+    join(REPOSITORY_ROOT, '.github/workflows/release-candidate.yml'),
+    'utf8',
+  );
+  assert.match(workflow, /command -v rustup\b/);
+  assert.match(workflow, /rustup toolchain install 1\.98\.1[^\r\n]*--no-self-update/);
+  assert.doesNotMatch(workflow, /actions-rust-lang\/setup-rust-toolchain@/);
+  assert.doesNotMatch(workflow, /sh\.rustup\.rs/i);
+  assert.doesNotMatch(workflow, /\b(?:curl|wget)\b[^\r\n]*\|\s*(?:sh|bash)\b/i);
+  assert.doesNotMatch(
+    workflow,
+    /\bInvoke-WebRequest\b[^\r\n]*\|\s*(?:Invoke-Expression|iex|sh|bash)\b/i,
+  );
+  const actionRefs = [...workflow.matchAll(/^\s*-\s+uses:\s+(\S+)/gm)].map((match) => match[1]);
+  assert.deepEqual(
+    actionRefs.map((reference) => reference.split('@')[0]),
+    ['actions/checkout', 'actions/setup-node', 'actions/attest', 'actions/upload-artifact'],
+  );
+  for (const reference of actionRefs) assert.match(reference, /@[0-9a-f]{40}$/);
 });

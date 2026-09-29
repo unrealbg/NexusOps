@@ -39,17 +39,16 @@ Use a fresh disposable staging directory; do not point these commands at a user 
 
 ## Manual workflow and provenance boundary
 
-`.github/workflows/release-candidate.yml` has only `workflow_dispatch`. The normal Quality workflow keeps `contents: read` and runs only read-only version validation and synthetic release-tool tests. The manual workflow has `contents: read`, `id-token: write` and `attestations: write`; it has no repository-content, package or release write permission. Checkout disables persisted credentials. It uses Node 24, Rust 1.98.1, `npm ci`, locked Cargo operations, the supported three-platform quality gates, a fresh Tauri no-bundle build, strict staging and manifest verification. Only the verified flat staging directory is uploaded. GitHub's first-party `actions/attest` is configured to attest both the executable and manifest; it uses no project signing secret. A later authorized run would create external artifact and attestation records. **Do not dispatch this workflow during Goal 04B implementation or source review.**
+`.github/workflows/release-candidate.yml` has only `workflow_dispatch`. The normal Quality workflow keeps `contents: read` and runs only read-only version validation and synthetic release-tool tests. The manual workflow has `contents: read`, `id-token: write` and `attestations: write`; it has no repository-content, package or release write permission. Checkout disables persisted credentials. It uses Node 24, Rust 1.98.1, `npm ci`, locked Cargo operations, the supported three-platform quality gates, a fresh Tauri no-bundle build, strict staging and manifest verification. The runner must already have `rustup`; missing `rustup` fails closed. The workflow uses that executable to install Rust 1.98.1 with rustfmt and clippy, disables rustup self-update, and checks the selected rustc/cargo versions and installed components. It does not download and execute a rustup bootstrap script. Only the verified flat staging directory is uploaded. GitHub's first-party `actions/attest` is configured to attest both the executable and manifest; it uses no project signing secret. A later authorized run would create external artifact and attestation records. **Do not dispatch this workflow during Goal 04B implementation or source review.**
 
 Every action in this new workflow is pinned to a full immutable commit SHA:
 
-| Action                                 | Reviewed upstream ref | Pinned SHA                                 |
-| -------------------------------------- | --------------------- | ------------------------------------------ |
-| actions/checkout                       | v4                    | `11d5960a326750d5838078e36cf38b85af677262` |
-| actions/setup-node                     | v4                    | `49933ea5288caeca8642d1e84afbd3f7d6820020` |
-| actions-rust-lang/setup-rust-toolchain | v1.16.1               | `46268bd060767258de96ed93c1251119784f2ab6` |
-| actions/attest                         | v4                    | `1e69f48acb82d1966a394da916b4c1698aa569d6` |
-| actions/upload-artifact                | v4                    | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
+| Action                  | Reviewed upstream ref | Pinned SHA                                 |
+| ----------------------- | --------------------- | ------------------------------------------ |
+| actions/checkout        | v4                    | `11d5960a326750d5838078e36cf38b85af677262` |
+| actions/setup-node      | v4                    | `49933ea5288caeca8642d1e84afbd3f7d6820020` |
+| actions/attest          | v4                    | `1e69f48acb82d1966a394da916b4c1698aa569d6` |
+| actions/upload-artifact | v4                    | `ea165f8d65b6e75b540449e92b4886f43607fa02` |
 
 The [GitHub attestation action](https://github.com/actions/attest) can generate a build-provenance predicate for explicit subject paths. Consumers must independently verify downloaded subjects and provenance, for example with the GitHub CLI's attestation verifier, and compare manifest version, source SHA, platform and digest to the intended release. An attestation is not proof that the code is vulnerability-free or that a compromised/misconfigured build could not produce malicious bytes.
 

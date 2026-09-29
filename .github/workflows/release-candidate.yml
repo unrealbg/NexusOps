@@ -32,13 +32,15 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev
-      # actions-rust-lang/setup-rust-toolchain v1.16.1
-      - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6
-        with:
-          toolchain: 1.98.1
-          components: rustfmt, clippy
-          cache: false
-          rustflags: ''
+      - name: Require hosted rustup and install fixed Rust toolchain
+        shell: bash
+        run: |
+          command -v rustup >/dev/null || { echo 'Preinstalled rustup is required' >&2; exit 1; }
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy --no-self-update
+          rustc --version | grep -Eq '^rustc 1\.98\.1 '
+          cargo --version | grep -Eq '^cargo 1\.98\.1 '
+          rustup component list --toolchain 1.98.1 --installed | grep -Eq '^rustfmt-'
+          rustup component list --toolchain 1.98.1 --installed | grep -Eq '^clippy-'
       - run: npm ci
       - run: npm run test:release
       - run: npm run typecheck
