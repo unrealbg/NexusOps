@@ -10,6 +10,42 @@ async function workflow() {
   return readFile(WORKFLOW, 'utf8');
 }
 
+function workflowSteps(source) {
+  const [beforeSteps, ...steps] = source.split(/^      - /m);
+  assert.ok(steps.length > 0);
+  return { beforeSteps, steps };
+}
+
+function namedStep(steps, name) {
+  const matches = steps.filter((step) => step.split(/\r?\n/, 1)[0] === `name: ${name}`);
+  assert.equal(matches.length, 1, `expected exactly one workflow step named ${name}`);
+  return matches[0];
+}
+
+const PLATFORM_STEPS = [
+  {
+    os: 'Windows',
+    bundleName: 'Bundle unsigned NSIS updater (Windows)',
+    signName: 'Sign staged NSIS payload (Windows)',
+    bundleFormat: 'nsis',
+    cli: 'tauri.cmd',
+  },
+  {
+    os: 'Linux',
+    bundleName: 'Bundle unsigned AppImage updater (Linux)',
+    signName: 'Sign staged AppImage payload (Linux)',
+    bundleFormat: 'appimage',
+    cli: 'tauri',
+  },
+  {
+    os: 'macOS',
+    bundleName: 'Bundle unsigned macOS updater archive',
+    signName: 'Sign staged macOS payload',
+    bundleFormat: 'app',
+    cli: 'tauri',
+  },
+];
+
 test('signed candidate workflow is manual, pinned, minimally privileged and has no bootstrap', async () => {
   const source = await workflow();
   assert.match(source, /^on:\s*\n  workflow_dispatch:\s*$/m);
@@ -28,37 +64,83 @@ test('signed candidate workflow is manual, pinned, minimally privileged and has 
   assert.doesNotMatch(source, /\bInvoke-WebRequest\b[^\r\n]*\|\s*(?:Invoke-Expression|iex|sh|bash)\b/i);
 });
 
-test('signing secrets exist only in bundle steps after secret-free quality and build', async () => {
+test('bundling and staging are secret-free before three narrow detached signer steps', async () => {
   const source = await workflow();
-  const firstSecret = source.indexOf('secrets.TAURI_SIGNING_PRIVATE_KEY');
-  const lastBuild = source.lastIndexOf('build --no-bundle -- --locked');
-  assert.ok(lastBuild > 0 && firstSecret > lastBuild);
+  const { beforeSteps, steps } = workflowSteps(source);
+  assert.doesNotMatch(beforeSteps, /TAURI_SIGNING_PRIVATE_KEY/);
   assert.match(source, /prepare-updater-bundle-config\.mjs --output/);
   assert.doesNotMatch(source, /beforeBundleCommand|beforeBuildCommand/);
-  const sections = source.split(/^      - name: /m).slice(1);
-  const signing = sections.filter((section) => section.includes('secrets.TAURI_SIGNING_PRIVATE_KEY'));
-  assert.equal(signing.length, 3);
-  for (const section of sections) {
-    if (!section.includes('secrets.TAURI_SIGNING_PRIVATE_KEY')) {
-      assert.doesNotMatch(section, /TAURI_SIGNING_PRIVATE_KEY(?:_PASSWORD)?/);
-      continue;
-    }
-    assert.match(section, /^Bundle and sign (?:NSIS updater \(Windows\)|AppImage updater \(Linux\)|macOS updater archive)/);
-    assert.match(section, /node tools\/release\/require-updater-signing-env\.mjs/);
-    assert.match(section, /bundle --bundles (?:nsis|appimage|app) --config "\$BUNDLE_CONFIG"/);
-    assert.doesNotMatch(section, /npm|cargo|build --no-bundle/);
+  const expectedSignerNames = PLATFORM_STEPS.map(({ signName }) => signName);
+  const secretBearing = steps.filter((step) => /TAURI_SIGNING_PRIVATE_KEY/.test(step));
+  assert.deepEqual(secretBearing.map((step) => /^name: ([^\r\n]+)/.exec(step)?.[1]), expectedSignerNames);
+  const signerSteps = steps.filter((step) => /\btauri(?:\.cmd)?\s+signer sign\b/.test(step));
+  assert.deepEqual(signerSteps, secretBearing);
+  assert.equal([...source.matchAll(/\$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/g)].length, 3);
+  assert.equal([...source.matchAll(/\$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY_PASSWORD \}\}/g)].length, 3);
+  for (const step of steps) {
+    if (!secretBearing.includes(step)) assert.doesNotMatch(step, /TAURI_SIGNING_PRIVATE_KEY/);
   }
-  assert.match(source, /node tools\/release\/stage-signed-updater-candidate\.mjs/);
-  assert.match(source, /node tools\/release\/verify-signed-updater-candidate\.mjs/);
-  assert.match(source, /\$\{\{ steps\.stage\.outputs\.signature_path \}\}/);
-  assert.match(source, /\$\{\{ steps\.stage\.outputs\.stage_dir \}\}\/signed-updater-candidate\.json/);
-  assert.doesNotMatch(source, /\blatest\.json\b|gh release|git tag|npm publish/);
-});
 
-test('each platform selects only its updater bundle format', async () => {
-  const source = await workflow();
-  assert.match(source, /if: runner\.os == 'Windows'[\s\S]*?bundle --bundles nsis --config/);
-  assert.match(source, /if: runner\.os == 'Linux'[\s\S]*?bundle --bundles appimage --config/);
-  assert.match(source, /if: runner\.os == 'macOS'[\s\S]*?bundle --bundles app --config/);
-  assert.doesNotMatch(source, /bundle --bundles (?:all|msi|deb|rpm)/);
+  const bundleSteps = steps.filter((step) => /\btauri(?:\.cmd)?\s+bundle\b/.test(step));
+  assert.equal(bundleSteps.length, 3);
+  const stageStep = namedStep(steps, 'Stage one unsigned updater payload');
+  assert.match(stageStep, /node tools\/release\/stage-updater-artifact\.mjs --stage/);
+  assert.match(stageStep, /^        id: stage$/m);
+  const stageIndex = steps.indexOf(stageStep);
+  assert.ok(stageIndex > Math.max(...bundleSteps.map((step) => steps.indexOf(step))));
+  const lastBuild = source.lastIndexOf('build --no-bundle -- --locked');
+  assert.ok(lastBuild > 0 && source.indexOf('secrets.TAURI_SIGNING_PRIVATE_KEY') > lastBuild);
+
+  for (const { os, bundleName, signName, bundleFormat, cli } of PLATFORM_STEPS) {
+    const bundle = namedStep(steps, bundleName);
+    assert.ok(bundleSteps.includes(bundle));
+    assert.match(bundle, new RegExp(`^        if: runner\\.os == '${os}'$`, 'm'));
+    const bundleCommands = bundle.split(/\r?\n/).filter((line) => /\btauri(?:\.cmd)?\s+bundle\b/.test(line));
+    assert.equal(bundleCommands.length, 1, `${bundleName} must call Tauri bundle once`);
+    const bundleCommand = bundleCommands[0];
+    assert.match(bundleCommand, new RegExp(`\\b${cli.replace('.', '\\.')} bundle\\b`));
+    assert.match(bundleCommand, new RegExp(`\\bbundle --bundles ${bundleFormat}\\b`));
+    assert.match(bundleCommand, /--no-sign\b/);
+    assert.match(bundleCommand, /--config "\$BUNDLE_CONFIG"/);
+    assert.doesNotMatch(bundle, /TAURI_SIGNING_PRIVATE_KEY|\bsecrets\./);
+
+    const signer = namedStep(steps, signName);
+    assert.ok(steps.indexOf(signer) > stageIndex);
+    assert.match(signer, new RegExp(`^        if: runner\\.os == '${os}'$`, 'm'));
+    assert.match(signer, /^          STAGED_ARTIFACT: \$\{\{ steps\.stage\.outputs\.artifact_path \}\}$/m);
+    assert.match(signer, /^          TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}$/m);
+    assert.match(signer, /^          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY_PASSWORD \}\}$/m);
+    assert.match(signer, /^\s*node tools\/release\/require-updater-signing-env\.mjs$/m);
+    assert.equal([...signer.matchAll(/\$\{\{ secrets\./g)].length, 2);
+    const signCommand = signer.split(/\r?\n/).find((line) => new RegExp(`\\b${cli.replace('.', '\\.')} signer sign\\b`).test(line));
+    assert.ok(signCommand, `${signName} must call the detached Tauri signer`);
+    assert.match(signCommand, /--app-version 0\.1\.0\b/);
+    assert.match(signCommand, /"\$STAGED_ARTIFACT"/);
+    const runBody = signer.split(/^        run: \|\r?\n/m)[1];
+    assert.ok(runBody, `${signName} needs a shell command block`);
+    assert.deepEqual(runBody.trim().split(/\r?\n/).map((line) => line.trim()), [
+      'node tools/release/require-updater-signing-env.mjs',
+      `./node_modules/.bin/${cli} signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"`,
+    ]);
+    assert.doesNotMatch(signer, /\btauri(?:\.cmd)?\s+(?:bundle|build)\b/i);
+    assert.doesNotMatch(signer, /\b(?:npm|npx|pnpm|yarn|bun|cargo|rustup|curl|wget|linuxdeploy|apt(?:-get)?|dnf|yum|pacman|apk|brew|choco|winget|scoop|pip3?|corepack)\b/i);
+  }
+
+  const metadataStep = namedStep(steps, 'Create and verify deterministic signed-candidate metadata');
+  assert.ok(steps.indexOf(metadataStep) > Math.max(...secretBearing.map((step) => steps.indexOf(step))));
+  assert.match(metadataStep, /node tools\/release\/create-signed-updater-candidate\.mjs --stage/);
+  assert.match(metadataStep, /node tools\/release\/verify-signed-updater-candidate\.mjs --stage/);
+  const attest = steps.find((step) => step.startsWith('uses: actions/attest@'));
+  const upload = steps.find((step) => step.startsWith('uses: actions/upload-artifact@'));
+  assert.ok(attest && upload);
+  assert.ok(steps.indexOf(attest) > steps.indexOf(metadataStep));
+  assert.ok(steps.indexOf(upload) > steps.indexOf(attest));
+  const subjects = /^          subject-path: \|\r?\n((?:^            [^\r\n]+\r?\n?)*)/m.exec(attest)?.[1]
+    ?.trim().split(/\r?\n/).map((line) => line.trim());
+  assert.deepEqual(subjects, [
+    '${{ steps.stage.outputs.artifact_path }}',
+    '${{ steps.stage.outputs.signature_path }}',
+    '${{ steps.stage.outputs.stage_dir }}/signed-updater-candidate.json',
+  ]);
+  assert.doesNotMatch(source, /bundle --bundles (?:all|msi|deb|rpm)|\blatest\.json\b|gh release|git tag|npm publish/);
 });

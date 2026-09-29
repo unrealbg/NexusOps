@@ -65,42 +65,63 @@ jobs:
         run: |
           canonical_temp="$(node --input-type=module -e 'import { realpathSync } from "node:fs"; process.stdout.write(realpathSync(process.env.RUNNER_TEMP));')"
           node tools/release/prepare-updater-bundle-config.mjs --output "$canonical_temp/nexusops-updater-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.json"
-      - name: Bundle and sign NSIS updater (Windows)
+      - name: Bundle unsigned NSIS updater (Windows)
         if: runner.os == 'Windows'
         shell: bash
         env:
           BUNDLE_CONFIG: ${{ steps.config.outputs.config_path }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          node tools/release/require-updater-signing-env.mjs
-          ./node_modules/.bin/tauri.cmd bundle --bundles nsis --config "$BUNDLE_CONFIG"
-      - name: Bundle and sign AppImage updater (Linux)
+          ./node_modules/.bin/tauri.cmd bundle --bundles nsis --no-sign --config "$BUNDLE_CONFIG"
+      - name: Bundle unsigned AppImage updater (Linux)
         if: runner.os == 'Linux'
         shell: bash
         env:
           BUNDLE_CONFIG: ${{ steps.config.outputs.config_path }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          node tools/release/require-updater-signing-env.mjs
-          ./node_modules/.bin/tauri bundle --bundles appimage --config "$BUNDLE_CONFIG"
-      - name: Bundle and sign macOS updater archive
+          ./node_modules/.bin/tauri bundle --bundles appimage --no-sign --config "$BUNDLE_CONFIG"
+      - name: Bundle unsigned macOS updater archive
         if: runner.os == 'macOS'
         shell: bash
         env:
           BUNDLE_CONFIG: ${{ steps.config.outputs.config_path }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          node tools/release/require-updater-signing-env.mjs
-          ./node_modules/.bin/tauri bundle --bundles app --config "$BUNDLE_CONFIG"
-      - name: Stage one signed updater artifact and signature
+          ./node_modules/.bin/tauri bundle --bundles app --no-sign --config "$BUNDLE_CONFIG"
+      - name: Stage one unsigned updater payload
         id: stage
         shell: bash
         run: |
           canonical_temp="$(node --input-type=module -e 'import { realpathSync } from "node:fs"; process.stdout.write(realpathSync(process.env.RUNNER_TEMP));')"
-          node tools/release/stage-signed-updater-candidate.mjs --stage "$canonical_temp/nexusops-signed-updater-stage"
+          node tools/release/stage-updater-artifact.mjs --stage "$canonical_temp/nexusops-signed-updater-stage"
+      - name: Sign staged NSIS payload (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          STAGED_ARTIFACT: ${{ steps.stage.outputs.artifact_path }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node tools/release/require-updater-signing-env.mjs
+          ./node_modules/.bin/tauri.cmd signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"
+      - name: Sign staged AppImage payload (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          STAGED_ARTIFACT: ${{ steps.stage.outputs.artifact_path }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node tools/release/require-updater-signing-env.mjs
+          ./node_modules/.bin/tauri signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"
+      - name: Sign staged macOS payload
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          STAGED_ARTIFACT: ${{ steps.stage.outputs.artifact_path }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          node tools/release/require-updater-signing-env.mjs
+          ./node_modules/.bin/tauri signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"
       - name: Create and verify deterministic signed-candidate metadata
         shell: bash
         env:

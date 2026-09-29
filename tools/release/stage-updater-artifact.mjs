@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { appendFile, copyFile, mkdir, readFile, readdir } from 'node:fs/promises';
+import { appendFile, copyFile, mkdir, readdir } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -8,18 +8,16 @@ import {
   detectPlatformArchitecture,
   hashOrdinaryFile,
   parseStageArgument,
-  stagedFileNames,
   verifyReleaseSource,
   verifyReleaseVersion,
 } from './release-common.mjs';
-import { updaterArtifactBasename } from './signed-updater-candidate.mjs';
-import { inspectUpdaterSignature } from './updater-signature.mjs';
+import { inspectUnsignedUpdaterStage, updaterArtifactBasename } from './signed-updater-candidate.mjs';
 
 function fail(message) {
   throw new Error(message);
 }
 
-export async function stageSignedUpdaterCandidate(
+export async function stageUpdaterArtifact(
   stage,
   root = REPOSITORY_ROOT,
   environment = process.env,
@@ -35,53 +33,32 @@ export async function stageSignedUpdaterCandidate(
   const bundleFolder = { windows: 'nsis', linux: 'appimage', macos: 'macos' }[platform];
   const bundleDir = join(targetRoot, 'release', 'bundle', bundleFolder);
   await assertOrdinaryPath(bundleDir, 'directory');
-  const artifacts = (await readdir(bundleDir)).filter((name) => {
-    try {
-      updaterArtifactBasename(name, identity);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-  if (artifacts.length !== 1) fail('bundle output has zero or multiple updater artifacts');
-  const artifactName = artifacts[0];
-  const signatureName = `${artifactName}.sig`;
+  const suffix = { windows: '-setup.exe', linux: '.AppImage', macos: '.app.tar.gz' }[platform];
+  const entries = await readdir(bundleDir, { withFileTypes: true });
+  if (entries.some((entry) => entry.name.endsWith('.sig')))
+    fail('bundle output unexpectedly contains a pre-signing signature');
+  const candidates = entries.filter((entry) => entry.name.endsWith(suffix));
+  if (candidates.length !== 1) fail('bundle output has zero or multiple updater payloads');
+  const artifactName = updaterArtifactBasename(candidates[0].name, identity);
   const artifactPath = join(bundleDir, artifactName);
-  const signaturePath = join(bundleDir, signatureName);
   await assertOrdinaryPath(artifactPath, 'file');
-  await assertOrdinaryPath(signaturePath, 'file');
-  inspectUpdaterSignature(await readFile(signaturePath), artifactName, productVersion);
 
   await assertOrdinaryPath(dirname(stage), 'directory');
   await mkdir(stage, { recursive: false });
   await assertOrdinaryPath(stage, 'directory');
   const stagedArtifact = join(stage, artifactName);
-  const stagedSignature = join(stage, signatureName);
   await copyFile(artifactPath, stagedArtifact, constants.COPYFILE_EXCL);
-  await copyFile(signaturePath, stagedSignature, constants.COPYFILE_EXCL);
-  for (const [source, destination] of [
-    [artifactPath, stagedArtifact],
-    [signaturePath, stagedSignature],
-  ]) {
-    const [before, after] = await Promise.all([
-      hashOrdinaryFile(source),
-      hashOrdinaryFile(destination),
-    ]);
-    if (before.bytes !== after.bytes || before.sha256 !== after.sha256)
-      fail('staged updater file differs from bundle output');
-  }
-  const names = await stagedFileNames(stage);
-  if (
-    names.length !== 2 ||
-    !names.includes(artifactName) ||
-    !names.includes(signatureName)
-  ) {
-    fail('signed updater stage contains unexpected entries');
-  }
+  const [before, after] = await Promise.all([
+    hashOrdinaryFile(artifactPath),
+    hashOrdinaryFile(stagedArtifact),
+  ]);
+  if (before.bytes !== after.bytes || before.sha256 !== after.sha256)
+    fail('staged updater payload differs from bundle output');
+  await inspectUnsignedUpdaterStage(stage, identity);
   return {
     stage,
     stagedArtifact,
-    stagedSignature,
+    stagedSignature: `${stagedArtifact}.sig`,
     artifactName: `NexusOps-updater-${productVersion}-${platform}-${architecture}-${sourceCommit.slice(0, 8)}`,
   };
 }
@@ -89,7 +66,7 @@ export async function stageSignedUpdaterCandidate(
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const stage = parseStageArgument(process.argv.slice(2));
-    const result = await stageSignedUpdaterCandidate(stage);
+    const result = await stageUpdaterArtifact(stage);
     if (process.env.GITHUB_OUTPUT) {
       for (const value of [
         result.stage,
@@ -110,9 +87,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         ].join('\n'),
       );
     }
-    console.log(`Staged one signed updater candidate: ${result.artifactName}`);
+    console.log(`Staged one unsigned updater payload: ${result.artifactName}`);
   } catch (error) {
-    console.error(`Signed updater staging failed: ${error.message}`);
+    console.error(`Unsigned updater staging failed: ${error.message}`);
     process.exitCode = 1;
   }
 }

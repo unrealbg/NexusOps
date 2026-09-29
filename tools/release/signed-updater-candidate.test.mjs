@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   canonicalSignedCandidate,
   createSignedCandidate,
+  inspectUnsignedUpdaterStage,
   updaterArtifactBasename,
   verifySignedCandidate,
 } from './signed-updater-candidate.mjs';
@@ -67,10 +68,20 @@ function syntheticSignature(artifact = ARTIFACT, version = '0.1.0', signatureByt
   return Buffer.from(Buffer.from(lines.join('\n')).toString('base64'));
 }
 
-async function stage(t) {
+async function emptyStage(t) {
   const dir = await mkdtemp(join(await realpath(tmpdir()), 'nexusops-signed-candidate-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+async function unsignedStage(t) {
+  const dir = await emptyStage(t);
   await writeFile(join(dir, ARTIFACT), 'synthetic installer bytes');
+  return dir;
+}
+
+async function stage(t) {
+  const dir = await unsignedStage(t);
   await writeFile(join(dir, SIGNATURE), syntheticSignature());
   return dir;
 }
@@ -119,8 +130,49 @@ test('signature rejects empty, oversized, missing and ambiguous version binding'
   assert.throws(() => inspectUpdaterSignature(syntheticSignature(ARTIFACT, '0.2.0'), ARTIFACT, '0.1.0'));
 });
 
-test('candidate metadata is deterministic and verifies the exact synthetic pair', async (t) => {
-  const dir = await stage(t);
+test('unsigned staging accepts exactly one expected payload before signing', async (t) => {
+  const dir = await unsignedStage(t);
+  const inspected = await inspectUnsignedUpdaterStage(dir, IDENTITY);
+  assert.equal(inspected.artifactName, ARTIFACT);
+  assert.equal(inspected.artifact.bytes, Buffer.byteLength('synthetic installer bytes'));
+  assert.match(inspected.artifact.sha256, /^[0-9a-f]{64}$/);
+});
+
+for (const [label, prepare] of [
+  ['missing artifact', async () => {}],
+  ['wrong basename', async (dir) => writeFile(join(dir, 'NexusOps_0.1.0_arm64-setup.exe'), 'wrong architecture')],
+  ['multiple candidates', async (dir) => {
+    await writeFile(join(dir, ARTIFACT), 'synthetic installer bytes');
+    await writeFile(join(dir, 'NexusOps_0.1.0_arm64-setup.exe'), 'another installer');
+  }],
+  ['unexpected staged entry', async (dir) => {
+    await writeFile(join(dir, ARTIFACT), 'synthetic installer bytes');
+    await writeFile(join(dir, 'extra.txt'), 'not an updater payload');
+  }],
+]) {
+  test(`unsigned staging rejects ${label}`, async (t) => {
+    const dir = await emptyStage(t);
+    await prepare(dir);
+    await assert.rejects(inspectUnsignedUpdaterStage(dir, IDENTITY));
+  });
+}
+
+for (const [label, signature] of [
+  ['missing signature', null],
+  ['wrong version signature', syntheticSignature(ARTIFACT, '0.2.0')],
+  ['wrong artifact trusted-comment binding', syntheticSignature('other-setup.exe')],
+]) {
+  test(`post-sign metadata creation rejects ${label}`, async (t) => {
+    const dir = await unsignedStage(t);
+    if (signature) await writeFile(join(dir, SIGNATURE), signature);
+    await assert.rejects(createSignedCandidate(dir, IDENTITY, PUBLIC_KEY_SHA));
+  });
+}
+
+test('unsigned payload becomes a deterministic signed candidate after detached signing', async (t) => {
+  const dir = await unsignedStage(t);
+  await inspectUnsignedUpdaterStage(dir, IDENTITY);
+  await writeFile(join(dir, SIGNATURE), syntheticSignature());
   const created = await createSignedCandidate(dir, IDENTITY, PUBLIC_KEY_SHA);
   const verified = await verifySignedCandidate(dir, IDENTITY, PUBLIC_KEY_SHA);
   assert.deepEqual(verified, created);

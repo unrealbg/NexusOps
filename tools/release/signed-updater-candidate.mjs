@@ -91,6 +91,16 @@ export function validateSignedCandidate(metadata, identity, publicKeySha256) {
   return artifactName;
 }
 
+export async function inspectUnsignedUpdaterStage(stage, identity) {
+  validateIdentity(identity);
+  const names = await stagedFileNames(stage);
+  if (names.length !== 1) fail('unsigned updater stage must contain exactly one payload');
+  const artifactName = updaterArtifactBasename(names[0], identity);
+  const artifact = await hashOrdinaryFile(join(stage, artifactName));
+  if (artifact.bytes <= 0) fail('unsigned updater payload is empty');
+  return { artifactName, artifact };
+}
+
 async function inspectStage(stage, identity) {
   validateIdentity(identity);
   const names = await stagedFileNames(stage);
