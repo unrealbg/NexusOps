@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -25,7 +25,7 @@ function updaterConfig(pubkey) {
 }
 
 async function fixture(t) {
-  const root = await mkdtemp(join(tmpdir(), 'nexusops-tauri-generation-'));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'nexusops-tauri-generation-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'apps/desktop/src-tauri'), { recursive: true });
   await mkdir(join(root, 'apps/desktop/src-tauri/capabilities'), { recursive: true });
