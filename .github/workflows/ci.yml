@@ -31,6 +31,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
+      - run: npm run test:release
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
@@ -41,6 +42,7 @@ jobs:
         run: cargo test --workspace --lib --bins --locked
       - name: Local SSH integration tests
         run: cargo test -p nexus-ssh --test loopback --locked
+      - run: npm run release:verify
       - name: Protocol drift check
         run: cargo run -p nexus-core --example export_protocol --locked -- --check
       - name: Production desktop build

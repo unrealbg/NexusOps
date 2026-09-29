@@ -11,6 +11,12 @@
     "typecheck": "tsc --noEmit -p apps/desktop/tsconfig.json",
     "lint": "eslint apps/desktop/src packages/ui/src apps/desktop/vite.config.ts eslint.config.js",
     "test": "vitest run --config apps/desktop/vite.config.ts",
+    "release:verify": "node tools/release/verify-release-version.mjs",
+    "release:source": "node tools/release/verify-release-source.mjs",
+    "release:stage": "node tools/release/stage-release-candidate.mjs",
+    "release:manifest": "node tools/release/create-release-manifest.mjs",
+    "release:manifest:verify": "node tools/release/verify-release-manifest.mjs",
+    "test:release": "node --test tools/release/release-version.test.mjs tools/release/release-manifest.test.mjs tools/release/release-source.test.mjs",
     "format:frontend": "prettier --write \"apps/desktop/src/**/*.{ts,tsx,css,html}\" \"packages/ui/src/**/*.{tsx,css}\" apps/desktop/vite.config.ts eslint.config.js",
     "tauri": "npm exec --workspace @nexusops/desktop -- tauri"
   },

@@ -64,6 +64,8 @@ npm run tauri -- build --no-bundle
 
 The local SSH integration fixture binds loopback and generates its own keys. It does not require a VPS or system SSH daemon. The OS-keychain integration test is explicitly ignored by default because it needs an unlocked interactive keychain; see [setup and tests](docs/development/setup.md). Goal 01A's security baseline is in its [verification report](docs/validation/goal-01a-report.md). Goal 02A's terminal evidence is in the [terminal report](docs/validation/goal-02a-terminal-report.md).
 
+The [release integrity foundation](docs/release/release-integrity.md) verifies version consistency and deterministic SHA-256 manifests for a native production executable. Its provenance workflow is manual and does not publish a GitHub Release or add an updater to NexusOps.
+
 Architecture, threat model, important limitations and architectural decisions are documented in [architecture](docs/architecture/overview.md), [monitoring](docs/architecture/monitoring.md), [terminal architecture](docs/architecture/terminal.md), [SFTP files](docs/architecture/sftp.md), [remote text editor](docs/architecture/editor.md), [security](docs/security/threat-model.md) and [ADRs](docs/adr/0001-workspace-and-boundaries.md). There is no AI execution, generic command IPC, sudo integration, remote agent, tunnel, bastion or alerting.
 
 Licensed under MIT.
