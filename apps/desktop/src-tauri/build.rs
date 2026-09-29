@@ -44,6 +44,7 @@ fn main() {
             "list_transfers",
             "cancel_transfer",
             "plan_retry_transfer",
+            "check_for_update",
         ]),
     ))
     .expect("Tauri configuration and permission generation must succeed");

@@ -16,7 +16,7 @@
     "release:stage": "node tools/release/stage-release-candidate.mjs",
     "release:manifest": "node tools/release/create-release-manifest.mjs",
     "release:manifest:verify": "node tools/release/verify-release-manifest.mjs",
-    "test:release": "node --test tools/release/release-version.test.mjs tools/release/release-manifest.test.mjs tools/release/release-source.test.mjs tools/release/tauri-generation.test.mjs tools/release/signed-updater-candidate.test.mjs tools/release/signed-updater-workflow.test.mjs tools/release/prepare-updater-bundle-config.test.mjs",
+    "test:release": "node --test tools/release/release-version.test.mjs tools/release/release-manifest.test.mjs tools/release/release-source.test.mjs tools/release/tauri-generation.test.mjs tools/release/signed-updater-candidate.test.mjs tools/release/signed-updater-workflow.test.mjs tools/release/prepare-updater-bundle-config.test.mjs tools/release/update-ipc.test.mjs",
     "format:frontend": "prettier --write \"apps/desktop/src/**/*.{ts,tsx,css,html}\" \"packages/ui/src/**/*.{tsx,css}\" apps/desktop/vite.config.ts eslint.config.js",
     "tauri": "npm exec --workspace @nexusops/desktop -- tauri"
   },

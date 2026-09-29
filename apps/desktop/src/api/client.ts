@@ -24,6 +24,7 @@ import type {
   RemoteTextDocument,
   SftpSessionInfo,
   TransferJob,
+  UpdateCheckSnapshot,
 } from '@nexusops/protocol';
 
 export function applicationError(error: unknown): AppError {
@@ -73,6 +74,11 @@ export const hostApi = {
   trust: (hostId: string, challenge: HostKeyChallenge) =>
     request<void>('trust_host_key', { hostId, challenge }),
   refresh: (hostId: string) => request<void>('refresh_host', { hostId }),
+};
+
+/** One explicit, argument-free native update availability check. */
+export const updateApi = {
+  check: () => request<UpdateCheckSnapshot>('check_for_update'),
 };
 
 /** Session-bound, fixed-command monitoring boundary. */

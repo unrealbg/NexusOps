@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { prepareUpdaterBundleConfig } from './prepare-updater-bundle-config.mjs';
+import { REPOSITORY_ROOT } from './release-common.mjs';
+import { UPDATER_ENDPOINT } from './tauri-generation.mjs';
 
 function git(root, args) {
   return execFileSync('git', args, {
@@ -19,14 +21,11 @@ async function fixture(t) {
   t.after(() => rm(parent, { recursive: true, force: true }));
   const root = join(parent, 'source');
   await mkdir(join(root, 'apps/desktop/src-tauri'), { recursive: true });
+  await mkdir(join(root, 'apps/desktop/src-tauri/capabilities'), { recursive: true });
   await mkdir(join(root, 'docs/release/keys'), { recursive: true });
-  const key = Buffer.alloc(42, 1);
-  key.write('Ed', 0, 'ascii');
-  const keyId = Buffer.from(key.subarray(2, 10)).reverse().toString('hex').toUpperCase();
-  const publicKey = Buffer.from(
-    `untrusted comment: minisign public key: ${keyId}\n${key.toString('base64')}\n`,
-  ).toString('base64');
+  const publicKey = await readFile(join(REPOSITORY_ROOT, 'docs/release/keys/nexusops-updater.pub'), 'utf8');
   await writeFile(join(root, 'docs/release/keys/nexusops-updater.pub'), publicKey);
+  await writeFile(join(root, 'package.json'), JSON.stringify({ dependencies: {}, devDependencies: {} }));
   await writeFile(join(root, 'apps/desktop/package.json'), JSON.stringify({
     dependencies: { '@tauri-apps/api': '2.12.0' },
     devDependencies: { '@tauri-apps/cli': '2.12.0' },
@@ -41,11 +40,21 @@ async function fixture(t) {
     'node_modules/@tauri-apps/cli-win32-x64-msvc': { version: '2.12.0' },
   } }));
   await writeFile(join(root, 'apps/desktop/src-tauri/Cargo.toml'),
-    '[dependencies]\ntauri = { version = "=2.12.0", features = [] }\n[build-dependencies]\ntauri-build = { version = "=2.7.0", features = [] }\n');
+    '[dependencies]\ntauri = { version = "=2.12.0", features = [] }\ntauri-plugin-updater = { version = "=2.13.1" }\n[build-dependencies]\ntauri-build = { version = "=2.7.0", features = [] }\n');
   await writeFile(join(root, 'Cargo.lock'),
-    '[[package]]\nname = "tauri"\nversion = "2.12.0"\n\n[[package]]\nname = "tauri-build"\nversion = "2.7.0"\n');
+    '[[package]]\nname = "tauri"\nversion = "2.12.0"\n\n[[package]]\nname = "tauri-build"\nversion = "2.7.0"\n\n[[package]]\nname = "tauri-plugin-updater"\nversion = "2.13.1"\n');
   await writeFile(join(root, 'apps/desktop/src-tauri/tauri.conf.json'),
-    JSON.stringify({ bundle: { createUpdaterArtifacts: true } }));
+    JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: {
+      pubkey: publicKey,
+      endpoints: [UPDATER_ENDPOINT],
+      requireSignedVersion: true,
+      allowDowngrades: false,
+      dangerousInsecureTransportProtocol: false,
+      dangerousAcceptInvalidCerts: false,
+      dangerousAcceptInvalidHostnames: false,
+    } } }));
+  await writeFile(join(root, 'apps/desktop/src-tauri/capabilities/main.json'),
+    JSON.stringify({ permissions: ['allow-check-for-update'] }));
   git(root, ['init', '-q']);
   git(root, ['add', '.']);
   git(root, ['-c', 'user.name=NexusOps Test', '-c', 'user.email=test@example.invalid',
@@ -59,9 +68,10 @@ test('temporary bundle overlay contains only the reviewed public key', async (t)
   assert.equal(await prepareUpdaterBundleConfig(output, root, { GITHUB_SHA: head }), output);
   assert.deepEqual(JSON.parse(await readFile(output, 'utf8')),
     { plugins: { updater: { pubkey: publicKey } } });
-  assert.deepEqual(JSON.parse(await readFile(
-    join(root, 'apps/desktop/src-tauri/tauri.conf.json'), 'utf8')),
-    { bundle: { createUpdaterArtifacts: true } });
+  const runtime = JSON.parse(await readFile(join(root, 'apps/desktop/src-tauri/tauri.conf.json'), 'utf8'));
+  assert.equal(runtime.plugins.updater.pubkey, publicKey);
+  assert.deepEqual(runtime.plugins.updater.endpoints, [UPDATER_ENDPOINT]);
+  assert.equal(runtime.plugins.updater.requireSignedVersion, true);
   await assert.rejects(prepareUpdaterBundleConfig(output, root, { GITHUB_SHA: head }),
     /EEXIST/);
 });

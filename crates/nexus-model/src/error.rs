@@ -33,6 +33,7 @@ pub enum ErrorCode {
     LocalAccess,
     Transfer,
     OutcomeUnknown,
+    UpdateCheck,
 }
 
 /// Safe user-visible failure. Never put raw library errors or remote output in message.

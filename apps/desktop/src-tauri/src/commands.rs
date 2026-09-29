@@ -1,10 +1,11 @@
 use crate::local_access::LocalAccessService;
+use crate::updates::UpdateCheckService;
 use nexus_core::Application;
 use nexus_model::{
     AppError, ContainerSnapshot, Host, HostId, HostInput, HostKeyChallenge, HostKeyRotationPlan,
     HostKeyRotationPlanId, HostMonitorSample, HostSession, HostSessionId, NetworkSnapshot,
     ServiceSnapshot, SshEndpointTrust, SystemJournalSnapshot, TerminalOutputBatch, TerminalSession,
-    TerminalSessionId, TerminalSize,
+    TerminalSessionId, TerminalSize, UpdateCheckSnapshot,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -13,6 +14,14 @@ use nexus_model::{
 use nexus_secrets::CredentialInput;
 use serde::Deserialize;
 use tauri::State;
+
+#[tauri::command]
+pub async fn check_for_update(
+    app: tauri::AppHandle,
+    service: State<'_, UpdateCheckService>,
+) -> Result<UpdateCheckSnapshot, AppError> {
+    service.check(&app).await
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

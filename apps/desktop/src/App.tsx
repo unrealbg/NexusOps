@@ -7,6 +7,7 @@ import { hostApi, applicationError } from './api/client';
 import { hostKeys, useHosts } from './api/queries';
 import { useSelection } from './state/selection';
 import { HostSidebar } from './components/HostSidebar';
+import { UpdateCheck } from './components/UpdateCheck';
 import { HostForm } from './features/hosts/HostForm';
 import { HostList } from './features/hosts/HostList';
 import { HostOverview } from './features/overview/HostOverview';
@@ -95,10 +96,13 @@ export default function App() {
             <span>{selectedHost?.displayName ?? 'Overview'}</span>
             {selectedHost && <span>{section === 'terminal' ? 'Terminal' : section === 'files' ? 'Files' : section === 'services' ? 'Services' : section === 'network' ? 'Network' : section === 'security' ? 'Security' : section === 'logs' ? 'Logs' : section === 'containers' ? 'Containers' : 'Overview'}</span>}
           </div>
-          <span className="topbar-label">
-            <span className="local-dot" />
-            Local control plane
-          </span>
+          <div className="topbar-actions">
+            <UpdateCheck />
+            <span className="topbar-label">
+              <span className="local-dot" />
+              Local control plane
+            </span>
+          </div>
         </div>
         <main
           id="main-content"
