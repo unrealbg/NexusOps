@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -15,7 +15,7 @@ function git(root, args) {
 }
 
 async function fixture(t) {
-  const parent = await mkdtemp(join(tmpdir(), 'nexusops-public-bundle-config-'));
+  const parent = await mkdtemp(join(await realpath(tmpdir()), 'nexusops-public-bundle-config-'));
   t.after(() => rm(parent, { recursive: true, force: true }));
   const root = join(parent, 'source');
   await mkdir(join(root, 'apps/desktop/src-tauri'), { recursive: true });

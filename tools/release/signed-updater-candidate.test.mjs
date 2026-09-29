@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -68,7 +68,7 @@ function syntheticSignature(artifact = ARTIFACT, version = '0.1.0', signatureByt
 }
 
 async function stage(t) {
-  const dir = await mkdtemp(join(tmpdir(), 'nexusops-signed-candidate-'));
+  const dir = await mkdtemp(join(await realpath(tmpdir()), 'nexusops-signed-candidate-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, ARTIFACT), 'synthetic installer bytes');
   await writeFile(join(dir, SIGNATURE), syntheticSignature());
