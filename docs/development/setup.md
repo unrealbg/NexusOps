@@ -76,6 +76,8 @@ CI runs frontend checks, Rust formatting/Clippy/tests, protocol verification and
 
 Goal 04B adds `npm run release:verify` and `npm run test:release` to normal Quality CI. These check product-version consistency and synthetic release-tool regressions without publishing anything. The separate [release integrity foundation](../release/release-integrity.md) documents deterministic staging, SHA-256 manifests and the owner-invoked candidate workflow. Do not run that manual workflow as part of normal development or source review: it uploads artifacts and creates external attestations.
 
+Goal 04C keeps normal Quality secret-free: `npm run release:verify` now also validates exact Tauri 2.12 dependency resolution, `createUpdaterArtifacts=true`, and the committed public updater key. `npm run test:release` exercises synthetic signature/metadata tampering and missing-key failure. The ordinary `tauri build --no-bundle -- --locked` still needs no updater private key. The [signed updater artifact foundation](../release/signed-updater-artifacts.md) documents the separate manual workflow, which must not be dispatched during implementation or source review. Owner-managed signing secrets are not prerequisites for local or hosted Quality.
+
 ## Data and troubleshooting
 
 Tauri resolves the per-user app-data directory for `org.nexusops.desktop`. Typical locations are `%APPDATA%/org.nexusops.desktop` on Windows, `~/Library/Application Support/org.nexusops.desktop` on macOS and `$XDG_DATA_HOME/org.nexusops.desktop` (or `~/.local/share/...`) on Linux. Use the OS keychain unlock UI for `secureStorage` errors. Never work around them by saving credentials to config files.

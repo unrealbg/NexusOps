@@ -17,5 +17,5 @@
       "freezePrototype": true
     }
   },
-  "bundle": { "active": true, "targets": "all", "shortDescription": "An agentless infrastructure control plane", "category": "DeveloperTool", "icon": ["icons/icon.ico", "icons/icon.png"] }
+  "bundle": { "active": true, "targets": "all", "createUpdaterArtifacts": true, "shortDescription": "An agentless infrastructure control plane", "category": "DeveloperTool", "icon": ["icons/icon.ico", "icons/icon.png"] }
 }
