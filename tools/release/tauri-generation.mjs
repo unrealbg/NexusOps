@@ -1,11 +1,17 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { REPOSITORY_ROOT, readJson } from './release-common.mjs';
+import { verifyUpdaterPublicKey } from './updater-public-key.mjs';
 
 export const TAURI_API_VERSION = '2.12.0';
 export const TAURI_CLI_VERSION = '2.12.0';
 export const TAURI_RUST_VERSION = '2.12.0';
 export const TAURI_BUILD_VERSION = '2.7.0';
+export const TAURI_UPDATER_VERSION = '2.13.1';
+export const UPDATER_PUBLIC_KEY_SHA256 =
+  '19215ba156d83fe9629e235dc06ab54ec6f9d30f07fd54c3c63adf62282615dd';
+export const UPDATER_ENDPOINT =
+  'https://github.com/unrealbg/NexusOps/releases/latest/download/latest.json';
 
 function fail(message) {
   throw new Error(message);
@@ -46,15 +52,39 @@ function expect(actual, expected, label) {
   if (actual !== expected) fail(`${label} must be exactly ${expected}`);
 }
 
+function expectExactKeys(value, expected, label) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value))
+    fail(`${label} must be an object`);
+  const actual = Object.keys(value).sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index]))
+    fail(`${label} must have exactly the reviewed fields`);
+}
+
+function rejectUpdaterJsDependency(manifest, label) {
+  for (const section of ['dependencies', 'devDependencies', 'optionalDependencies']) {
+    if (Object.hasOwn(manifest?.[section] ?? {}, '@tauri-apps/plugin-updater'))
+      fail(`${label} must not directly depend on the updater JavaScript package`);
+  }
+}
+
 export async function verifyTauriGeneration(root = REPOSITORY_ROOT) {
   const tauriDirectory = join(root, 'apps/desktop/src-tauri');
-  const [desktop, npmLock, rustManifest, cargoLock, config] = await Promise.all([
+  const [rootPackage, desktop, npmLock, rustManifest, cargoLock, config, capability, publicKey] = await Promise.all([
+    readJson(join(root, 'package.json'), 'root package.json'),
     readJson(join(root, 'apps/desktop/package.json'), 'desktop package.json'),
     readJson(join(root, 'package-lock.json'), 'package-lock.json'),
     readFile(join(root, 'apps/desktop/src-tauri/Cargo.toml'), 'utf8'),
     readFile(join(root, 'Cargo.lock'), 'utf8'),
     readJson(join(root, 'apps/desktop/src-tauri/tauri.conf.json'), 'tauri.conf.json'),
+    readJson(join(root, 'apps/desktop/src-tauri/capabilities/main.json'), 'main capability'),
+    verifyUpdaterPublicKey(root),
   ]);
+  rejectUpdaterJsDependency(rootPackage, 'root package.json');
+  rejectUpdaterJsDependency(desktop, 'desktop package.json');
+  rejectUpdaterJsDependency(npmLock.packages?.[''], 'locked root package');
+  rejectUpdaterJsDependency(npmLock.packages?.['apps/desktop'], 'locked desktop package');
+  if (Object.hasOwn(npmLock.packages ?? {}, 'node_modules/@tauri-apps/plugin-updater'))
+    fail('updater JavaScript package must be absent from package-lock.json');
   expect(desktop.dependencies?.['@tauri-apps/api'], TAURI_API_VERSION, 'direct Tauri API');
   expect(desktop.devDependencies?.['@tauri-apps/cli'], TAURI_CLI_VERSION, 'direct Tauri CLI');
   expect(
@@ -92,10 +122,50 @@ export async function verifyTauriGeneration(root = REPOSITORY_ROOT) {
   );
   expect(cargoLockedVersion(cargoLock, 'tauri'), TAURI_RUST_VERSION, 'locked Rust Tauri');
   expect(cargoLockedVersion(cargoLock, 'tauri-build'), TAURI_BUILD_VERSION, 'locked Rust tauri-build');
+  expect(
+    cargoDirectVersion(rustManifest, 'dependencies', 'tauri-plugin-updater'),
+    TAURI_UPDATER_VERSION,
+    'direct Rust updater plugin',
+  );
+  expect(
+    cargoLockedVersion(cargoLock, 'tauri-plugin-updater'),
+    TAURI_UPDATER_VERSION,
+    'locked Rust updater plugin',
+  );
   if (config.bundle?.createUpdaterArtifacts !== true)
     fail('Tauri createUpdaterArtifacts must be true');
-  if (config.plugins && Object.keys(config.plugins).length > 0)
-    fail('Tauri runtime plugin configuration is not allowed in Goal 04C');
+  expect(publicKey.sha256, UPDATER_PUBLIC_KEY_SHA256, 'reviewed updater public key SHA-256');
+  expectExactKeys(config.plugins, ['updater'], 'Tauri runtime plugins');
+  const updater = config.plugins.updater;
+  expectExactKeys(
+    updater,
+    [
+      'allowDowngrades',
+      'dangerousAcceptInvalidCerts',
+      'dangerousAcceptInvalidHostnames',
+      'dangerousInsecureTransportProtocol',
+      'endpoints',
+      'pubkey',
+      'requireSignedVersion',
+    ],
+    'Tauri updater configuration',
+  );
+  expect(updater.pubkey, publicKey.encodedPublicKey, 'Tauri updater public key');
+  if (!Array.isArray(updater.endpoints) || updater.endpoints.length !== 1)
+    fail('Tauri updater must have exactly one endpoint');
+  expect(updater.endpoints[0], UPDATER_ENDPOINT, 'Tauri updater endpoint');
+  expect(updater.requireSignedVersion, true, 'Tauri requireSignedVersion');
+  expect(updater.allowDowngrades, false, 'Tauri allowDowngrades');
+  expect(updater.dangerousInsecureTransportProtocol, false, 'Tauri dangerousInsecureTransportProtocol');
+  expect(updater.dangerousAcceptInvalidCerts, false, 'Tauri dangerousAcceptInvalidCerts');
+  expect(updater.dangerousAcceptInvalidHostnames, false, 'Tauri dangerousAcceptInvalidHostnames');
+  if (!Array.isArray(capability.permissions) ||
+      capability.permissions.some((permission) => typeof permission !== 'string'))
+    fail('main capability permissions must be strings');
+  if (capability.permissions.filter((permission) => permission === 'allow-check-for-update').length !== 1)
+    fail('main capability must grant exactly one custom allow-check-for-update permission');
+  if (capability.permissions.some((permission) => permission.startsWith('updater:')))
+    fail('main capability must not grant direct updater plugin permissions');
   if (config.build?.beforeBundleCommand)
     fail('Tauri beforeBundleCommand would run under signing credentials');
   const platformConfigs = (await readdir(tauriDirectory)).filter((name) =>

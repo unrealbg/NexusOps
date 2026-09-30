@@ -19,8 +19,10 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json"] }
 tracing-appender = "0.2.4"
 tokio.workspace = true
 tauri-plugin-clipboard-manager = "=2.3.2"
+tauri-plugin-updater = { version = "=2.13.1" }
 rfd = "=0.17.2"
 serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

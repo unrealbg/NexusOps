@@ -14,6 +14,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         CredentialInput::decl(&config),
         ErrorCode::decl(&config),
         AppError::decl(&config),
+        UpdateCheckStatus::decl(&config),
+        UpdateCheckSnapshot::decl(&config),
         HostKeyChallenge::decl(&config),
         HostFingerprint::decl(&config),
         HostIdentity::decl(&config),

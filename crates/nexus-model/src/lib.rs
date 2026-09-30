@@ -10,6 +10,7 @@ mod services;
 mod session;
 mod sftp;
 mod terminal;
+mod update;
 pub use containers::*;
 pub use error::*;
 pub use host::*;
@@ -21,6 +22,7 @@ pub use services::*;
 pub use session::*;
 pub use sftp::*;
 pub use terminal::*;
+pub use update::*;
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;

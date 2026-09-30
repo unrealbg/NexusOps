@@ -459,10 +459,42 @@
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  height: 54px;
+  min-height: 54px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--border-soft);
-  padding: 0 32px;
+  padding: 8px 32px;
+  font-size: 11px;
+}
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  margin-left: auto;
+}
+.update-check {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+.update-check-status {
+  max-width: 245px;
+  color: var(--subtle);
+  line-height: 1.35;
+  text-align: right;
+}
+.update-check-detail {
+  display: block;
+}
+.update-check-status--error {
+  color: var(--danger);
+}
+.update-check-button {
+  flex-shrink: 0;
+  min-height: 30px;
+  padding: 6px 8px;
   font-size: 11px;
 }
 .breadcrumbs {
@@ -1342,6 +1374,10 @@ h1 {
   }
   .topbar {
     padding: 0 18px;
+    flex-wrap: wrap;
+  }
+  .topbar-actions {
+    max-width: 100%;
   }
   .topbar-label {
     display: none;
@@ -1423,7 +1459,17 @@ h1 {
     margin-bottom: 16px;
   }
   .topbar {
-    height: 42px;
+    min-height: 42px;
+    padding: 6px 18px;
+  }
+  .update-check {
+    flex-wrap: wrap;
+  }
+  .update-check-status {
+    max-width: none;
+    flex-basis: 100%;
+    order: 2;
+    text-align: left;
   }
   .metrics-grid {
     grid-template-columns: 1fr;

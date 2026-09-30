@@ -43,6 +43,8 @@ Logs requests a bounded current-boot system journal snapshot through one fixed `
 
 Containers requests one fixed `docker --host unix:///var/run/docker.sock container ls --last 64` inventory on entry/manual Refresh. Core binds the request to the exact host/session with independent one-per-host/four-global admission and post-I/O generation checks. Discovery validates selected JSON-lines metadata before publication. Rows and local filters remain component-local with no polling, persistence or container actions; see [Containers](containers.md). No reserved sidebar sections remain.
 
+The application-global manual update availability check is owned by desktop Rust because it uses the native Tauri updater plugin. The renderer calls one no-argument custom command, and desktop Rust reads a fixed HTTPS release manifest with no background work. It does not pass through host/session services or add Tauri dependencies to transport-independent crates; see [Manual updates](updates.md).
+
 ## Local data
 
 Each OS app-data profile contains `hosts.db`, `known-hosts.db`, `credentials.db`, `profile.lock`, `audit.jsonl` and structured application logs. Metadata uses SQLite schema version 1 and rejects newer schemas. Passwords, keys and passphrases are absent from the metadata schema. The vault stores only AES-256-GCM ciphertext with random nonces, bound to a credential revision ID using authenticated associated data. Its master key is a 32-byte OS secure-store entry, avoiding Windows credential blob size limits for large private keys.

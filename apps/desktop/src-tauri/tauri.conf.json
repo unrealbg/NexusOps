@@ -17,5 +17,16 @@
       "freezePrototype": true
     }
   },
-  "bundle": { "active": true, "targets": "all", "createUpdaterArtifacts": true, "shortDescription": "An agentless infrastructure control plane", "category": "DeveloperTool", "icon": ["icons/icon.ico", "icons/icon.png"] }
+  "bundle": { "active": true, "targets": "all", "createUpdaterArtifacts": true, "shortDescription": "An agentless infrastructure control plane", "category": "DeveloperTool", "icon": ["icons/icon.ico", "icons/icon.png"] },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZCNTdGQjUzMjA5QTI0RUMKUldUc0pKb2dVL3RYYTdoYXY0UDhIWCsyTVI1TVJDRWFUSHlvQllFZEJmQU1xa1Qrc1RycEU5M2MK",
+      "endpoints": ["https://github.com/unrealbg/NexusOps/releases/latest/download/latest.json"],
+      "requireSignedVersion": true,
+      "allowDowngrades": false,
+      "dangerousInsecureTransportProtocol": false,
+      "dangerousAcceptInvalidCerts": false,
+      "dangerousAcceptInvalidHostnames": false
+    }
+  }
 }
