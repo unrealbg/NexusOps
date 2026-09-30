@@ -1,26 +1,40 @@
-# Manual update availability check
+# Manual update check and verified download
 
-Goal 04D gives the application one user-triggered, application-global check for a newer NexusOps version. It does not download an updater artifact, verify its signature, install it, restart the application, or create a GitHub Release or `latest.json`. The product version remains `0.1.0`.
+Goal 04D introduced the explicit application-global availability check. Goal 04E adds a second explicit action that downloads the currently announced updater artifact, verifies its Minisign signature and authenticated version binding, and retains verified bytes only in bounded native memory. It does not install the update, restart the application, publish a release, or change the product version from `0.1.0`.
 
 ```text
 Renderer
-   │ check_for_update() / no arguments
+   │ get_update_state() once / explicit check_for_update()
    ▼
-Desktop Rust UpdateCheckService
-   │ one check globally / 15-second timeout / no updater proxy
-   ▼
-Tauri updater Rust plugin
-   │ fixed HTTPS manifest GET
-   ▼
-GitHub Releases release channel
+Desktop Rust UpdateService
+   │ one operation globally / opaque announcement identity
+   ├── Tauri updater check() ── fixed latest.json endpoint
+   └── explicit download_announced_update(id)
+          │ custom HTTPS client / fixed URL and redirect policy
+          │ 128 MiB hard ceiling / 300-second total timeout
+          ▼
+       streaming Minisign verification + signed-version comparison
+          │
+          ▼
+       verified bytes in native memory only
 ```
 
-The sole production endpoint is `https://github.com/unrealbg/NexusOps/releases/latest/download/latest.json`. It and the reviewed public key are embedded in Tauri configuration. The renderer cannot set the URL, headers, proxy, target, timeout, version or signature. It has the custom `allow-check-for-update` command permission and no direct updater plugin permission. The frontend invokes only `check_for_update()` through the typed application API, with no request object. Native Rust owns updater plugin registration and the service; transport-independent core and SSH crates have no Tauri updater dependency. The renderer CSP is unchanged because the network read runs in native Rust.
+The sole manifest endpoint remains `https://github.com/unrealbg/NexusOps/releases/latest/download/latest.json`. Tauri's Rust updater plugin performs only the Goal 04D check and newer-version comparison. The renderer cannot provide an endpoint, artifact URL, signature, key, headers, proxy, target, path, timeout, version, or bytes. It has three narrow custom commands and no direct `updater:*` permission: one-time state hydration, explicit check, and explicit download by opaque announcement ID. There is no startup check, polling, automatic retry, installer, or restart command.
 
-The backend admits at most one update check globally. An overlapping call fails immediately with a typed conflict and a safe message. A completed or failed call releases admission so another explicit click can retry. The button is disabled during its own request. Results and errors stay in component-local memory; there is no startup check, timer, polling, automatic retry or persisted history.
+The service owns one monotonic generation and the complete `Idle → Checking → UpdateAnnounced → Downloading → Verifying → Verified` lifecycle. An announcement is displayable transport metadata, not verified content. A new check invalidates an old announcement and any verified bytes before starting work. Download atomically consumes the exact retained announcement; a stale or reused ID fails closed. Any download or verification failure returns the service to Idle, so retry requires a fresh explicit check. Checking and downloading are mutually exclusive across the application. Generation overflow fails closed.
 
-Tauri's `check()` fetches and parses the manifest and uses its normal comparator, so only a version newer than the running app is announced. With `allowDowngrades=false`, same-version and older releases are not offered. The typed snapshot contains only `currentVersion`, `status` and `availableVersion`; `availableVersion` is null when up to date and is the announced version otherwise. The UI says “Update <version> is announced” and explains that download and installation are not enabled. It never calls an update *verified* after checking.
+Before granting download authority, native Rust validates the retained manifest version, signature representation, and artifact URL. The initial URL must be HTTPS on `github.com`, have no credentials or fragment, and be under `/unrealbg/NexusOps/releases/download/`. At most three redirects are allowed. Every redirect must remain HTTPS, contain no credentials or fragment, and use only `github.com`, `release-assets.githubusercontent.com`, or `objects.githubusercontent.com`. The custom Reqwest client disables proxies, preserves normal hostname and certificate validation, uses a 10-second connect timeout and a 300-second total operation timeout, and never retries automatically.
 
-The manifest is not cryptographically signed. HTTPS protects the transport according to normal TLS and GitHub distribution trust, but a compromised release channel could announce a false or malicious version. `requireSignedVersion=true` configures the trust policy for a future artifact download; it does not verify a check result. Minisign verification of downloaded bytes, trust in their signed comment, and comparison of that signed version to the announced version belong to Goal 04E. No download, signature verification, install or restart path exists in Goal 04D.
+`MAX_ARTIFACT_BYTES` is exactly `134_217_728` bytes (128 MiB). An oversized `Content-Length` is rejected before buffering, but its value is never used for an allocation above that ceiling. Checked arithmetic rejects each chunk before append if the total would exceed the limit, including when `Content-Length` is absent or dishonest. There is no unbounded fallback.
 
-Updater failures become a generic typed `updateCheck` error without URLs, redirects, manifest content, signatures, headers, proxy details, filesystem paths or raw network diagnostics. There is currently no published NexusOps GitHub Release or `latest.json`, so a real check may return this safe unavailable error. A failed new check clears any prior success text rather than presenting it as current truth.
+The committed updater public key is the only verification root. Native Rust structurally decodes the bounded Tauri signature, initializes `minisign-verify` streaming verification, and feeds every accepted chunk to the verifier while retaining the same bytes in the bounded buffer. Only after cryptographic verification succeeds does it inspect the authenticated trusted comment. Exactly one `version:` field is required. Valid SemVer values compare with deliberate leading-`v` equivalence; non-SemVer values require exact text equality. Missing, duplicate, ambiguous, or mismatched signed versions fail closed. Legacy signatures that cannot use streaming verification also fail closed.
+
+Only backend `Verified` state produces the wording “downloaded and verified against the NexusOps updater key.” Verified does not mean installed, OS-code-signed, notarized, reproducibly built, vulnerability-free, or ready after restart. Numeric download progress is intentionally absent because untrusted response length is not treated as user-visible truth.
+
+Announcement metadata, artifact bytes, signatures, trusted comments, redirects, headers, progress, opaque IDs, and verified state are not persisted to the application database, audit log, normal log, browser storage, or renderer state stores. Verified and partial bytes are dropped on failure, a new check, or shutdown. Shutdown aborts active work, waits only for bounded cleanup, and prevents a late transition to Verified. No secure-erasure claim is made.
+
+Errors cross IPC only through narrow update check, download, verification, resource-limit, timeout, conflict, or cancellation categories. Raw URLs, redirects, response bodies, signatures, comments, certificate data, paths, and Reqwest diagnostics stay native.
+
+The manifest is still fetched by `tauri-plugin-updater` `Updater::check()`. That inherited Goal 04D path has no explicit NexusOps response-size cap; this is accepted technical and security debt for Goal 04E. Every retained artifact URL, signature, and version is nevertheless validated before it can become download authority.
+
+There is no authorized production GitHub Release or `latest.json`. Positive cryptographic behavior is covered with disposable-key Rust tests and injected transport/state tests. A positive verified download from the real production endpoint has **not been executed** and must not be claimed until a separately authorized signed release exists.

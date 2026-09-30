@@ -24,7 +24,8 @@ import type {
   RemoteTextDocument,
   SftpSessionInfo,
   TransferJob,
-  UpdateCheckSnapshot,
+  UpdateAnnouncementId,
+  UpdateOperationSnapshot,
 } from '@nexusops/protocol';
 
 export function applicationError(error: unknown): AppError {
@@ -76,9 +77,12 @@ export const hostApi = {
   refresh: (hostId: string) => request<void>('refresh_host', { hostId }),
 };
 
-/** One explicit, argument-free native update availability check. */
+/** Narrow native updater boundary. Only an opaque current announcement can be downloaded. */
 export const updateApi = {
-  check: () => request<UpdateCheckSnapshot>('check_for_update'),
+  state: () => request<UpdateOperationSnapshot>('get_update_state'),
+  check: () => request<UpdateOperationSnapshot>('check_for_update'),
+  download: (announcementId: UpdateAnnouncementId) =>
+    request<UpdateOperationSnapshot>('download_announced_update', { announcementId }),
 };
 
 /** Session-bound, fixed-command monitoring boundary. */

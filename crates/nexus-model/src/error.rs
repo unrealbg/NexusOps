@@ -34,6 +34,11 @@ pub enum ErrorCode {
     Transfer,
     OutcomeUnknown,
     UpdateCheck,
+    UpdateDownload,
+    UpdateVerification,
+    UpdateResourceLimit,
+    UpdateTimeout,
+    UpdateConflict,
 }
 
 /// Safe user-visible failure. Never put raw library errors or remote output in message.

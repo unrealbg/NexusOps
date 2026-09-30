@@ -20,6 +20,10 @@ tracing-appender = "0.2.4"
 tokio.workspace = true
 tauri-plugin-clipboard-manager = "=2.3.2"
 tauri-plugin-updater = { version = "=2.13.1" }
+base64 = { version = "=0.22.1" }
+minisign-verify = { version = "=0.2.5" }
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls-no-provider", "stream"] }
+semver = { version = "=1.0.28" }
 rfd = "=0.17.2"
 serde.workspace = true
 serde_json.workspace = true

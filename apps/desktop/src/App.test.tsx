@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Host, UpdateCheckSnapshot } from '@nexusops/protocol';
+import type { Host, UpdateOperationSnapshot } from '@nexusops/protocol';
 import App from './App';
 import { containersApi, hostApi, securityApi, logsApi, updateApi } from './api/client';
 import { useSelection } from './state/selection';
@@ -13,7 +13,7 @@ vi.mock('./api/client', async (original) => ({
   securityApi: { get: vi.fn() },
   logsApi: { list: vi.fn() },
   containersApi: { list: vi.fn() },
-  updateApi: { check: vi.fn() },
+  updateApi: { state: vi.fn(), check: vi.fn(), download: vi.fn() },
   hostApi: {
     list: vi.fn(),
     save: vi.fn(),
@@ -42,25 +42,55 @@ beforeEach(() => {
   useSelection.setState({ hostId: null });
   vi.mocked(hostApi.list).mockResolvedValue([]);
   vi.mocked(hostApi.session).mockResolvedValue(disconnected);
-  vi.mocked(securityApi.get).mockResolvedValue({ hostId: host.id, hostname: host.connection.hostname, port: host.connection.port, authentication: host.connection.authentication, endpointPin: null });
+  vi.mocked(securityApi.get).mockResolvedValue({
+    hostId: host.id,
+    hostname: host.connection.hostname,
+    port: host.connection.port,
+    authentication: host.connection.authentication,
+    endpointPin: null,
+  });
   vi.mocked(containersApi.list).mockReset();
+  vi.mocked(updateApi.state).mockReset();
   vi.mocked(updateApi.check).mockReset();
+  vi.mocked(updateApi.download).mockReset();
+  vi.mocked(updateApi.state).mockResolvedValue({
+    currentVersion: '0.1.0',
+    phase: 'idle',
+    availableVersion: null,
+    announcementId: null,
+  });
 });
 
 describe('manual update availability check', () => {
   it('does not check on mount, disables while pending, and allows a second manual check', async () => {
-    let finishCheck!: (snapshot: UpdateCheckSnapshot) => void;
+    let finishCheck!: (snapshot: UpdateOperationSnapshot) => void;
     vi.mocked(updateApi.check)
-      .mockReturnValueOnce(new Promise((resolve) => { finishCheck = resolve; }))
-      .mockResolvedValueOnce({ currentVersion: '0.1.0', status: 'upToDate', availableVersion: null });
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          finishCheck = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({
+        currentVersion: '0.1.0',
+        phase: 'upToDate',
+        availableVersion: null,
+        announcementId: null,
+      });
     renderApp();
     await screen.findByText('Your next server starts here.');
+    await waitFor(() => expect(updateApi.state).toHaveBeenCalledTimes(1));
     expect(updateApi.check).not.toHaveBeenCalled();
+    expect(updateApi.download).not.toHaveBeenCalled();
 
     await userEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
     expect(updateApi.check).toHaveBeenCalledTimes(1);
     expect(screen.getByRole('button', { name: 'Checking…' })).toBeDisabled();
-    finishCheck({ currentVersion: '0.1.0', status: 'upToDate', availableVersion: null });
+    finishCheck({
+      currentVersion: '0.1.0',
+      phase: 'upToDate',
+      availableVersion: null,
+      announcementId: null,
+    });
     expect(await screen.findByText('NexusOps 0.1.0 is up to date.')).toBeInTheDocument();
     const checkButton = screen.getByRole('button', { name: 'Check for updates' });
     expect(checkButton).toBeEnabled();
@@ -71,21 +101,96 @@ describe('manual update availability check', () => {
     expect(await screen.findByText('NexusOps 0.1.0 is up to date.')).toBeInTheDocument();
   });
 
-  it('calls an available update announced and offers no download or install action', async () => {
+  it('calls an available update announced and offers only explicit download and verify', async () => {
     vi.mocked(updateApi.check).mockResolvedValue({
-      currentVersion: '0.1.0', status: 'updateAnnounced', availableVersion: '0.2.0',
+      currentVersion: '0.1.0',
+      phase: 'updateAnnounced',
+      availableVersion: '0.2.0',
+      announcementId: 'announcement-1',
     });
     renderApp();
+    await waitFor(() => expect(updateApi.state).toHaveBeenCalledTimes(1));
     await userEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
     expect(await screen.findByText('Update 0.2.0 is announced.')).toBeInTheDocument();
-    expect(screen.getByText('Download and installation are not enabled in this build.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Download is explicit. Installation is not enabled in this build.'),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/verified/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /download|install|restart|open release|copy url/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Download and verify' })).toBeEnabled();
+    expect(
+      screen.queryByRole('button', { name: /install|restart|open release|copy url/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('downloads the exact announcement once and says verified only after the backend result', async () => {
+    let finishDownload!: (snapshot: UpdateOperationSnapshot) => void;
+    vi.mocked(updateApi.check).mockResolvedValue({
+      currentVersion: '0.1.0',
+      phase: 'updateAnnounced',
+      availableVersion: '0.2.0',
+      announcementId: 'announcement-1',
+    });
+    vi.mocked(updateApi.download).mockReturnValue(
+      new Promise((resolve) => {
+        finishDownload = resolve;
+      }),
+    );
+    renderApp();
+    await waitFor(() => expect(updateApi.state).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Download and verify' }));
+    expect(updateApi.download).toHaveBeenCalledExactlyOnceWith('announcement-1');
+    expect(screen.getByText('Downloading and verifying…')).toBeInTheDocument();
+    expect(screen.queryByText(/was downloaded and verified/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Downloading…' })).toBeDisabled();
+
+    finishDownload({
+      currentVersion: '0.1.0',
+      phase: 'verified',
+      availableVersion: '0.2.0',
+      announcementId: null,
+    });
+    expect(
+      await screen.findByText(
+        'Update 0.2.0 was downloaded and verified against the NexusOps updater key.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Download and verify' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /install|restart/i })).not.toBeInTheDocument();
+  });
+
+  it('clears stale download authority on failure and requires a fresh check', async () => {
+    vi.mocked(updateApi.check).mockResolvedValue({
+      currentVersion: '0.1.0',
+      phase: 'updateAnnounced',
+      availableVersion: '0.2.0',
+      announcementId: 'stale-id',
+    });
+    vi.mocked(updateApi.download).mockRejectedValue({
+      code: 'updateConflict',
+      message: 'The update state changed. Check for updates again.',
+      hostKey: null,
+    });
+    renderApp();
+    await waitFor(() => expect(updateApi.state).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Download and verify' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The update state changed. Check for updates again.',
+    );
+    expect(screen.queryByText('Update 0.2.0 is announced.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Download and verify' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Check for updates' })).toBeEnabled();
   });
 
   it('removes stale success when a new manual check fails and shows the safe error', async () => {
     vi.mocked(updateApi.check)
-      .mockResolvedValueOnce({ currentVersion: '0.1.0', status: 'upToDate', availableVersion: null })
+      .mockResolvedValueOnce({
+        currentVersion: '0.1.0',
+        phase: 'upToDate',
+        availableVersion: null,
+        announcementId: null,
+      })
       .mockRejectedValueOnce({
         code: 'updateCheck',
         message: 'The update service could not be checked right now.',
@@ -96,7 +201,9 @@ describe('manual update availability check', () => {
     expect(await screen.findByText('NexusOps 0.1.0 is up to date.')).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('The update service could not be checked right now.');
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The update service could not be checked right now.',
+    );
     expect(screen.queryByText('NexusOps 0.1.0 is up to date.')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Check for updates' })).toBeEnabled();
     expect(updateApi.check).toHaveBeenCalledTimes(2);

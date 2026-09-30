@@ -21,28 +21,56 @@ function frontendSource(directory: string): string {
 }
 
 describe('update IPC boundary', () => {
-  it('invokes only the argument-free NexusOps command', async () => {
-    vi.mocked(invoke).mockResolvedValueOnce({
-      currentVersion: '0.1.0', status: 'upToDate', availableVersion: null,
+  it('uses no-argument state/check commands and only an opaque ID for download', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      currentVersion: '0.1.0',
+      phase: 'upToDate',
+      availableVersion: null,
+      announcementId: null,
     });
+    expect(updateApi.state.length).toBe(0);
     expect(updateApi.check.length).toBe(0);
+    expect(updateApi.download.length).toBe(1);
+    await updateApi.state();
     await updateApi.check();
-    expect(invoke).toHaveBeenCalledExactlyOnceWith('check_for_update', undefined);
+    await updateApi.download('opaque-announcement');
+    expect(invoke).toHaveBeenNthCalledWith(1, 'get_update_state', undefined);
+    expect(invoke).toHaveBeenNthCalledWith(2, 'check_for_update', undefined);
+    expect(invoke).toHaveBeenNthCalledWith(3, 'download_announced_update', {
+      announcementId: 'opaque-announcement',
+    });
   });
 
   it('has no direct updater plugin invocation or package import in runtime frontend source', () => {
     const repositorySource = join(process.cwd(), 'apps', 'desktop', 'src');
-    const source = frontendSource(existsSync(repositorySource) ? repositorySource : join(process.cwd(), 'src'));
+    const source = frontendSource(
+      existsSync(repositorySource) ? repositorySource : join(process.cwd(), 'src'),
+    );
     expect(source).not.toContain(['plugin', 'updater'].join(':') + '|');
     expect(source).not.toContain(['@tauri-apps', 'plugin-updater'].join('/'));
   });
 
-  it('does not schedule a check from the update control', () => {
-    const component = join(process.cwd(), 'apps', 'desktop', 'src', 'components', 'UpdateCheck.tsx');
+  it('hydrates state once without scheduling checks or polling', () => {
+    const component = join(
+      process.cwd(),
+      'apps',
+      'desktop',
+      'src',
+      'components',
+      'UpdateCheck.tsx',
+    );
     const source = readFileSync(
-      existsSync(component) ? component : join(process.cwd(), 'src', 'components', 'UpdateCheck.tsx'),
+      existsSync(component)
+        ? component
+        : join(process.cwd(), 'src', 'components', 'UpdateCheck.tsx'),
       'utf8',
     );
-    expect(source).not.toMatch(/\b(?:useEffect|setInterval|setTimeout)\b/);
+    expect(source.match(/useEffect\(\(\) =>/g)).toHaveLength(1);
+    expect(source).toContain('updateApi.state()');
+    expect(source).not.toMatch(/\b(?:setInterval|setTimeout)\b/);
+    const hydration = /useEffect\(\(\) => \{([^]*?)\n\s{2}\}, \[\]\);/.exec(source);
+    expect(hydration?.[1]).toContain('updateApi.state()');
+    expect(hydration?.[1]).not.toContain('updateApi.check');
+    expect(hydration?.[1]).not.toContain('updateApi.download');
   });
 });
