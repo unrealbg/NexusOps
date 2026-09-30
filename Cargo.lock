@@ -3035,12 +3035,16 @@ dependencies = [
 name = "nexus-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
+ "minisign-verify",
  "nexus-core",
  "nexus-model",
  "nexus-secrets",
  "nexus-sftp",
+ "reqwest",
  "rfd",
+ "semver",
  "serde",
  "serde_json",
  "tauri",

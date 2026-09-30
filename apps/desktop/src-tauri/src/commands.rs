@@ -1,11 +1,11 @@
 use crate::local_access::LocalAccessService;
-use crate::updates::UpdateCheckService;
+use crate::updates::UpdateService;
 use nexus_core::Application;
 use nexus_model::{
     AppError, ContainerSnapshot, Host, HostId, HostInput, HostKeyChallenge, HostKeyRotationPlan,
     HostKeyRotationPlanId, HostMonitorSample, HostSession, HostSessionId, NetworkSnapshot,
     ServiceSnapshot, SshEndpointTrust, SystemJournalSnapshot, TerminalOutputBatch, TerminalSession,
-    TerminalSessionId, TerminalSize, UpdateCheckSnapshot,
+    TerminalSessionId, TerminalSize, UpdateAnnouncementId, UpdateOperationSnapshot,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -18,9 +18,28 @@ use tauri::State;
 #[tauri::command]
 pub async fn check_for_update(
     app: tauri::AppHandle,
-    service: State<'_, UpdateCheckService>,
-) -> Result<UpdateCheckSnapshot, AppError> {
+    service: State<'_, UpdateService>,
+) -> Result<UpdateOperationSnapshot, AppError> {
     service.check(&app).await
+}
+
+#[tauri::command]
+pub fn get_update_state(
+    app: tauri::AppHandle,
+    service: State<'_, UpdateService>,
+) -> Result<UpdateOperationSnapshot, AppError> {
+    service.snapshot(app.package_info().version.to_string())
+}
+
+#[tauri::command]
+pub async fn download_announced_update(
+    app: tauri::AppHandle,
+    service: State<'_, UpdateService>,
+    announcement_id: UpdateAnnouncementId,
+) -> Result<UpdateOperationSnapshot, AppError> {
+    service
+        .download(app.package_info().version.to_string(), announcement_id)
+        .await
 }
 
 #[derive(Deserialize)]

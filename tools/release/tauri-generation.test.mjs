@@ -29,6 +29,7 @@ async function fixture(t) {
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'apps/desktop/src-tauri'), { recursive: true });
   await mkdir(join(root, 'apps/desktop/src-tauri/capabilities'), { recursive: true });
+  await mkdir(join(root, 'apps/desktop/src-tauri/src'), { recursive: true });
   await mkdir(join(root, 'docs/release/keys'), { recursive: true });
   const pubkey = await reviewedPublicKey();
   await writeFile(join(root, PUBLIC_KEY_FILE), pubkey);
@@ -56,18 +57,31 @@ async function fixture(t) {
   );
   await writeFile(
     join(root, 'apps/desktop/src-tauri/Cargo.toml'),
-    '[dependencies]\ntauri = { version = "=2.12.0", features = [] }\ntauri-plugin-updater = { version = "=2.13.1" }\n[build-dependencies]\ntauri-build = { version = "=2.7.0", features = [] }\n',
+    '[dependencies]\ntauri = { version = "=2.12.0", features = [] }\ntauri-plugin-updater = { version = "=2.13.1" }\nreqwest = { version = "=0.13.5" }\nminisign-verify = { version = "=0.2.5" }\nbase64 = { version = "=0.22.1" }\nsemver = { version = "=1.0.28" }\n[build-dependencies]\ntauri-build = { version = "=2.7.0", features = [] }\n',
   );
   await writeFile(
     join(root, 'Cargo.lock'),
-    '[[package]]\nname = "tauri"\nversion = "2.12.0"\n\n[[package]]\nname = "tauri-build"\nversion = "2.7.0"\n\n[[package]]\nname = "tauri-plugin-updater"\nversion = "2.13.1"\n',
+    '[[package]]\nname = "tauri"\nversion = "2.12.0"\n\n[[package]]\nname = "tauri-build"\nversion = "2.7.0"\n\n[[package]]\nname = "tauri-plugin-updater"\nversion = "2.13.1"\n\n[[package]]\nname = "reqwest"\nversion = "0.13.5"\n\n[[package]]\nname = "minisign-verify"\nversion = "0.2.5"\n\n[[package]]\nname = "base64"\nversion = "0.22.1"\n\n[[package]]\nname = "semver"\nversion = "1.0.28"\n',
   );
   await writeFile(
     join(root, 'apps/desktop/src-tauri/tauri.conf.json'),
     JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: updaterConfig(pubkey) } }),
   );
   await writeFile(join(root, 'apps/desktop/src-tauri/capabilities/main.json'),
-    JSON.stringify({ permissions: ['allow-list-hosts', 'allow-check-for-update'] }));
+    JSON.stringify({ permissions: ['allow-list-hosts', 'allow-get-update-state', 'allow-check-for-update', 'allow-download-announced-update'] }));
+  await writeFile(join(root, 'apps/desktop/src-tauri/src/update_download.rs'), [
+    'MAX_ARTIFACT_BYTES: usize = 134_217_728',
+    'CONNECT_TIMEOUT: Duration = Duration::from_secs(10)',
+    'DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300)',
+    'MAX_REDIRECTS: usize = 3',
+    '"/unrealbg/NexusOps/releases/download/"',
+    '"release-assets.githubusercontent.com"',
+    '"objects.githubusercontent.com"',
+    '.https_only(true)',
+    '.no_proxy()',
+  ].join('\n'));
+  await writeFile(join(root, 'apps/desktop/src-tauri/src/updates.rs'),
+    'bounded native update state');
   return root;
 }
 
@@ -197,10 +211,29 @@ test('renderer gets only the custom update command, with no direct updater capab
       capability.permissions.pop();
     });
   }
-  await changeJson(root, 'apps/desktop/src-tauri/capabilities/main.json', (capability) => {
-    capability.permissions.pop();
-  });
-  await assert.rejects(verifyTauriGeneration(root), /allow-check-for-update/);
+  for (const permission of [
+    'allow-get-update-state',
+    'allow-check-for-update',
+    'allow-download-announced-update',
+  ]) {
+    await changeJson(root, 'apps/desktop/src-tauri/capabilities/main.json', (capability) => {
+      capability.permissions = capability.permissions.filter((candidate) => candidate !== permission);
+    });
+    await assert.rejects(verifyTauriGeneration(root), new RegExp(permission));
+    await changeJson(root, 'apps/desktop/src-tauri/capabilities/main.json', (capability) => {
+      capability.permissions.push(permission);
+    });
+  }
+});
+
+test('bounded downloader policy rejects resource and trust regressions', async (t) => {
+  const root = await fixture(t);
+  const file = join(root, 'apps/desktop/src-tauri/src/update_download.rs');
+  const source = await readFile(file, 'utf8');
+  await writeFile(file, source.replace('134_217_728', '268_435_456'));
+  await assert.rejects(verifyTauriGeneration(root), /MAX_ARTIFACT_BYTES/);
+  await writeFile(file, `${source}\nUpdate::download();\n`);
+  await assert.rejects(verifyTauriGeneration(root), /Update::download/);
 });
 
 test('JavaScript updater package is rejected in direct and locked npm dependencies', async (t) => {

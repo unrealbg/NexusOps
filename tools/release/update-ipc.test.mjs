@@ -26,17 +26,28 @@ function parameters(signature) {
   return parts;
 }
 
-test('manual update IPC accepts only Tauri-injected app and state', async () => {
+test('update IPC exposes only hydration, check and opaque announcement download', async () => {
   const source = await readFile(desktop('src/commands.rs'), 'utf8');
-  const signatures = [
-    ...source.matchAll(
-      /#\[tauri::command\]\s*pub async fn check_for_update\s*\(([^)]*)\)\s*->/g,
-    ),
-  ];
-  assert.equal(signatures.length, 1, 'exactly one update command is required');
-  assert.deepEqual(parameters(signatures[0][1]), [
+  const signature = (name, kind = 'async ') => {
+    const match = new RegExp(
+      `#\\[tauri::command\\]\\s*pub ${kind}fn ${name}\\s*\\(([^)]*)\\)\\s*->`,
+    ).exec(source);
+    assert.ok(match, `${name} command must exist exactly once`);
+    assert.equal(source.match(new RegExp(`pub ${kind}fn ${name}\\b`, 'g'))?.length, 1);
+    return parameters(match[1]);
+  };
+  assert.deepEqual(signature('get_update_state', ''), [
     'app:tauri::AppHandle',
-    "service:State<'_,UpdateCheckService>",
+    "service:State<'_,UpdateService>",
+  ]);
+  assert.deepEqual(signature('check_for_update'), [
+    'app:tauri::AppHandle',
+    "service:State<'_,UpdateService>",
+  ]);
+  assert.deepEqual(signature('download_announced_update'), [
+    'app:tauri::AppHandle',
+    "service:State<'_,UpdateService>",
+    'announcement_id:UpdateAnnouncementId',
   ]);
 });
 
@@ -45,6 +56,8 @@ test('manual update IPC is registered in the app and permission generator', asyn
     readFile(desktop('src/main.rs'), 'utf8'),
     readFile(desktop('build.rs'), 'utf8'),
   ]);
-  assert.equal([...entry.matchAll(/commands::check_for_update/g)].length, 1);
-  assert.equal([...manifest.matchAll(/"check_for_update"/g)].length, 1);
+  for (const command of ['get_update_state', 'check_for_update', 'download_announced_update']) {
+    assert.equal([...entry.matchAll(new RegExp(`commands::${command}`, 'g'))].length, 1);
+    assert.equal([...manifest.matchAll(new RegExp(`"${command}"`, 'g'))].length, 1);
+  }
 });

@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod commands;
 mod local_access;
+mod update_download;
 mod updates;
 use nexus_core::Application;
 use tauri::Manager;
@@ -37,17 +38,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             app.manage(guard);
             app.manage(Application::open(&directory)?);
             app.manage(local_access::LocalAccessService::default());
-            app.manage(updates::UpdateCheckService::default());
+            app.manage(updates::UpdateService::default());
             tracing::info!(version=env!("CARGO_PKG_VERSION"),"NexusOps application ready");
             Ok(())
         })
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![commands::list_hosts,commands::save_host,commands::delete_host,commands::connect_host,commands::disconnect_host,commands::reconnect_host,commands::get_session,commands::get_host_ssh_trust,commands::trust_host_key,commands::plan_host_key_rotation,commands::execute_host_key_rotation,commands::refresh_host,commands::sample_host_monitor,commands::list_host_services,commands::list_host_network,commands::list_host_logs,commands::list_host_containers,commands::list_terminals,commands::open_terminal,commands::poll_terminal,commands::write_terminal,commands::resize_terminal,commands::rename_terminal,commands::close_terminal,commands::open_sftp,commands::list_remote_directory,commands::remote_properties,commands::open_remote_text_file,commands::plan_remote_text_save,commands::discard_remote_text_document,commands::choose_upload_files,commands::choose_download_directory,commands::plan_upload,commands::plan_download,commands::plan_create_directory,commands::plan_rename,commands::plan_delete,commands::execute_file_plan,commands::discard_file_plan,commands::discard_local_grant,commands::list_transfers,commands::cancel_transfer,commands::plan_retry_transfer,commands::check_for_update])
+        .invoke_handler(tauri::generate_handler![commands::list_hosts,commands::save_host,commands::delete_host,commands::connect_host,commands::disconnect_host,commands::reconnect_host,commands::get_session,commands::get_host_ssh_trust,commands::trust_host_key,commands::plan_host_key_rotation,commands::execute_host_key_rotation,commands::refresh_host,commands::sample_host_monitor,commands::list_host_services,commands::list_host_network,commands::list_host_logs,commands::list_host_containers,commands::list_terminals,commands::open_terminal,commands::poll_terminal,commands::write_terminal,commands::resize_terminal,commands::rename_terminal,commands::close_terminal,commands::open_sftp,commands::list_remote_directory,commands::remote_properties,commands::open_remote_text_file,commands::plan_remote_text_save,commands::discard_remote_text_document,commands::choose_upload_files,commands::choose_download_directory,commands::plan_upload,commands::plan_download,commands::plan_create_directory,commands::plan_rename,commands::plan_delete,commands::execute_file_plan,commands::discard_file_plan,commands::discard_local_grant,commands::list_transfers,commands::cancel_transfer,commands::plan_retry_transfer,commands::get_update_state,commands::check_for_update,commands::download_announced_update])
         .build(tauri::generate_context!())?;
     application.run(|app, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
             if let Err(error) =
+                tauri::async_runtime::block_on(app.state::<updates::UpdateService>().shutdown())
+            {
+                tracing::error!(code=?error.code, "Shutdown update cleanup did not quiesce");
+                api.prevent_exit();
+            } else if let Err(error) =
                 tauri::async_runtime::block_on(app.state::<Application>().shutdown())
             {
                 tracing::error!(code=?error.code, "Shutdown transfer cleanup did not quiesce");
