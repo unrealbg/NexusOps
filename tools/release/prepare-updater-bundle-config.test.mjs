@@ -66,6 +66,7 @@ async function fixture(t) {
     '"objects.githubusercontent.com"',
     '.https_only(true)',
     '.no_proxy()',
+    '.retry(reqwest::retry::never())',
   ].join('\n'));
   await writeFile(join(root, 'apps/desktop/src-tauri/src/updates.rs'),
     'bounded native update state');

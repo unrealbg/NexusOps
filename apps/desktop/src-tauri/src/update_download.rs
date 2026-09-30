@@ -119,6 +119,7 @@ async fn download_and_verify(
     let client = reqwest::Client::builder()
         .https_only(true)
         .no_proxy()
+        .retry(reqwest::retry::never())
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(DOWNLOAD_TIMEOUT)
         .redirect(redirect_policy())

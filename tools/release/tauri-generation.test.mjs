@@ -79,6 +79,7 @@ async function fixture(t) {
     '"objects.githubusercontent.com"',
     '.https_only(true)',
     '.no_proxy()',
+    '.retry(reqwest::retry::never())',
   ].join('\n'));
   await writeFile(join(root, 'apps/desktop/src-tauri/src/updates.rs'),
     'bounded native update state');
@@ -234,6 +235,8 @@ test('bounded downloader policy rejects resource and trust regressions', async (
   await assert.rejects(verifyTauriGeneration(root), /MAX_ARTIFACT_BYTES/);
   await writeFile(file, `${source}\nUpdate::download();\n`);
   await assert.rejects(verifyTauriGeneration(root), /Update::download/);
+  await writeFile(file, source.replace('.retry(reqwest::retry::never())', ''));
+  await assert.rejects(verifyTauriGeneration(root), /retry\(reqwest::retry::never/);
 });
 
 test('JavaScript updater package is rejected in direct and locked npm dependencies', async (t) => {

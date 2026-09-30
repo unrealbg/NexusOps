@@ -232,6 +232,7 @@ export async function verifyTauriGeneration(root = REPOSITORY_ROOT) {
     '"objects.githubusercontent.com"',
     '.https_only(true)',
     '.no_proxy()',
+    '.retry(reqwest::retry::never())',
   ];
   for (const fragment of requiredDownloadSource) {
     if (!downloadSource.includes(fragment)) fail(`bounded updater policy is missing ${fragment}`);
