@@ -55,7 +55,7 @@ async function fixture(t) {
       dangerousAcceptInvalidHostnames: false,
     } } }));
   await writeFile(join(root, 'apps/desktop/src-tauri/capabilities/main.json'),
-    JSON.stringify({ permissions: ['allow-get-update-state', 'allow-check-for-update', 'allow-download-announced-update'] }));
+    JSON.stringify({ permissions: ['allow-get-update-state', 'allow-check-for-update', 'allow-download-announced-update', 'allow-install-verified-update'] }));
   await writeFile(join(root, 'apps/desktop/src-tauri/src/update_download.rs'), [
     'MAX_ARTIFACT_BYTES: usize = 134_217_728',
     'CONNECT_TIMEOUT: Duration = Duration::from_secs(10)',
@@ -68,8 +68,17 @@ async function fixture(t) {
     '.no_proxy()',
     '.retry(reqwest::retry::never())',
   ].join('\n'));
-  await writeFile(join(root, 'apps/desktop/src-tauri/src/updates.rs'),
-    'bounded native update state');
+  await writeFile(join(root, 'apps/desktop/src-tauri/src/updates.rs'), [
+    '.restart_after_install(false)',
+    '.on_before_exit(|| {})',
+    'RetainedTauriUpdate::new(update)',
+    'installation_supported() && verified_artifact_id.is_some()',
+  ].join('\n'));
+  await writeFile(join(root, 'apps/desktop/src-tauri/src/update_install.rs'), [
+    '#[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))]',
+    'spawn_blocking',
+    'retained_update.install(bytes)',
+  ].join('\n'));
   git(root, ['init', '-q']);
   git(root, ['add', '.']);
   git(root, ['-c', 'user.name=NexusOps Test', '-c', 'user.email=test@example.invalid',

@@ -1,5 +1,6 @@
 use crate::lifecycle::LifecycleCoordinator;
 use crate::local_access::LocalAccessService;
+use crate::update_install;
 use crate::updates::UpdateService;
 use nexus_core::Application;
 use nexus_model::{
@@ -7,6 +8,7 @@ use nexus_model::{
     HostKeyRotationPlanId, HostMonitorSample, HostSession, HostSessionId, NetworkSnapshot,
     ServiceSnapshot, SshEndpointTrust, SystemJournalSnapshot, TerminalOutputBatch, TerminalSession,
     TerminalSessionId, TerminalSize, UpdateAnnouncementId, UpdateOperationSnapshot,
+    VerifiedArtifactId,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -47,6 +49,20 @@ pub async fn download_announced_update(
     service
         .download(app.package_info().version.to_string(), announcement_id)
         .await
+}
+
+#[tauri::command]
+pub async fn install_verified_update(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: tauri::AppHandle,
+    service: State<'_, UpdateService>,
+    verified_artifact_id: VerifiedArtifactId,
+) -> Result<(), AppError> {
+    let _permit = lifecycle.admit()?;
+    service.validate_install(verified_artifact_id)?;
+    _permit.seal_and_drain_others().await?;
+    let authority = service.consume_install(verified_artifact_id)?;
+    update_install::finish_install(app, authority).await
 }
 
 #[derive(Deserialize)]

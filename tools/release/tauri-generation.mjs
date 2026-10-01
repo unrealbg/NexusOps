@@ -94,6 +94,7 @@ export async function verifyTauriGeneration(root = REPOSITORY_ROOT) {
     publicKey,
     downloadSource,
     updateSource,
+    installSource,
   ] = await Promise.all([
     readJson(join(root, 'package.json'), 'root package.json'),
     readJson(join(root, 'apps/desktop/package.json'), 'desktop package.json'),
@@ -105,6 +106,7 @@ export async function verifyTauriGeneration(root = REPOSITORY_ROOT) {
     verifyUpdaterPublicKey(root),
     readFile(join(root, 'apps/desktop/src-tauri/src/update_download.rs'), 'utf8'),
     readFile(join(root, 'apps/desktop/src-tauri/src/updates.rs'), 'utf8'),
+    readFile(join(root, 'apps/desktop/src-tauri/src/update_install.rs'), 'utf8'),
   ]);
   rejectUpdaterJsDependency(rootPackage, 'root package.json');
   rejectUpdaterJsDependency(desktop, 'desktop package.json');
@@ -216,12 +218,17 @@ export async function verifyTauriGeneration(root = REPOSITORY_ROOT) {
     'allow-get-update-state',
     'allow-check-for-update',
     'allow-download-announced-update',
+    'allow-install-verified-update',
   ]) {
     if (capability.permissions.filter((candidate) => candidate === permission).length !== 1)
       fail(`main capability must grant exactly one custom ${permission} permission`);
   }
   if (capability.permissions.some((permission) => permission.startsWith('updater:')))
     fail('main capability must not grant direct updater plugin permissions');
+  for (const prefix of ['process:', 'shell:', 'fs:']) {
+    if (capability.permissions.some((permission) => permission.startsWith(prefix)))
+      fail(`main capability must not grant ${prefix} permissions`);
+  }
   const requiredDownloadSource = [
     'MAX_ARTIFACT_BYTES: usize = 134_217_728',
     'CONNECT_TIMEOUT: Duration = Duration::from_secs(10)',
@@ -240,6 +247,26 @@ export async function verifyTauriGeneration(root = REPOSITORY_ROOT) {
   for (const forbidden of ['download_and_install', '.install(', 'Update::download']) {
     if (downloadSource.includes(forbidden) || updateSource.includes(forbidden))
       fail(`runtime updater source must not contain ${forbidden}`);
+  }
+  if ((installSource.match(/\.install\s*\(/g) ?? []).length !== 1)
+    fail('dedicated installer module must contain exactly one production .install call');
+  for (const forbidden of ['download_and_install', 'Update::download']) {
+    if (installSource.includes(forbidden))
+      fail(`native installer source must not contain ${forbidden}`);
+  }
+  for (const fragment of [
+    '.restart_after_install(false)',
+    '.on_before_exit(|| {})',
+    'RetainedTauriUpdate::new(update)',
+    'installation_supported() && verified_artifact_id.is_some()',
+  ]) {
+    if (!updateSource.includes(fragment)) fail(`native updater state policy is missing ${fragment}`);
+  }
+  for (const fragment of [
+    '#[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))]',
+    'spawn_blocking',
+  ]) {
+    if (!installSource.includes(fragment)) fail(`native installer policy is missing ${fragment}`);
   }
   for (const forbiddenTls of [
     'danger_accept_invalid_certs(true)',

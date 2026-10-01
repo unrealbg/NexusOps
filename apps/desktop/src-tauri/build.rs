@@ -47,6 +47,7 @@ fn main() {
             "get_update_state",
             "check_for_update",
             "download_announced_update",
+            "install_verified_update",
         ]),
     ))
     .expect("Tauri configuration and permission generation must succeed");

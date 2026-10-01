@@ -13,7 +13,7 @@ vi.mock('./api/client', async (original) => ({
   securityApi: { get: vi.fn() },
   logsApi: { list: vi.fn() },
   containersApi: { list: vi.fn() },
-  updateApi: { state: vi.fn(), check: vi.fn(), download: vi.fn() },
+  updateApi: { state: vi.fn(), check: vi.fn(), download: vi.fn(), install: vi.fn() },
   hostApi: {
     list: vi.fn(),
     save: vi.fn(),
@@ -53,11 +53,14 @@ beforeEach(() => {
   vi.mocked(updateApi.state).mockReset();
   vi.mocked(updateApi.check).mockReset();
   vi.mocked(updateApi.download).mockReset();
+  vi.mocked(updateApi.install).mockReset();
   vi.mocked(updateApi.state).mockResolvedValue({
     currentVersion: '0.1.0',
     phase: 'idle',
     availableVersion: null,
     announcementId: null,
+    verifiedArtifactId: null,
+    installationSupported: false,
   });
 });
 
@@ -75,6 +78,8 @@ describe('manual update availability check', () => {
         phase: 'upToDate',
         availableVersion: null,
         announcementId: null,
+        verifiedArtifactId: null,
+        installationSupported: false,
       });
     renderApp();
     await screen.findByText('Your next server starts here.');
@@ -90,6 +95,8 @@ describe('manual update availability check', () => {
       phase: 'upToDate',
       availableVersion: null,
       announcementId: null,
+      verifiedArtifactId: null,
+      installationSupported: false,
     });
     expect(await screen.findByText('NexusOps 0.1.0 is up to date.')).toBeInTheDocument();
     const checkButton = screen.getByRole('button', { name: 'Check for updates' });
@@ -107,13 +114,15 @@ describe('manual update availability check', () => {
       phase: 'updateAnnounced',
       availableVersion: '0.2.0',
       announcementId: 'announcement-1',
+      verifiedArtifactId: null,
+      installationSupported: false,
     });
     renderApp();
     await waitFor(() => expect(updateApi.state).toHaveBeenCalledTimes(1));
     await userEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
     expect(await screen.findByText('Update 0.2.0 is announced.')).toBeInTheDocument();
     expect(
-      screen.getByText('Download is explicit. Installation is not enabled in this build.'),
+      screen.getByText('Download and verification require a separate explicit action.'),
     ).toBeInTheDocument();
     expect(screen.queryByText(/verified/i)).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Download and verify' })).toBeEnabled();
@@ -129,6 +138,8 @@ describe('manual update availability check', () => {
       phase: 'updateAnnounced',
       availableVersion: '0.2.0',
       announcementId: 'announcement-1',
+      verifiedArtifactId: null,
+      installationSupported: false,
     });
     vi.mocked(updateApi.download).mockReturnValue(
       new Promise((resolve) => {
@@ -149,14 +160,82 @@ describe('manual update availability check', () => {
       phase: 'verified',
       availableVersion: '0.2.0',
       announcementId: null,
+      verifiedArtifactId: null,
+      installationSupported: false,
     });
     expect(
       await screen.findByText(
-        'Update 0.2.0 was downloaded and verified against the NexusOps updater key.',
+        'Update 0.2.0 was downloaded and verified against the NexusOps updater key; not installed.',
       ),
     ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Download and verify' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /install|restart/i })).not.toBeInTheDocument();
+  });
+
+  it('requires a second explicit Windows install action and cancel preserves authority', async () => {
+    vi.mocked(updateApi.state).mockResolvedValue({
+      currentVersion: '0.1.0',
+      phase: 'verified',
+      availableVersion: '0.2.0',
+      announcementId: null,
+      verifiedArtifactId: 'verified-1',
+      installationSupported: true,
+    });
+    vi.mocked(updateApi.install).mockReturnValue(new Promise(() => {}));
+    renderApp();
+    const install = await screen.findByRole('button', { name: 'Install update' });
+    await userEvent.click(install);
+    expect(updateApi.install).not.toHaveBeenCalled();
+    expect(screen.getByRole('group', { name: 'Confirm update installation' })).toHaveTextContent(
+      'NexusOps will not reopen automatically',
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(updateApi.install).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Install update' })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Install update' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Install and close NexusOps' }));
+    expect(updateApi.install).toHaveBeenCalledExactlyOnceWith('verified-1');
+    expect(screen.getByRole('button', { name: 'Preparing installer…' })).toBeDisabled();
+  });
+
+  it('keeps non-Windows verified state neutral without an install action', async () => {
+    vi.mocked(updateApi.state).mockResolvedValue({
+      currentVersion: '0.1.0',
+      phase: 'verified',
+      availableVersion: '0.2.0',
+      announcementId: null,
+      verifiedArtifactId: null,
+      installationSupported: false,
+    });
+    renderApp();
+    expect(
+      await screen.findByText('In-app installation is not enabled on this platform.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /install/i })).not.toBeInTheDocument();
+  });
+
+  it('surfaces a safe sealed-state failure without retrying installation', async () => {
+    vi.mocked(updateApi.state).mockResolvedValue({
+      currentVersion: '0.1.0',
+      phase: 'verified',
+      availableVersion: '0.2.0',
+      announcementId: null,
+      verifiedArtifactId: 'verified-2',
+      installationSupported: true,
+    });
+    vi.mocked(updateApi.install).mockRejectedValue({
+      code: 'updateInstall',
+      message:
+        'The verified installer could not be launched. Close and restart NexusOps before continuing.',
+      hostKey: null,
+    });
+    renderApp();
+    await userEvent.click(await screen.findByRole('button', { name: 'Install update' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Install and close NexusOps' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Close and restart NexusOps');
+    expect(updateApi.install).toHaveBeenCalledExactlyOnceWith('verified-2');
+    expect(screen.getByRole('button', { name: 'Check for updates' })).toBeDisabled();
   });
 
   it('clears stale download authority on failure and requires a fresh check', async () => {
@@ -165,6 +244,8 @@ describe('manual update availability check', () => {
       phase: 'updateAnnounced',
       availableVersion: '0.2.0',
       announcementId: 'stale-id',
+      verifiedArtifactId: null,
+      installationSupported: false,
     });
     vi.mocked(updateApi.download).mockRejectedValue({
       code: 'updateConflict',
@@ -190,6 +271,8 @@ describe('manual update availability check', () => {
         phase: 'upToDate',
         availableVersion: null,
         announcementId: null,
+        verifiedArtifactId: null,
+        installationSupported: false,
       })
       .mockRejectedValueOnce({
         code: 'updateCheck',

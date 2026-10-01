@@ -39,6 +39,7 @@ pub enum ErrorCode {
     UpdateResourceLimit,
     UpdateTimeout,
     UpdateConflict,
+    UpdateInstall,
 }
 
 /// Safe user-visible failure. Never put raw library errors or remote output in message.
