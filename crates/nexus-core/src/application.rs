@@ -171,7 +171,9 @@ impl Application {
             started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         ))
     }
-    /// Quiesces transfers before closing the SFTP channels and SSH transports.
+    /// Performs resource shutdown after process-wide command admission is sealed and drained.
+    /// Repeating this operation after successful cleanup is safe; transfer admission remains
+    /// permanently closed and remote session resources are not recreated here.
     pub async fn shutdown(&self) -> Result<(), AppError> {
         let _mutation = self.mutation.lock().await;
         self.rotation_plans.lock().await.clear();
@@ -204,6 +206,8 @@ impl Application {
             self.close_sftp(host, session).await?;
         }
         self.transfers.quiesce_all().await?;
+        self.file_plans.revoke_all()?;
+        self.sftp_startups.lock().await.clear();
         self.terminals.shutdown().await;
         self.monitor_baselines.lock().await.clear();
         self.monitor_gates.lock().await.clear();

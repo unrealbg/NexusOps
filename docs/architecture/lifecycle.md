@@ -1,0 +1,28 @@
+# Process lifecycle and quiescence
+
+Goal 04F adds one desktop-native admission boundary for every custom Tauri command. The process begins in `Running`. A native caller can irreversibly seal it, after which no new renderer request is admitted. Commands that won the serialized admission race before sealing hold a counted RAII permit for their complete invocation, including every await. Sealing waits for those permits to leave and then records `Quiesced`; there is no transition back to `Running` in the same process.
+
+The command drain uses one absolute 60-second deadline. A timeout returns a display-safe failure and leaves the process sealed. A later native attempt can wait for a previously admitted operation that has since completed, but it cannot reopen admission. Commands presented after sealing receive the same conflict error: `NexusOps is closing. Restart the application to continue.` The coordinator is native-only: it adds no renderer command, lifecycle state, capability permission or frontend action.
+
+## Resource cleanup phases
+
+Command quiescence and resource cleanup are deliberately separate primitives:
+
+1. seal command admission and drain admitted commands;
+2. shut down application resources through `Application::shutdown()`;
+3. revoke all local picker grants;
+4. explicitly finalize the non-blocking application log guard.
+
+`Application::shutdown()` runs only after admission has drained. It serializes connection mutation, clears rotation authority, cancels connecting sessions, marks connected sessions for disconnect, permanently closes transfer admission, preserves owned staging cleanup, closes SFTP channels, revokes file plans and editor-document authority, clears SFTP startup gates, closes terminals, clears discovery gates, drops SSH transports and publishes disconnected session state. Repeating a successful shutdown is safe. The existing transfer cleanup deadline remains 60 seconds **per SFTP session**, so total resource shutdown can scale with the number of sessions. Goal 04F does not shorten or combine those conservative cleanup windows.
+
+Local picker grants are revoked only after application resource shutdown succeeds. Revocation is idempotent and selected paths or handles do not cross the shutdown boundary. Logging is owned by a native `Mutex<Option<WorkerGuard>>`; finalization consumes the guard once and repeated finalization is safe. This provides explicit buffer-worker closure, but makes no durable `fsync` or secure-erasure claim.
+
+## Normal exit and future reuse
+
+The first normal Tauri exit request is prevented while a single asynchronous attempt performs this order: command seal/drain, normal-exit `UpdateService::shutdown()`, `Application::shutdown()`, local-grant revocation and log finalization. Repeated exit requests during that attempt are prevented. After successful cleanup, native state is marked complete and the application requests exit again; that second `ExitRequested` event is allowed without another cleanup task.
+
+If drain or resource cleanup fails, final exit is not requested. Admission remains sealed and logging remains available for safe stage and error-code metadata. A later explicit exit request retries cleanup without reopening normal work; there is no periodic retry. Logging never includes hostnames, paths, terminal or remote content, updater URLs, signatures, bytes, announcement IDs or credentials.
+
+The reusable quiescence primitive intentionally does **not** shut down `UpdateService`. Normal exit adds that update cleanup as its own step. A separately reviewed future installer can therefore use generic command and application quiescence without first destroying verified update authority. Updater installation, restart, relaunch and installer context are still absent; those remain a future Goal 04G authority decision.
+
+Source-policy tests enumerate every `#[tauri::command]`, require its injected lifecycle state and first-statement RAII admission, reject early permit release, and reject renderer lifecycle authority or updater installation calls. Rust tests cover admission/seal races, checked counter failure, paused-time drain timeout and retry, exit serialization/order/failure, repeated resource shutdown, grant revocation, update shutdown and log finalization.

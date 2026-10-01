@@ -37,14 +37,17 @@ test('update IPC exposes only hydration, check and opaque announcement download'
     return parameters(match[1]);
   };
   assert.deepEqual(signature('get_update_state', ''), [
+    "lifecycle:State<'_,LifecycleCoordinator>",
     'app:tauri::AppHandle',
     "service:State<'_,UpdateService>",
   ]);
   assert.deepEqual(signature('check_for_update'), [
+    "lifecycle:State<'_,LifecycleCoordinator>",
     'app:tauri::AppHandle',
     "service:State<'_,UpdateService>",
   ]);
   assert.deepEqual(signature('download_announced_update'), [
+    "lifecycle:State<'_,LifecycleCoordinator>",
     'app:tauri::AppHandle',
     "service:State<'_,UpdateService>",
     'announcement_id:UpdateAnnouncementId',

@@ -2581,6 +2581,22 @@ async fn shutdown_waits_for_owned_cleanup_before_closing_sftp() {
         wait_for_transfer(&app, job).await.state,
         TransferState::Cancelled
     );
+    app.shutdown().await.unwrap();
+    assert_eq!(client.closes.load(Ordering::SeqCst), 1);
+    assert!(app.sftp_sessions.lock().await.is_empty());
+    assert!(app.sftp_startups.lock().await.is_empty());
+    assert!(app.terminals.list(host).await.is_empty());
+    assert!(app.rotation_plans.lock().await.is_empty());
+    assert!(app.monitor_baselines.lock().await.is_empty());
+    assert!(app.monitor_gates.lock().await.is_empty());
+    assert!(app.service_gates.lock().await.is_empty());
+    assert!(app.network_gates.lock().await.is_empty());
+    assert!(app.log_gates.lock().await.is_empty());
+    assert!(app.container_gates.lock().await.is_empty());
+    assert_eq!(
+        app.get_session(host).await.unwrap().state,
+        ConnectionState::Disconnected
+    );
     #[cfg(windows)]
     std::fs::rename(&source, sources.path().join("source-released.bin")).unwrap();
     #[cfg(not(windows))]

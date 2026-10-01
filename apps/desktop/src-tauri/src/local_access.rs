@@ -129,10 +129,12 @@ impl LocalAccessService {
             _ => Err(local_error("The local grant has the wrong scope.")),
         }
     }
-    pub fn revoke_all(&self) {
-        if let Ok(mut grants) = self.grants.lock() {
-            grants.clear();
-        }
+    pub fn revoke_all(&self) -> Result<(), AppError> {
+        self.grants
+            .lock()
+            .map_err(|_| local_error("Local access grants are unavailable."))?
+            .clear();
+        Ok(())
     }
     pub fn revoke_session(&self, host_id: HostId, host_session_id: HostSessionId) {
         if let Ok(mut grants) = self.grants.lock() {
@@ -336,7 +338,8 @@ mod tests {
                 .code,
             ErrorCode::LocalAccess
         );
-        service.revoke_all();
+        service.revoke_all().unwrap();
+        service.revoke_all().unwrap();
         assert!(service.grants.lock().unwrap().is_empty());
     }
 
