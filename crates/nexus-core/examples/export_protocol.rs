@@ -15,6 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ErrorCode::decl(&config),
         AppError::decl(&config),
         UpdateAnnouncementId::decl(&config),
+        VerifiedArtifactId::decl(&config),
         UpdatePhase::decl(&config),
         UpdateOperationSnapshot::decl(&config),
         HostKeyChallenge::decl(&config),

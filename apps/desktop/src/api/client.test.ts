@@ -21,7 +21,7 @@ function frontendSource(directory: string): string {
 }
 
 describe('update IPC boundary', () => {
-  it('uses no-argument state/check commands and only an opaque ID for download', async () => {
+  it('uses no-argument state/check commands and one opaque ID for each explicit authority', async () => {
     vi.mocked(invoke).mockResolvedValue({
       currentVersion: '0.1.0',
       phase: 'upToDate',
@@ -31,13 +31,18 @@ describe('update IPC boundary', () => {
     expect(updateApi.state.length).toBe(0);
     expect(updateApi.check.length).toBe(0);
     expect(updateApi.download.length).toBe(1);
+    expect(updateApi.install.length).toBe(1);
     await updateApi.state();
     await updateApi.check();
     await updateApi.download('opaque-announcement');
+    await updateApi.install('opaque-verified-artifact');
     expect(invoke).toHaveBeenNthCalledWith(1, 'get_update_state', undefined);
     expect(invoke).toHaveBeenNthCalledWith(2, 'check_for_update', undefined);
     expect(invoke).toHaveBeenNthCalledWith(3, 'download_announced_update', {
       announcementId: 'opaque-announcement',
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, 'install_verified_update', {
+      verifiedArtifactId: 'opaque-verified-artifact',
     });
   });
 

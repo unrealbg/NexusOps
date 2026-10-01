@@ -26,6 +26,7 @@ import type {
   TransferJob,
   UpdateAnnouncementId,
   UpdateOperationSnapshot,
+  VerifiedArtifactId,
 } from '@nexusops/protocol';
 
 export function applicationError(error: unknown): AppError {
@@ -77,12 +78,14 @@ export const hostApi = {
   refresh: (hostId: string) => request<void>('refresh_host', { hostId }),
 };
 
-/** Narrow native updater boundary. Only an opaque current announcement can be downloaded. */
+/** Narrow native updater boundary. Download and install accept only their current opaque authorities. */
 export const updateApi = {
   state: () => request<UpdateOperationSnapshot>('get_update_state'),
   check: () => request<UpdateOperationSnapshot>('check_for_update'),
   download: (announcementId: UpdateAnnouncementId) =>
     request<UpdateOperationSnapshot>('download_announced_update', { announcementId }),
+  install: (verifiedArtifactId: VerifiedArtifactId) =>
+    request<void>('install_verified_update', { verifiedArtifactId }),
 };
 
 /** Session-bound, fixed-command monitoring boundary. */

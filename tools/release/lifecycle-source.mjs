@@ -56,6 +56,7 @@ export function verifyLifecycleSourceText({
   capability,
   lifecycleSource,
   updaterSources,
+  installationSource,
 }) {
   const commands = commandDefinitions(commandsSource);
   if (commands.length === 0) fail('no Tauri commands were found');
@@ -90,15 +91,22 @@ export function verifyLifecycleSourceText({
     fail('renderer lifecycle-control commands are forbidden');
   if (capability.permissions.some((permission) => lifecycleWords.test(permission)))
     fail('renderer lifecycle-control permissions are forbidden');
+  for (const prefix of ['updater:', 'process:', 'shell:', 'fs:']) {
+    if (capability.permissions.some((permission) => permission.startsWith(prefix)))
+      fail(`generic ${prefix} renderer permissions are forbidden`);
+  }
 
   for (const fragment of [
     'Running',
     'Sealed',
+    'Exclusive',
     'Quiesced',
     'checked_add(1)',
     'checked_sub(1)',
     'Duration::from_secs(60)',
     'tokio::time::timeout_at(deadline, notified)',
+    'seal_and_drain_others',
+    'state.active == 1',
     'NexusOps is closing. Restart the application to continue.',
   ]) {
     if (!lifecycleSource.includes(fragment)) fail(`lifecycle policy is missing ${fragment}`);
@@ -122,15 +130,71 @@ export function verifyLifecycleSourceText({
     fail('the Tauri event-loop callback must not block on cleanup');
 
   const updaterText = updaterSources.join('\n');
-  for (const forbidden of ['download_and_install', '.install(']) {
+  for (const forbidden of ['download_and_install', '.install(', 'Update::download']) {
     if (updaterText.includes(forbidden)) fail(`runtime updater source must not contain ${forbidden}`);
+  }
+  for (const fragment of ['.restart_after_install(false)', '.on_before_exit(|| {})']) {
+    if (!updaterText.includes(fragment)) fail(`updater builder policy is missing ${fragment}`);
+  }
+
+  const install = commands.find(({ name }) => name === 'install_verified_update');
+  if (!install) fail('install_verified_update command is missing');
+  const installParameters = install.parameters.replace(/\s+/g, '');
+  if ((installParameters.match(/verified_artifact_id:VerifiedArtifactId/g) ?? []).length !== 1)
+    fail('install_verified_update must accept exactly one VerifiedArtifactId authority');
+  for (const forbidden of [
+    'UpdateAnnouncementId', 'Vec<u8>', 'String', 'Url', 'Path', 'signature', 'version:',
+    'target:', 'restart', 'argument',
+  ]) {
+    if (installParameters.includes(forbidden))
+      fail(`install_verified_update renderer authority must not contain ${forbidden}`);
+  }
+  const installOrder = [
+    '.validate_install(verified_artifact_id)',
+    '.seal_and_drain_others()',
+    '.consume_install(verified_artifact_id)',
+    'update_install::finish_install',
+  ];
+  let installPrevious = -1;
+  for (const fragment of installOrder) {
+    const index = install.body.indexOf(fragment, installPrevious + 1);
+    if (index === -1) fail(`install command order is missing ${fragment}`);
+    installPrevious = index;
+  }
+  if (install.body.includes('shutdown_updates') || install.body.includes('UpdateService::shutdown'))
+    fail('install command must not shut down UpdateService before authority consumption');
+
+  if ((installationSource.match(/\.install\s*\(/g) ?? []).length !== 1)
+    fail('dedicated installer module must contain exactly one production .install call');
+  for (const forbidden of ['download_and_install', 'Update::download']) {
+    if (installationSource.includes(forbidden))
+      fail(`dedicated installer module must not contain ${forbidden}`);
+  }
+  for (const fragment of [
+    '#[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))]',
+    'spawn_blocking',
+    'installation_supported',
+  ]) {
+    if (!installationSource.includes(fragment)) fail(`installer policy is missing ${fragment}`);
+  }
+  const installCleanupOrder = [
+    'steps.shutdown_application().await?',
+    'steps.revoke_local_grants()?',
+    'steps.finalize_logging()?',
+    'steps.invoke_installer(authority).await',
+  ];
+  let cleanupPrevious = -1;
+  for (const fragment of installCleanupOrder) {
+    const index = installationSource.indexOf(fragment, cleanupPrevious + 1);
+    if (index === -1) fail(`install cleanup order is missing ${fragment}`);
+    cleanupPrevious = index;
   }
   return { commandCount: commands.length };
 }
 
 export async function verifyLifecycleSource(root) {
   const desktop = join(root, 'apps/desktop/src-tauri');
-  const [commandsSource, mainSource, buildSource, capabilityText, lifecycleSource, updates, download] =
+  const [commandsSource, mainSource, buildSource, capabilityText, lifecycleSource, updates, download, installation] =
     await Promise.all([
       readFile(join(desktop, 'src/commands.rs'), 'utf8'),
       readFile(join(desktop, 'src/main.rs'), 'utf8'),
@@ -139,6 +203,7 @@ export async function verifyLifecycleSource(root) {
       readFile(join(desktop, 'src/lifecycle.rs'), 'utf8'),
       readFile(join(desktop, 'src/updates.rs'), 'utf8'),
       readFile(join(desktop, 'src/update_download.rs'), 'utf8'),
+      readFile(join(desktop, 'src/update_install.rs'), 'utf8'),
     ]);
   return verifyLifecycleSourceText({
     commandsSource,
@@ -147,5 +212,6 @@ export async function verifyLifecycleSource(root) {
     capability: JSON.parse(capabilityText),
     lifecycleSource,
     updaterSources: [updates, download],
+    installationSource: installation,
   });
 }

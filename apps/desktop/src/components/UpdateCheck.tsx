@@ -3,12 +3,14 @@ import type { UpdateOperationSnapshot } from '@nexusops/protocol';
 import { Button } from '@nexusops/ui';
 import { applicationError, updateApi } from '../api/client';
 
-type PendingAction = 'hydrate' | 'check' | 'download' | null;
+type PendingAction = 'hydrate' | 'check' | 'download' | 'install' | null;
 
 export function UpdateCheck() {
   const [snapshot, setSnapshot] = useState<UpdateOperationSnapshot | null>(null);
   const [pending, setPending] = useState<PendingAction>('hydrate');
   const [error, setError] = useState<string | null>(null);
+  const [confirmInstall, setConfirmInstall] = useState(false);
+  const [sealedAfterInstallFailure, setSealedAfterInstallFailure] = useState(false);
 
   useEffect(() => {
     let current = true;
@@ -33,6 +35,7 @@ export function UpdateCheck() {
 
   async function check() {
     setError(null);
+    setConfirmInstall(false);
     setSnapshot(null);
     setPending('check');
     try {
@@ -61,23 +64,56 @@ export function UpdateCheck() {
     }
   }
 
+  async function install() {
+    if (
+      snapshot?.phase !== 'verified' ||
+      !snapshot.installationSupported ||
+      !snapshot.verifiedArtifactId
+    ) {
+      return;
+    }
+    const verifiedArtifactId = snapshot.verifiedArtifactId;
+    setError(null);
+    setPending('install');
+    try {
+      await updateApi.install(verifiedArtifactId);
+    } catch (reason) {
+      const failure = applicationError(reason);
+      setSealedAfterInstallFailure(true);
+      setConfirmInstall(false);
+      setError(
+        `${failure.message} NexusOps is sealed for safety; close and restart it before continuing.`,
+      );
+    } finally {
+      setPending(null);
+    }
+  }
+
   const busy = pending !== null;
   let result: string | null = null;
   if (snapshot?.phase === 'upToDate') {
-      result = `NexusOps ${snapshot.currentVersion} is up to date.`;
+    result = `NexusOps ${snapshot.currentVersion} is up to date.`;
   } else if (snapshot?.phase === 'updateAnnounced' && snapshot.availableVersion) {
-      result = `Update ${snapshot.availableVersion} is announced.`;
+    result = `Update ${snapshot.availableVersion} is announced.`;
   } else if (
     (snapshot?.phase === 'downloading' || snapshot?.phase === 'verifying') &&
     snapshot.availableVersion
   ) {
     result = 'Downloading and verifying…';
   } else if (snapshot?.phase === 'verified' && snapshot.availableVersion) {
-    result = `Update ${snapshot.availableVersion} was downloaded and verified against the NexusOps updater key.`;
+    result = `Update ${snapshot.availableVersion} was downloaded and verified against the NexusOps updater key; not installed.`;
+  } else if (snapshot?.phase === 'installing' && snapshot.availableVersion) {
+    result = 'Preparing the verified installer…';
   }
 
   const canDownload =
     !busy && snapshot?.phase === 'updateAnnounced' && snapshot.announcementId !== null;
+  const canInstall =
+    !busy &&
+    !sealedAfterInstallFailure &&
+    snapshot?.phase === 'verified' &&
+    snapshot.installationSupported &&
+    snapshot.verifiedArtifactId !== null;
 
   return (
     <div className="update-check">
@@ -86,12 +122,14 @@ export function UpdateCheck() {
           {result}
           {snapshot?.phase === 'updateAnnounced' && (
             <span className="update-check-detail">
-              Download is explicit. Installation is not enabled in this build.
+              Download and verification require a separate explicit action.
             </span>
           )}
           {snapshot?.phase === 'verified' && (
             <span className="update-check-detail">
-              The update is not installed. Installation and restart are not enabled.
+              {snapshot.installationSupported
+                ? 'Installation requires a separate confirmation. NexusOps will not reopen automatically.'
+                : 'In-app installation is not enabled on this platform.'}
             </span>
           )}
         </span>
@@ -113,11 +151,52 @@ export function UpdateCheck() {
           Download and verify
         </Button>
       )}
+      {canInstall && !confirmInstall && (
+        <Button
+          className="update-check-button"
+          variant="ghost"
+          type="button"
+          onClick={() => setConfirmInstall(true)}
+        >
+          Install update
+        </Button>
+      )}
+      {canInstall && confirmInstall && (
+        <div
+          className="update-install-confirmation"
+          role="group"
+          aria-label="Confirm update installation"
+        >
+          <span className="update-check-detail">
+            NexusOps will close active SSH and terminal sessions, safely stop active transfers,
+            and launch the verified Windows installer. NexusOps will not reopen automatically;
+            reopen it manually after installation finishes.
+          </span>
+          <Button
+            className="update-check-button"
+            variant="ghost"
+            type="button"
+            onClick={() => setConfirmInstall(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            className="update-check-button"
+            variant="ghost"
+            type="button"
+            onClick={() => {
+              void install();
+            }}
+          >
+            Install and close NexusOps
+          </Button>
+        </div>
+      )}
       <Button
         className="update-check-button"
         variant="ghost"
         type="button"
-        disabled={busy}
+        disabled={busy || sealedAfterInstallFailure}
         onClick={() => {
           void check();
         }}
@@ -126,7 +205,9 @@ export function UpdateCheck() {
           ? 'Checking…'
           : pending === 'download'
             ? 'Downloading…'
-            : 'Check for updates'}
+            : pending === 'install'
+              ? 'Preparing installer…'
+              : 'Check for updates'}
       </Button>
     </div>
   );

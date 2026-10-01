@@ -68,7 +68,7 @@ async function fixture(t) {
     JSON.stringify({ bundle: { createUpdaterArtifacts: true }, plugins: { updater: updaterConfig(pubkey) } }),
   );
   await writeFile(join(root, 'apps/desktop/src-tauri/capabilities/main.json'),
-    JSON.stringify({ permissions: ['allow-list-hosts', 'allow-get-update-state', 'allow-check-for-update', 'allow-download-announced-update'] }));
+    JSON.stringify({ permissions: ['allow-list-hosts', 'allow-get-update-state', 'allow-check-for-update', 'allow-download-announced-update', 'allow-install-verified-update'] }));
   await writeFile(join(root, 'apps/desktop/src-tauri/src/update_download.rs'), [
     'MAX_ARTIFACT_BYTES: usize = 134_217_728',
     'CONNECT_TIMEOUT: Duration = Duration::from_secs(10)',
@@ -81,8 +81,18 @@ async function fixture(t) {
     '.no_proxy()',
     '.retry(reqwest::retry::never())',
   ].join('\n'));
-  await writeFile(join(root, 'apps/desktop/src-tauri/src/updates.rs'),
-    'bounded native update state');
+  await writeFile(join(root, 'apps/desktop/src-tauri/src/updates.rs'), [
+    'bounded native update state',
+    '.restart_after_install(false)',
+    '.on_before_exit(|| {})',
+    'RetainedTauriUpdate::new(update)',
+    'installation_supported() && verified_artifact_id.is_some()',
+  ].join('\n'));
+  await writeFile(join(root, 'apps/desktop/src-tauri/src/update_install.rs'), [
+    '#[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))]',
+    'spawn_blocking',
+    'retained_update.install(bytes)',
+  ].join('\n'));
   return root;
 }
 
@@ -216,6 +226,7 @@ test('renderer gets only the custom update command, with no direct updater capab
     'allow-get-update-state',
     'allow-check-for-update',
     'allow-download-announced-update',
+    'allow-install-verified-update',
   ]) {
     await changeJson(root, 'apps/desktop/src-tauri/capabilities/main.json', (capability) => {
       capability.permissions = capability.permissions.filter((candidate) => candidate !== permission);
@@ -237,6 +248,24 @@ test('bounded downloader policy rejects resource and trust regressions', async (
   await assert.rejects(verifyTauriGeneration(root), /Update::download/);
   await writeFile(file, source.replace('.retry(reqwest::retry::never())', ''));
   await assert.rejects(verifyTauriGeneration(root), /retry\(reqwest::retry::never/);
+});
+
+test('installer source is Windows-only with one retained native install call', async (t) => {
+  const root = await fixture(t);
+  const file = join(root, 'apps/desktop/src-tauri/src/update_install.rs');
+  const source = await readFile(file, 'utf8');
+  await writeFile(file, `${source}\nother.install(bytes);\n`);
+  await assert.rejects(verifyTauriGeneration(root), /exactly one production \.install call/);
+  await writeFile(file, source.replace('spawn_blocking', 'spawn'));
+  await assert.rejects(verifyTauriGeneration(root), /spawn_blocking/);
+  await writeFile(file, source);
+  const updates = join(root, 'apps/desktop/src-tauri/src/updates.rs');
+  const updateSource = await readFile(updates, 'utf8');
+  await writeFile(
+    updates,
+    updateSource.replace('installation_supported() && verified_artifact_id.is_some()', 'true'),
+  );
+  await assert.rejects(verifyTauriGeneration(root), /installation_supported/);
 });
 
 test('JavaScript updater package is rejected in direct and locked npm dependencies', async (t) => {

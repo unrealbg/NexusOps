@@ -26,7 +26,7 @@ function parameters(signature) {
   return parts;
 }
 
-test('update IPC exposes only hydration, check and opaque announcement download', async () => {
+test('update IPC exposes hydration, check and only opaque download/install authorities', async () => {
   const source = await readFile(desktop('src/commands.rs'), 'utf8');
   const signature = (name, kind = 'async ') => {
     const match = new RegExp(
@@ -52,6 +52,12 @@ test('update IPC exposes only hydration, check and opaque announcement download'
     "service:State<'_,UpdateService>",
     'announcement_id:UpdateAnnouncementId',
   ]);
+  assert.deepEqual(signature('install_verified_update'), [
+    "lifecycle:State<'_,LifecycleCoordinator>",
+    'app:tauri::AppHandle',
+    "service:State<'_,UpdateService>",
+    'verified_artifact_id:VerifiedArtifactId',
+  ]);
 });
 
 test('manual update IPC is registered in the app and permission generator', async () => {
@@ -59,7 +65,12 @@ test('manual update IPC is registered in the app and permission generator', asyn
     readFile(desktop('src/main.rs'), 'utf8'),
     readFile(desktop('build.rs'), 'utf8'),
   ]);
-  for (const command of ['get_update_state', 'check_for_update', 'download_announced_update']) {
+  for (const command of [
+    'get_update_state',
+    'check_for_update',
+    'download_announced_update',
+    'install_verified_update',
+  ]) {
     assert.equal([...entry.matchAll(new RegExp(`commands::${command}`, 'g'))].length, 1);
     assert.equal([...manifest.matchAll(new RegExp(`"${command}"`, 'g'))].length, 1);
   }

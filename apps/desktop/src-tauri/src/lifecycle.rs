@@ -18,6 +18,7 @@ const DRAIN_TIMEOUT_MESSAGE: &str =
 enum LifecyclePhase {
     Running,
     Sealed,
+    Exclusive,
     Quiesced,
 }
 
@@ -37,6 +38,40 @@ pub struct LifecycleCoordinator {
 
 pub struct CommandPermit {
     shared: Arc<SharedLifecycle>,
+}
+
+impl CommandPermit {
+    /// Irreversibly wins installation ownership while retaining this permit.
+    /// The caller is drained only against every other admitted command.
+    pub async fn seal_and_drain_others(&self) -> Result<(), AppError> {
+        self.seal_and_drain_others_for(COMMAND_DRAIN_TIMEOUT).await
+    }
+
+    async fn seal_and_drain_others_for(&self, timeout: Duration) -> Result<(), AppError> {
+        {
+            let mut state = self.shared.state.lock().map_err(|_| closing_error())?;
+            if state.phase != LifecyclePhase::Running {
+                return Err(closing_error());
+            }
+            state.phase = LifecyclePhase::Exclusive;
+            self.shared.changed.notify_waiters();
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.shared.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let state = self.shared.state.lock().map_err(|_| closing_error())?;
+                if state.active == 1 {
+                    return Ok(());
+                }
+            }
+            tokio::time::timeout_at(deadline, notified)
+                .await
+                .map_err(|_| AppError::new(ErrorCode::Timeout, DRAIN_TIMEOUT_MESSAGE))?;
+        }
+    }
 }
 
 impl Default for LifecycleCoordinator {
@@ -114,9 +149,7 @@ impl Drop for CommandPermit {
             return;
         };
         state.active = active;
-        if active == 0 {
-            self.shared.changed.notify_waiters();
-        }
+        self.shared.changed.notify_waiters();
     }
 }
 
@@ -182,7 +215,7 @@ impl<T> GuardSlot<T> {
         }
     }
 
-    fn finalize(&self) -> Result<(), AppError> {
+    pub(crate) fn finalize(&self) -> Result<(), AppError> {
         let value = self
             .value
             .lock()
@@ -209,7 +242,7 @@ impl LogGuardService {
         }
     }
 
-    fn finalize(&self) -> Result<(), AppError> {
+    pub(crate) fn finalize(&self) -> Result<(), AppError> {
         self.guard.finalize()
     }
 }
@@ -422,6 +455,79 @@ mod tests {
             coordinator.shared.state.lock().unwrap().phase,
             LifecyclePhase::Quiesced
         );
+        coordinator.seal_and_drain().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exclusive_drain_waits_for_other_permits_but_not_its_caller() {
+        let coordinator = Arc::new(LifecycleCoordinator::default());
+        let installer = coordinator.admit().unwrap();
+        let other = coordinator.admit().unwrap();
+        let draining = tokio::spawn(async move {
+            installer.seal_and_drain_others().await?;
+            Ok::<CommandPermit, AppError>(installer)
+        });
+        tokio::task::yield_now().await;
+        assert!(!draining.is_finished());
+        assert_eq!(coordinator.admit().err().unwrap(), closing_error());
+        drop(other);
+        let installer = draining.await.unwrap().unwrap();
+        assert_eq!(
+            coordinator.shared.state.lock().unwrap().phase,
+            LifecyclePhase::Exclusive
+        );
+        assert_eq!(coordinator.shared.state.lock().unwrap().active, 1);
+        drop(installer);
+        coordinator.seal_and_drain().await.unwrap();
+        assert_eq!(
+            coordinator.shared.state.lock().unwrap().phase,
+            LifecyclePhase::Quiesced
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn normal_exit_and_install_exclusive_have_deterministic_ownership() {
+        let exit_wins = LifecycleCoordinator::default();
+        let install_permit = exit_wins.admit().unwrap();
+        exit_wins.seal().unwrap();
+        assert_eq!(
+            install_permit.seal_and_drain_others().await.unwrap_err(),
+            closing_error()
+        );
+        drop(install_permit);
+        exit_wins.seal_and_drain().await.unwrap();
+
+        let install_wins = Arc::new(LifecycleCoordinator::default());
+        let install_permit = install_wins.admit().unwrap();
+        install_permit.seal_and_drain_others().await.unwrap();
+        let closing = {
+            let coordinator = Arc::clone(&install_wins);
+            tokio::spawn(async move { coordinator.seal_and_drain().await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!closing.is_finished());
+        drop(install_permit);
+        closing.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exclusive_timeout_stays_sealed_until_permit_drop_allows_exit() {
+        let coordinator = Arc::new(LifecycleCoordinator::default());
+        let installer = coordinator.admit().unwrap();
+        let other = coordinator.admit().unwrap();
+        let draining = tokio::spawn(async move {
+            let result = installer
+                .seal_and_drain_others_for(COMMAND_DRAIN_TIMEOUT)
+                .await;
+            (result, installer)
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(COMMAND_DRAIN_TIMEOUT).await;
+        let (result, installer) = draining.await.unwrap();
+        assert_eq!(result.unwrap_err().code, ErrorCode::Timeout);
+        assert_eq!(coordinator.admit().err().unwrap(), closing_error());
+        drop(other);
+        drop(installer);
         coordinator.seal_and_drain().await.unwrap();
     }
 
