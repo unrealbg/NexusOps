@@ -590,5 +590,14 @@ mod tests {
             service.snapshot("0.1.0".into()).unwrap().phase,
             UpdatePhase::Idle
         );
+        service.shutdown().await.unwrap();
+        assert_eq!(
+            service.snapshot("0.1.0".into()).unwrap().phase,
+            UpdatePhase::Idle
+        );
+        assert_eq!(
+            service.begin_check().unwrap_err().code,
+            ErrorCode::Cancelled
+        );
     }
 }

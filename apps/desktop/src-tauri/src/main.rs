@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod commands;
+mod lifecycle;
 mod local_access;
 mod update_download;
 mod updates;
@@ -35,7 +36,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing_subscriber::fmt().json().with_ansi(false)
                 .with_env_filter("off,nexus_core=info,nexus_ssh=info,nexus_discovery=info,nexus_operations=info,nexus_desktop=info")
                 .with_writer(writer).try_init().map_err(|_|"Cannot initialize local logging")?;
-            app.manage(guard);
+            app.manage(lifecycle::LogGuardService::new(guard));
+            app.manage(lifecycle::LifecycleCoordinator::default());
+            app.manage(lifecycle::ExitCoordinator::default());
             app.manage(Application::open(&directory)?);
             app.manage(local_access::LocalAccessService::default());
             app.manage(updates::UpdateService::default());
@@ -48,18 +51,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build(tauri::generate_context!())?;
     application.run(|app, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = event {
-            if let Err(error) =
-                tauri::async_runtime::block_on(app.state::<updates::UpdateService>().shutdown())
-            {
-                tracing::error!(code=?error.code, "Shutdown update cleanup did not quiesce");
-                api.prevent_exit();
-            } else if let Err(error) =
-                tauri::async_runtime::block_on(app.state::<Application>().shutdown())
-            {
-                tracing::error!(code=?error.code, "Shutdown transfer cleanup did not quiesce");
-                api.prevent_exit();
-            } else {
-                app.state::<local_access::LocalAccessService>().revoke_all();
+            match app.state::<lifecycle::ExitCoordinator>().request() {
+                lifecycle::ExitRequest::AllowExit => {}
+                lifecycle::ExitRequest::PreventExit => api.prevent_exit(),
+                lifecycle::ExitRequest::StartCleanup => {
+                    api.prevent_exit();
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match lifecycle::run_tauri_exit_attempt(app.clone()).await {
+                            Ok(()) => {}
+                            Err(failure) => {
+                                tracing::error!(
+                                    stage = failure.stage,
+                                    code = ?failure.error.code,
+                                    "Application exit cleanup did not complete"
+                                );
+                            }
+                        }
+                    });
+                }
             }
         }
     });

@@ -233,6 +233,19 @@ impl Default for FilePlanStore {
 }
 
 impl FilePlanStore {
+    /// Revokes every unconsumed plan and editor-document authority during process shutdown.
+    pub fn revoke_all(&self) -> Result<(), AppError> {
+        self.documents
+            .lock()
+            .map_err(|_| policy_error("File authority is unavailable."))?
+            .clear();
+        self.plans
+            .lock()
+            .map_err(|_| policy_error("File authority is unavailable."))?
+            .clear();
+        Ok(())
+    }
+
     pub fn revoke_session(&self, host: HostId, host_session: HostSessionId) {
         let mut documents = self.documents.lock().ok();
         if let Some(documents) = documents.as_mut() {
