@@ -114,15 +114,18 @@ export async function verifyReleaseVersion(
   root = REPOSITORY_ROOT,
   metadataProvider = cargoMetadata,
 ) {
-  const [rootPackage, desktopPackage, tauri, lock, cargoToml] = await Promise.all([
+  const [rootPackage, desktopPackage, protocolPackage, uiPackage, tauri, lock, cargoToml] =
+    await Promise.all([
     readJson(join(root, 'package.json'), 'root package.json'),
     readJson(join(root, 'apps/desktop/package.json'), 'desktop package.json'),
+    readJson(join(root, 'packages/protocol/package.json'), 'protocol package.json'),
+    readJson(join(root, 'packages/ui/package.json'), 'UI package.json'),
     readJson(join(root, 'apps/desktop/src-tauri/tauri.conf.json'), 'tauri.conf.json'),
     readJson(join(root, 'package-lock.json'), 'package-lock.json'),
     readFile(join(root, 'Cargo.toml'), 'utf8').catch(() =>
       fail('Cargo.toml is missing or unreadable'),
     ),
-  ]);
+    ]);
   const metadata = await metadataProvider(root);
   if (!metadata || !Array.isArray(metadata.packages)) fail('cargo metadata has no packages');
   const desktopRust = metadata.packages.filter((entry) => entry?.name === 'nexus-desktop');
@@ -138,6 +141,8 @@ export async function verifyReleaseVersion(
     'Tauri config': requiredVersion(tauri, 'version', 'Tauri config version'),
     'root package': requiredVersion(rootPackage, 'version', 'root package version'),
     'desktop package': requiredVersion(desktopPackage, 'version', 'desktop package version'),
+    'protocol package': requiredVersion(protocolPackage, 'version', 'protocol package version'),
+    'UI package': requiredVersion(uiPackage, 'version', 'UI package version'),
     'package-lock top level': requiredVersion(lock, 'version', 'package-lock top-level version'),
     'package-lock root': requiredVersion(
       lock.packages?.[''],
@@ -148,6 +153,16 @@ export async function verifyReleaseVersion(
       lock.packages?.['apps/desktop'],
       'version',
       'package-lock desktop version',
+    ),
+    'package-lock protocol': requiredVersion(
+      lock.packages?.['packages/protocol'],
+      'version',
+      'package-lock protocol version',
+    ),
+    'package-lock UI': requiredVersion(
+      lock.packages?.['packages/ui'],
+      'version',
+      'package-lock UI version',
     ),
   };
   const expected = versions['root package'];

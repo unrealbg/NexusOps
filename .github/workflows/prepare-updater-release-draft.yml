@@ -1,0 +1,163 @@
+name: Prepare updater release draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Exact successful Signed updater candidate workflow run ID
+        required: true
+        type: string
+      expected_source_sha:
+        description: Exact reviewed product and tooling source commit
+        required: true
+        type: string
+      expected_version:
+        description: Exact reviewed product version without a leading v
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  prepare-draft:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      # actions/checkout v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      # actions/setup-node v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Require reviewed main workflow source
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+      - name: Require hosted rustup and install fixed Rust toolchain
+        shell: bash
+        run: |
+          command -v rustup >/dev/null || { echo 'Preinstalled rustup is required' >&2; exit 1; }
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          rustc --version | grep -Eq '^rustc 1\.98\.1 '
+          cargo --version | grep -Eq '^cargo 1\.98\.1 '
+      - name: Fetch locked Rust dependencies for offline identity verification
+        run: cargo fetch --locked
+      - name: Derive verified release identity
+        id: identity
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          node tools/release/release-identity.mjs \
+            --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            --expected-version "$EXPECTED_VERSION"
+      - name: Read exact signed candidate run metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          mkdir "$RUNNER_TEMP/candidate-download"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$RUNNER_TEMP/candidate-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/candidate-artifacts.json"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/candidate-download"
+      - name: Verify signed run and prepare exact seven assets
+        shell: bash
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
+        run: |
+          node tools/release/prepare-publication-set.mjs \
+            --candidate-root "$RUNNER_TEMP/candidate-download" \
+            --output "$RUNNER_TEMP/publication-set" \
+            --run-json "$RUNNER_TEMP/candidate-run.json" \
+            --artifacts-json "$RUNNER_TEMP/candidate-artifacts.json" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --expected-source-sha "$SOURCE_COMMIT" \
+            --expected-version "$PRODUCT_VERSION"
+      - name: Create or verify exact lightweight release tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > "$RUNNER_TEMP/tag.json" 2> "$RUNNER_TEMP/tag.err"; then
+            :
+          elif grep -q 'HTTP 404' "$RUNNER_TEMP/tag.err"; then
+            node --input-type=module -e 'import { writeFileSync } from "node:fs"; writeFileSync(process.argv[1], JSON.stringify({ ref: `refs/tags/${process.env.RELEASE_TAG}`, sha: process.env.SOURCE_COMMIT }));' "$RUNNER_TEMP/create-tag.json"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" --input "$RUNNER_TEMP/create-tag.json" > "$RUNNER_TEMP/tag.json"
+          else
+            cat "$RUNNER_TEMP/tag.err" >&2
+            exit 1
+          fi
+          node --input-type=module -e 'import { readFileSync } from "node:fs"; import { validateTagRef } from "./tools/release/release-publication-common.mjs"; validateTagRef(JSON.parse(readFileSync(process.argv[1])), process.env.RELEASE_TAG, process.env.SOURCE_COMMIT);' "$RUNNER_TEMP/tag.json"
+      - name: Create empty draft bound to the verified tag
+        id: draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/existing-release.json" 2> "$RUNNER_TEMP/release.err"; then
+            echo 'A release already exists for the exact tag' >&2
+            exit 1
+          elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/release.err"; then
+            cat "$RUNNER_TEMP/release.err" >&2
+            exit 1
+          fi
+          node tools/release/release-request.mjs --version "$PRODUCT_VERSION" --source-commit "$SOURCE_COMMIT" > "$RUNNER_TEMP/release-request.json"
+          gh api --method POST "repos/$GITHUB_REPOSITORY/releases" --input "$RUNNER_TEMP/release-request.json" > "$RUNNER_TEMP/release.json"
+          node --input-type=module -e 'import { readFileSync, appendFileSync } from "node:fs"; const r=JSON.parse(readFileSync(process.argv[1])); if (!r.draft || r.prerelease || r.tag_name !== process.env.RELEASE_TAG || r.assets.length !== 0) throw new Error("new release is not an empty exact draft"); appendFileSync(process.env.GITHUB_OUTPUT, `release_id=${r.id}\n`);' "$RUNNER_TEMP/release.json"
+      - name: Upload exact verified release assets without replacement
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          stage="$RUNNER_TEMP/publication-set"
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            "$stage/NexusOps_${PRODUCT_VERSION}_x64-setup.exe" \
+            "$stage/NexusOps_${PRODUCT_VERSION}_x64-setup.exe.sig" \
+            "$stage/NexusOps_${PRODUCT_VERSION}_amd64.AppImage" \
+            "$stage/NexusOps_${PRODUCT_VERSION}_amd64.AppImage.sig" \
+            "$stage/NexusOps.app.tar.gz" \
+            "$stage/NexusOps.app.tar.gz.sig" \
+            "$stage/latest.json"
+      - name: Authenticated re-download and verify draft bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.draft.outputs.release_id }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > "$RUNNER_TEMP/tag.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          mkdir "$RUNNER_TEMP/draft-download"
+          gh api --jq '.assets[] | [.id,.name] | @tsv' "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" | while IFS=$'\t' read -r id name; do
+            gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$RUNNER_TEMP/draft-download/$name"
+          done
+          node tools/release/verify-draft-release.mjs \
+            --release-json "$RUNNER_TEMP/release.json" \
+            --tag-json "$RUNNER_TEMP/tag.json" \
+            --releases-json "$RUNNER_TEMP/releases.json" \
+            --stage "$RUNNER_TEMP/publication-set" \
+            --downloaded "$RUNNER_TEMP/draft-download" \
+            --release-id "$RELEASE_ID" \
+            --expected-source-sha "$SOURCE_COMMIT" \
+            --expected-version "$PRODUCT_VERSION"
+          echo 'Verified draft created. Production publication was not performed.' >> "$GITHUB_STEP_SUMMARY"
