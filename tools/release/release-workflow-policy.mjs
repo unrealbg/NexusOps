@@ -6,6 +6,7 @@ const FILES = Object.freeze({
   signing: '.github/workflows/signed-updater-candidate.yml',
   draft: '.github/workflows/prepare-updater-release-draft.yml',
   publish: '.github/workflows/publish-updater-release.yml',
+  publishedVerifier: 'tools/release/verify-published-release.mjs',
 });
 
 function fail(message) {
@@ -51,7 +52,7 @@ function inputRequired(source, name, label) {
   if (!block || !/^        required: true$/m.test(block)) fail(`${label} lacks required ${name}`);
 }
 
-export function validateReleaseWorkflowPolicy({ signing, draft, publish }) {
+export function validateReleaseWorkflowPolicy({ signing, draft, publish, publishedVerifier }) {
   for (const [label, source] of Object.entries({ signing, draft, publish })) {
     if (typeof source !== 'string') fail(`${label} workflow source is missing`);
     requireManualOnly(source, label);
@@ -105,6 +106,37 @@ export function validateReleaseWorkflowPolicy({ signing, draft, publish }) {
     fail('publish workflow permissions changed');
   if (/TAURI_SIGNING_PRIVATE_KEY|id-token: write|attestations: write|administration: write/.test(publish))
     fail('publish workflow mixes signing or administration authority');
+  const publishSteps = publish.split(/^      - /m).slice(1);
+  const immutableEndpointSteps = publishSteps.filter((step) => /immutable-releases/.test(step));
+  if (immutableEndpointSteps.length !== 1)
+    fail('publish workflow must isolate the immutable-release endpoint to one step');
+  const immutableStep = immutableEndpointSteps[0];
+  if (!/^name: Read immutable-release status with separate read-only authority$/m.test(immutableStep))
+    fail('publish workflow immutable-release step identity changed');
+  if ((publish.match(/secrets\.IMMUTABILITY_READ_TOKEN/g) ?? []).length !== 1)
+    fail('immutable-settings credential must appear exactly once');
+  if (!/^        env:\r?\n          GH_TOKEN: \$\{\{ secrets\.IMMUTABILITY_READ_TOKEN \}\}$/m.test(immutableStep))
+    fail('immutable-settings credential escaped the step-only GH_TOKEN environment');
+  if (/github\.token/.test(immutableStep))
+    fail('immutable-release preflight uses the publication GITHUB_TOKEN');
+  if (!/test -n "\$GH_TOKEN"/.test(immutableStep))
+    fail('immutable-release preflight does not require a non-empty credential');
+  if (!/--method GET/.test(immutableStep))
+    fail('immutable-release preflight is not an explicit GET');
+  if (!/-H 'Accept: application\/vnd\.github\+json'/.test(immutableStep))
+    fail('immutable-release preflight lacks the reviewed Accept header');
+  if (!/-H 'X-GitHub-Api-Version: 2026-03-10'/.test(immutableStep))
+    fail('immutable-release preflight lacks the reviewed API version');
+  if (!/'repos\/unrealbg\/NexusOps\/immutable-releases'/.test(immutableStep))
+    fail('immutable-release preflight endpoint changed');
+  if (!/validateImmutableReleaseStatus\(JSON\.parse\(readFileSync\(process\.argv\[1\], "utf8"\)\)\)/.test(immutableStep))
+    fail('immutable-release preflight does not validate enabled=true');
+  if (/--method\s+(?:PUT|POST|PATCH|DELETE)/i.test(immutableStep))
+    fail('publish workflow mutates immutable-release settings');
+  const immutableIndex = publishSteps.indexOf(immutableStep);
+  const activationIndex = publishSteps.findIndex((step) => /^name: Publish verified full release and mark latest$/m.test(step));
+  if (activationIndex < 0 || immutableIndex >= activationIndex)
+    fail('immutable-release preflight must precede publication');
   if (!/immutable-releases[\s\S]*verify-draft-release\.mjs[\s\S]*--immutable-json/.test(publish))
     fail('publish workflow lacks the immutable-release gate');
   if (!/verify-candidate-run\.mjs/.test(publish)) fail('publish workflow does not rebind candidate authority');
@@ -116,6 +148,11 @@ export function validateReleaseWorkflowPolicy({ signing, draft, publish }) {
     fail('publish workflow contains build, signing, tag or asset mutation');
   if (/repos\/[^\s]+\/immutable-releases[^\r\n]*(?:--method|PATCH|POST|PUT|DELETE)/.test(publish))
     fail('publish workflow mutates immutable-release settings');
+  if (typeof publishedVerifier !== 'string') fail('published release verifier source is missing');
+  if (/immutable-releases/.test(publishedVerifier))
+    fail('post-publication verifier calls the admin-only immutable settings endpoint');
+  if (!/release\.immutable !== true/.test(publishedVerifier))
+    fail('post-publication verifier does not require release.immutable=true');
   return { signingCommands: signerCommands.length, workflows: 3 };
 }
 

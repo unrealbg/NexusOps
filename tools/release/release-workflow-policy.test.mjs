@@ -12,6 +12,7 @@ async function sources() {
         ['signing', '.github/workflows/signed-updater-candidate.yml'],
         ['draft', '.github/workflows/prepare-updater-release-draft.yml'],
         ['publish', '.github/workflows/publish-updater-release.yml'],
+        ['publishedVerifier', 'tools/release/verify-published-release.mjs'],
       ].map(async ([key, path]) => [key, await readFile(join(REPOSITORY_ROOT, path), 'utf8')]),
     ),
   );
@@ -36,11 +37,35 @@ for (const [label, mutate, pattern] of [
   ['automatic publish trigger', (s) => { s.publish = s.publish.replace('  workflow_dispatch:', '  workflow_dispatch:\n  push:'); }, /automatic trigger/],
   ['publish id token', (s) => { s.publish = s.publish.replace('permissions:', 'permissions:\n  id-token: write'); }, /mixes|permissions/],
   ['publish administration', (s) => { s.publish = s.publish.replace('permissions:', 'permissions:\n  administration: write'); }, /mixes|permissions/],
-  ['removed immutable gate', (s) => { s.publish = s.publish.replaceAll('immutable-releases', 'removed-gate'); }, /immutable-release gate/],
+  ['removed immutability credential', (s) => { s.publish = s.publish.replace('secrets.IMMUTABILITY_READ_TOKEN', 'secrets.REMOVED_TOKEN'); }, /credential/],
+  ['immutability credential at workflow scope', (s) => {
+    s.publish = `env:\n  GH_TOKEN: \${{ secrets.IMMUTABILITY_READ_TOKEN }}\n${s.publish.replace('          GH_TOKEN: ${{ secrets.IMMUTABILITY_READ_TOKEN }}', '          GH_TOKEN: unavailable')}`;
+  }, /step-only/],
+  ['immutability credential at job scope', (s) => {
+    s.publish = s.publish
+      .replace('  publish:\n    runs-on:', '  publish:\n    env:\n      GH_TOKEN: ${{ secrets.IMMUTABILITY_READ_TOKEN }}\n    runs-on:')
+      .replace('          GH_TOKEN: ${{ secrets.IMMUTABILITY_READ_TOKEN }}', '          GH_TOKEN: unavailable');
+  }, /step-only/],
+  ['immutability credential in another step', (s) => { s.publish += '\n      - name: Leaked authority\n        env:\n          GH_TOKEN: ${{ secrets.IMMUTABILITY_READ_TOKEN }}\n        run: exit 1\n'; }, /exactly once/],
+  ['publication token for immutable settings', (s) => { s.publish = s.publish.replace('secrets.IMMUTABILITY_READ_TOKEN', 'github.token'); }, /publication GITHUB_TOKEN|credential/],
+  ['removed immutable API version', (s) => { s.publish = s.publish.replace("            -H 'X-GitHub-Api-Version: 2026-03-10' \\\n", ''); }, /API version/],
+  ['removed immutable Accept header', (s) => { s.publish = s.publish.replace("            -H 'Accept: application/vnd.github+json' \\\n", ''); }, /Accept header/],
+  ['changed immutable endpoint', (s) => { s.publish = s.publish.replace("'repos/unrealbg/NexusOps/immutable-releases'", "'repos/unrealbg/Other/immutable-releases'"); }, /endpoint changed/],
+  ['removed enabled validation', (s) => {
+    s.publish = s.publish.replace('validateImmutableReleaseStatus(JSON.parse(readFileSync(process.argv[1], "utf8")))', 'JSON.parse(readFileSync(process.argv[1], "utf8"))');
+  }, /enabled=true/],
+  ...['PUT', 'POST', 'PATCH', 'DELETE'].map((method) => [
+    `${method} immutable request`,
+    (s) => { s.publish = s.publish.replace('--method GET', `--method ${method}`); },
+    /explicit GET|mutates/,
+  ]),
+  ['removed immutable gate', (s) => { s.publish = s.publish.replaceAll('immutable-releases', 'removed-gate'); }, /isolate|immutable-release gate/],
   ['removed ambiguous activation handling', (s) => { s.publish = s.publish.replace('activation_status=$?', 'removed_status=0'); }, /ambiguous activation/],
   ['publish asset upload', (s) => { s.publish += '\n# gh release upload\n'; }, /mutation/],
   ['floating action', (s) => { s.draft = s.draft.replace(/actions\/checkout@[0-9a-f]{40}/, 'actions/checkout@v4'); }, /floating/],
   ['direct workflow-input shell interpolation', (s) => { s.publish += '\n      - run: echo "${{ inputs.expected_version }}"\n'; }, /directly into a run command/],
+  ['post-publication admin endpoint call', (s) => { s.publishedVerifier += '\n// immutable-releases\n'; }, /admin-only/],
+  ['removed release immutable assertion', (s) => { s.publishedVerifier = s.publishedVerifier.replace('release.immutable !== true', 'false'); }, /release\.immutable/],
 ]) {
   test(`source policy rejects ${label}`, async () => {
     const value = await sources();
@@ -48,3 +73,13 @@ for (const [label, mutate, pattern] of [
     assert.throws(() => validateReleaseWorkflowPolicy(value), pattern);
   });
 }
+
+test('source policy rejects immutable preflight after publication', async () => {
+  const value = await sources();
+  const marker = '      - name: Read immutable-release status with separate read-only authority';
+  const start = value.publish.indexOf(marker);
+  const end = value.publish.indexOf('\n      - ', start + marker.length);
+  const step = value.publish.slice(start, end);
+  value.publish = `${value.publish.slice(0, start)}${value.publish.slice(end)}\n${step}\n`;
+  assert.throws(() => validateReleaseWorkflowPolicy(value), /must precede publication/);
+});

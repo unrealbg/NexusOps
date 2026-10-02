@@ -50,6 +50,8 @@ Payload URLs are exact tag-specific URLs under `https://github.com/unrealbg/Nexu
 
 All workflows are `workflow_dispatch` only. They do not run from push, pull request, schedule, merge or `workflow_run`. Release-authority actions use reviewed full commit SHA pins. General `ci.yml` has floating actions and must not become release authority.
 
+The standard publication `GITHUB_TOKEN` cannot read the repository immutable-release setting because that endpoint requires Repository Administration read authority. Authorization B therefore exposes `IMMUTABILITY_READ_TOKEN` only to its single pre-publication settings-read step. The intended credential is a fine-grained PAT or GitHub App installation credential with Repository Administration: read, without Administration: write or Contents: write. It has no signing, tag, asset, Release creation or activation role. Repository immutability must be enabled separately through an owner-authorized settings operation; Goal 04I neither enables nor disables it.
+
 ## Authorization A — draft preparation
 
 The owner supplies an exact successful signed-candidate run ID, reviewed source SHA and version. The workflow requires its own source to be the reviewed `main` checkout and requires the candidate run to be the exact Signed updater candidate workflow, `workflow_dispatch`, completed successfully at the asserted SHA. It accepts exactly three platform artifacts.
@@ -64,11 +66,11 @@ It creates a new empty release with `draft=true`, `prerelease=false` and `make_l
 
 Publication is a separate explicit owner dispatch. Inputs bind the release ID, candidate run ID, tag, source SHA and version. The owner must also record the Authenticode decision. Before activation, the workflow independently re-reads the tag, draft, repository release list, immutable-release setting, candidate run and every candidate/draft byte.
 
-Activation fails unless repository immutable releases are enabled. Goal 04I does not enable or modify that setting and receives no administration permission. The release must still be the exact non-prerelease draft, have the committed notes, exact tag/source and exact seven assets, with no other published release making first-release activation ambiguous.
+Before publication, the dedicated read-only credential performs exactly one versioned `GET /repos/unrealbg/NexusOps/immutable-releases`. A missing credential, transport or API error, malformed response, or any value other than `enabled=true` fails closed before activation. The standard publication token retains only `actions: read` and `contents: write`; no workflow authority can mutate immutable-release settings. The release must still be the exact non-prerelease draft, have the committed notes, exact tag/source and exact seven assets, with no other published release making first-release activation ambiguous.
 
 The only activation mutation is changing the existing draft to `draft=false`, `prerelease=false`, `make_latest=true`. It does not build, sign, regenerate `latest.json`, upload or replace assets, or modify the tag.
 
-Post-publication verification uses a fixed, bounded read-only retry window. It re-reads Release/latest/tag/immutability state, verifies the public moving manifest endpoint against the exact draft bytes, checks all immutable payload URLs and publicly downloads and hashes all seven assets. An ambiguous publication response or verification failure stops without rollback or repair.
+Post-publication verification uses a fixed, bounded read-only retry window. It re-reads the exact Release, latest Release and tag, requires the published Release object itself to report `immutable=true`, verifies the public moving manifest endpoint against the exact draft bytes, checks all immutable payload URLs and publicly downloads and hashes all seven assets. It does not reuse the immutable-settings credential or call the administration-only settings endpoint. An ambiguous publication response or verification failure stops without rollback or repair.
 
 ## Failure policy
 

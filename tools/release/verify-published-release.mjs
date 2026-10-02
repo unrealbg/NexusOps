@@ -6,7 +6,6 @@ import { readReleaseSignatures, releaseAssetAllowlist, verifyLatestJson } from '
 import {
   REPOSITORY,
   hashPublicationDirectory,
-  validateImmutableReleaseStatus,
   validateReleaseAssets,
   validateReleaseState,
   validateTagRef,
@@ -76,18 +75,16 @@ export async function verifyPublishedRelease(
   if (token) headers.Authorization = `Bearer ${token}`;
   const deadline = Date.now() + OVERALL_TIMEOUT_MS;
   const api = 'https://api.github.com/repos/unrealbg/NexusOps';
-  const [release, latest, tagRef, immutable] = await Promise.all([
+  const [release, latest, tagRef] = await Promise.all([
     json(`${api}/releases/${releaseId}`, headers, deadline, fetcher),
     json(`${api}/releases/latest`, headers, deadline, fetcher),
     json(`${api}/git/ref/tags/${expectedTag}`, headers, deadline, fetcher),
-    json(`${api}/immutable-releases`, headers, deadline, fetcher),
   ]);
   const expected = { releaseId, tag: expectedTag, sourceCommit: expectedSourceSha, version: expectedVersion };
   validateReleaseState(release, expected, 'published');
   validateReleaseState(latest, expected, 'published');
   validateTagRef(tagRef, expectedTag, expectedSourceSha);
-  validateImmutableReleaseStatus(immutable);
-  if (release.immutable !== undefined && release.immutable !== true)
+  if (release.immutable !== true)
     fail('published release does not report immutable state');
   validateReleaseAssets(release.assets, expectedVersion);
 

@@ -83,7 +83,7 @@ function fetcher(stage, release, latestOverride) {
     if (url.endsWith('/releases/42') || url.endsWith('/releases/latest')) return response(url, release);
     if (url.endsWith(`/git/ref/tags/${TAG}`))
       return response(url, { ref: `refs/tags/${TAG}`, object: { type: 'commit', sha: SHA } });
-    if (url.endsWith('/immutable-releases')) return response(url, { enabled: true });
+    if (url.endsWith('/immutable-releases')) throw new Error('admin-only immutable settings endpoint was called');
     if (url.endsWith('/releases/latest/download/latest.json'))
       return response(url, latestOverride ?? await readFile(join(stage, 'latest.json')), false);
     const asset = release.assets.find((entry) => entry.browser_download_url === url);
@@ -109,5 +109,18 @@ test('post-publication manifest mismatch stops without repair', async (t) => {
       { stage, releaseId: 42, expectedTag: TAG, expectedSourceSha: SHA, expectedVersion: VERSION },
       { fetcher: fetcher(stage, release, changed) },
     ),
+  );
+});
+
+test('post-publication verifier fails unless the exact release reports immutable true', async (t) => {
+  const { stage, release } = await fixture(t);
+  const mutableRelease = { ...release };
+  delete mutableRelease.immutable;
+  await assert.rejects(
+    verifyPublishedRelease(
+      { stage, releaseId: 42, expectedTag: TAG, expectedSourceSha: SHA, expectedVersion: VERSION },
+      { fetcher: fetcher(stage, mutableRelease) },
+    ),
+    /does not report immutable state/,
   );
 });

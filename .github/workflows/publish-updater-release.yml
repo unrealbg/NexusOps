@@ -84,7 +84,6 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > "$RUNNER_TEMP/tag.json"
           gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
-          gh api "repos/$GITHUB_REPOSITORY/immutable-releases" > "$RUNNER_TEMP/immutable.json"
           mkdir "$RUNNER_TEMP/draft-download"
           gh api --jq '.assets[] | [.id,.name] | @tsv' "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" | while IFS=$'\t' read -r id name; do
             gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$RUNNER_TEMP/draft-download/$name"
@@ -99,6 +98,19 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$RUNNER_TEMP/candidate-run.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/candidate-artifacts.json"
           gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/candidate-download"
+      - name: Read immutable-release status with separate read-only authority
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.IMMUTABILITY_READ_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN" || { echo 'IMMUTABILITY_READ_TOKEN is required' >&2; exit 1; }
+          gh api \
+            --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            'repos/unrealbg/NexusOps/immutable-releases' \
+            > "$RUNNER_TEMP/immutable.json"
+          node --input-type=module -e 'import { readFileSync } from "node:fs"; import { validateImmutableReleaseStatus } from "./tools/release/release-publication-common.mjs"; validateImmutableReleaseStatus(JSON.parse(readFileSync(process.argv[1], "utf8")));' "$RUNNER_TEMP/immutable.json"
       - name: Verify Authorization B preconditions independently
         shell: bash
         env:
