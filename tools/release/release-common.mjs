@@ -288,3 +288,20 @@ export function releaseArtifactName({ productVersion, platform, architecture, so
   if (!/^[0-9a-f]{40}$/.test(sourceCommit)) fail('invalid source commit');
   return `NexusOps-${productVersion}-${platform}-${architecture}-${sourceCommit.slice(0, 8)}`;
 }
+
+export function updaterCandidateArtifactName({
+  productVersion,
+  platform,
+  architecture,
+  sourceCommit,
+}) {
+  assertSemver(productVersion, 'product version');
+  if (
+    !['windows', 'linux', 'macos'].includes(platform) ||
+    !['x86_64', 'aarch64'].includes(architecture)
+  ) {
+    fail('invalid updater candidate artifact platform or architecture');
+  }
+  if (!/^[0-9a-f]{40}$/.test(sourceCommit)) fail('invalid source commit');
+  return `NexusOps-updater-${productVersion}-${platform}-${architecture}-${sourceCommit.slice(0, 8)}`;
+}

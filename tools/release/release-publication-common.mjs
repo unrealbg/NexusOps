@@ -6,8 +6,8 @@ import {
   assertSemver,
   exactKeys,
   hashOrdinaryFile,
-  releaseArtifactName,
   stagedFileNames,
+  updaterCandidateArtifactName,
 } from './release-common.mjs';
 import { RELEASE_TARGETS, releaseAssetAllowlist, verifyLatestJson } from './latest-json.mjs';
 
@@ -22,7 +22,12 @@ export function expectedCandidateArtifacts(version, sourceCommit) {
   assertSemver(version, 'expected version');
   if (!/^[0-9a-f]{40}$/.test(sourceCommit)) fail('expected source SHA is invalid');
   return RELEASE_TARGETS.map(({ platform, architecture }) =>
-    releaseArtifactName({ productVersion: version, platform, architecture, sourceCommit }),
+    updaterCandidateArtifactName({
+      productVersion: version,
+      platform,
+      architecture,
+      sourceCommit,
+    }),
   ).sort();
 }
 
