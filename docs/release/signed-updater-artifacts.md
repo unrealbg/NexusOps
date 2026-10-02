@@ -12,7 +12,7 @@ GitHub provenance attests which workflow/source produced bytes; it does not repl
 
 ## Candidate format and validation
 
-`bundle.createUpdaterArtifacts` is `true`. The manual workflow requests only NSIS on Windows, AppImage on Linux and an app bundle with updater tarball on macOS. Tauri 2.12 first bundles the updater payload with `tauri bundle --no-sign`; the workflow stages that unsigned payload alone before a separate `tauri signer sign --app-version 0.1.0` invocation signs the staged file and embeds `version:0.1.0` in its minisign trusted comment. The macOS archive basename is `NexusOps.app.tar.gz` without a version; its trusted comment and candidate metadata carry the version binding. The release tools require a bounded, canonical signature structure with exactly one version and the expected artifact basename. Those tools inspect structure and bind candidate metadata to the committed public-key SHA-256. Goal 04E is the separate runtime path that cryptographically verifies downloaded bytes and their authenticated signed version.
+`bundle.createUpdaterArtifacts` is `true`. The manual workflow requests only NSIS on Windows, AppImage on Linux and an app bundle with updater tarball on macOS. Tauri 2.12 first bundles the updater payload with `tauri bundle --no-sign`; the workflow stages that unsigned payload alone before a separate signer step. Goal 04I removes the old literal signing version: the signer now receives `PRODUCT_VERSION` only from the verified clean repository identity, while required workflow inputs merely assert the expected SHA and version. The macOS archive basename is `NexusOps.app.tar.gz` without a version; its trusted comment and candidate metadata carry the version binding. The release tools require a bounded, canonical signature structure with exactly one version and the expected artifact basename. Those tools inspect structure, bind candidate metadata to the committed public-key SHA-256 and provide a release-only cryptographic verification path using the already locked `minisign-verify 0.2.5`.
 
 The flat staged artifact set is exactly the platform updater payload, its matching `.sig`, and deterministic `signed-updater-candidate.json`. Metadata records only schema/product/version, full source SHA, platform/architecture, artifact basename/size/SHA-256, signature basename/SHA-256 and public-key SHA-256. It has no URL, endpoint, local path, username, timestamp, password or private material. The verifier rejects changed/truncated bytes, a missing or malformed signature, source or version rebinding, unsafe names, and unexpected staged files. Synthetic tests exercise these failures without the production signing key.
 
@@ -24,7 +24,7 @@ Goal 04E retains the manifest URL, signature and version only in native memory u
 
 ## Dependency resolution
 
-Direct changes are Rust `tauri` `2.11.5 → 2.12.0`, `tauri-build` `2.6.3 → 2.7.0`, npm `@tauri-apps/api` `2.11.1 → 2.12.0` and `@tauri-apps/cli` `2.11.4 → 2.12.0`. Rust remains `1.98.1`; the product remains `0.1.0`. npm lock changes are limited to the API, CLI and its platform-specific optional binaries.
+The historical Goal 04C dependency changes were Rust `tauri` `2.11.5 → 2.12.0`, `tauri-build` `2.6.3 → 2.7.0`, npm `@tauri-apps/api` `2.11.1 → 2.12.0` and `@tauri-apps/cli` `2.11.4 → 2.12.0`. Rust remains `1.98.1`; Goal 04I changes product metadata to `0.1.1` without upgrading these dependencies.
 
 Cargo's Tauri resolution additionally changes these transitive packages (old → new):
 
@@ -39,7 +39,13 @@ The resolution removes obsolete `ctor-proc-macro 0.0.7`, `dtor 0.3.0`, `dtor-pro
 
 ## Goal 04D dependency resolution
 
-Goal 04D adds the exact direct Rust dependency `tauri-plugin-updater =2.13.1`; `Cargo.lock` resolves that same version and raises its shared `tauri-plugin` internal dependency from `2.6.3` to `2.7.0`. Its updater graph adds `minisign-verify 0.2.5`, `tar 0.4.46`, `zip 4.6.1`, and Rustls HTTPS support through `hyper-rustls 0.27.10`, `rustls 0.23.45` and related platform certificate packages. The lockfile also gains platform-specific support packages for macOS, Windows and Android. These are updater dependency resolution changes; the existing direct Tauri `2.12.0`, tauri-build `2.7.0`, npm Tauri API/CLI `2.12.0`, Rust toolchain `1.98.1` and product version `0.1.0` remain fixed.
+Goal 04D added the exact direct Rust dependency `tauri-plugin-updater =2.13.1`; `Cargo.lock` resolves that same version and raises its shared `tauri-plugin` internal dependency from `2.6.3` to `2.7.0`. Its updater graph added `minisign-verify 0.2.5`, `tar 0.4.46`, `zip 4.6.1`, and Rustls HTTPS support through `hyper-rustls 0.27.10`, `rustls 0.23.45` and related platform certificate packages. The lockfile also gained platform-specific support packages for macOS, Windows and Android. Goal 04I retains the direct Tauri `2.12.0`, tauri-build `2.7.0`, npm Tauri API/CLI `2.12.0` and Rust toolchain `1.98.1`, while product metadata advances to `0.1.1`.
+
+## Goal 04I publication boundary
+
+Goal 04I adds deterministic `latest.json`, exact seven-asset policy, signed-run rebinding, draft preparation and separate activation tooling. The exact initial targets are `darwin-aarch64`, `linux-x86_64` and `windows-x86_64`; Windows ARM64 is absent. Candidate metadata remains internal. The draft workflow receives no signing secrets, and the activation workflow rebuilds, resigns, uploads and changes no assets. Activation fails unless repository immutable releases are enabled. See the [production updater release runbook](production-updater-release.md).
+
+The Windows NSIS payload remains protected by the NexusOps/Tauri Minisign trust root but is not Windows Authenticode-signed. Linux and macOS support signed check/download/verification only. No production `0.1.1` candidate, tag, draft, Release or manifest has been created, and positive production installation remains unexecuted.
 
 ## Goal 04E direct dependency declarations
 

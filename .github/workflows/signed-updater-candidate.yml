@@ -2,6 +2,15 @@ name: Signed updater candidate
 
 on:
   workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: Exact reviewed source commit (assertion only)
+        required: true
+        type: string
+      expected_version:
+        description: Exact reviewed product version without a leading v (assertion only)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -27,8 +36,6 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      - name: Verify exact clean source
-        run: node tools/release/verify-release-source.mjs
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev librsvg2-dev libayatana-appindicator3-dev
@@ -41,6 +48,18 @@ jobs:
           cargo --version | grep -Eq '^cargo 1\.98\.1 '
           rustup component list --toolchain 1.98.1 --installed | grep -Eq '^rustfmt-'
           rustup component list --toolchain 1.98.1 --installed | grep -Eq '^clippy-'
+      - name: Fetch locked Rust dependencies for offline identity verification
+        run: cargo fetch --locked
+      - name: Derive verified release identity
+        id: identity
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+        run: |
+          node tools/release/release-identity.mjs \
+            --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            --expected-version "$EXPECTED_VERSION"
       - run: npm ci
       - run: npm run test:release
       - run: npm run typecheck
@@ -97,31 +116,34 @@ jobs:
         shell: bash
         env:
           STAGED_ARTIFACT: ${{ steps.stage.outputs.artifact_path }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           node tools/release/require-updater-signing-env.mjs
-          ./node_modules/.bin/tauri.cmd signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"
+          ./node_modules/.bin/tauri.cmd signer sign --app-version "$PRODUCT_VERSION" "$STAGED_ARTIFACT"
       - name: Sign staged AppImage payload (Linux)
         if: runner.os == 'Linux'
         shell: bash
         env:
           STAGED_ARTIFACT: ${{ steps.stage.outputs.artifact_path }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           node tools/release/require-updater-signing-env.mjs
-          ./node_modules/.bin/tauri signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"
+          ./node_modules/.bin/tauri signer sign --app-version "$PRODUCT_VERSION" "$STAGED_ARTIFACT"
       - name: Sign staged macOS payload
         if: runner.os == 'macOS'
         shell: bash
         env:
           STAGED_ARTIFACT: ${{ steps.stage.outputs.artifact_path }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           node tools/release/require-updater-signing-env.mjs
-          ./node_modules/.bin/tauri signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"
+          ./node_modules/.bin/tauri signer sign --app-version "$PRODUCT_VERSION" "$STAGED_ARTIFACT"
       - name: Create and verify deterministic signed-candidate metadata
         shell: bash
         env:

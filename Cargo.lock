@@ -2998,7 +2998,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nexus-audit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "nexus-model",
@@ -3009,9 +3009,11 @@ dependencies = [
 
 [[package]]
 name = "nexus-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "minisign-verify",
  "nexus-audit",
  "nexus-discovery",
  "nexus-model",
@@ -3033,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3060,7 +3062,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-discovery"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3075,7 +3077,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-model"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3085,7 +3087,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-operations"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "nexus-model",
@@ -3096,7 +3098,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-secrets"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "getrandom 0.4.3",
@@ -3113,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-sftp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3131,7 +3133,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-ssh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3156,7 +3158,7 @@ dependencies = [
 
 [[package]]
 name = "nexus-terminal"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

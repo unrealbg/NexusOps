@@ -1,0 +1,160 @@
+name: Publish updater release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Exact verified draft release ID
+        required: true
+        type: string
+      candidate_run_id:
+        description: Exact signed candidate workflow run used by the draft
+        required: true
+        type: string
+      expected_tag:
+        description: Exact derived release tag
+        required: true
+        type: string
+      expected_source_sha:
+        description: Exact reviewed release source commit
+        required: true
+        type: string
+      expected_version:
+        description: Exact reviewed product version without a leading v
+        required: true
+        type: string
+      authenticode_decision:
+        description: Explicit owner decision for Windows publisher identity
+        required: true
+        type: choice
+        options:
+          - owner_accepts_unsigned_publisher_for_v0.1.1
+          - authenticode_completed_and_verified
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      # actions/checkout v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      # actions/setup-node v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Require reviewed main workflow source
+        shell: bash
+        run: test "$GITHUB_REF" = refs/heads/main
+      - name: Require hosted rustup and install fixed Rust toolchain
+        shell: bash
+        run: |
+          command -v rustup >/dev/null || { echo 'Preinstalled rustup is required' >&2; exit 1; }
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+          rustc --version | grep -Eq '^rustc 1\.98\.1 '
+          cargo --version | grep -Eq '^cargo 1\.98\.1 '
+      - name: Fetch locked Rust dependencies for offline identity verification
+        run: cargo fetch --locked
+      - name: Derive verified release identity
+        id: identity
+        shell: bash
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          EXPECTED_VERSION: ${{ inputs.expected_version }}
+          EXPECTED_TAG: ${{ inputs.expected_tag }}
+        run: |
+          node tools/release/release-identity.mjs \
+            --expected-source-sha "$EXPECTED_SOURCE_SHA" \
+            --expected-version "$EXPECTED_VERSION"
+          test "$EXPECTED_TAG" = "v$EXPECTED_VERSION"
+      - name: Read and download exact draft assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/release.json"
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > "$RUNNER_TEMP/tag.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          gh api "repos/$GITHUB_REPOSITORY/immutable-releases" > "$RUNNER_TEMP/immutable.json"
+          mkdir "$RUNNER_TEMP/draft-download"
+          gh api --jq '.assets[] | [.id,.name] | @tsv' "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" | while IFS=$'\t' read -r id name; do
+            gh api -H 'Accept: application/octet-stream' "repos/$GITHUB_REPOSITORY/releases/assets/$id" > "$RUNNER_TEMP/draft-download/$name"
+          done
+      - name: Re-read exact signed candidate authority
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          mkdir "$RUNNER_TEMP/candidate-download"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID" > "$RUNNER_TEMP/candidate-run.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_RUN_ID/artifacts?per_page=100" > "$RUNNER_TEMP/candidate-artifacts.json"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/candidate-download"
+      - name: Verify Authorization B preconditions independently
+        shell: bash
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
+        run: |
+          node tools/release/verify-draft-release.mjs \
+            --release-json "$RUNNER_TEMP/release.json" \
+            --tag-json "$RUNNER_TEMP/tag.json" \
+            --releases-json "$RUNNER_TEMP/releases.json" \
+            --downloaded "$RUNNER_TEMP/draft-download" \
+            --immutable-json "$RUNNER_TEMP/immutable.json" \
+            --release-id "$RELEASE_ID" \
+            --expected-source-sha "$SOURCE_COMMIT" \
+            --expected-version "$PRODUCT_VERSION"
+          node tools/release/verify-candidate-run.mjs \
+            --candidate-root "$RUNNER_TEMP/candidate-download" \
+            --publication "$RUNNER_TEMP/draft-download" \
+            --run-json "$RUNNER_TEMP/candidate-run.json" \
+            --artifacts-json "$RUNNER_TEMP/candidate-artifacts.json" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --expected-source-sha "$SOURCE_COMMIT" \
+            --expected-version "$PRODUCT_VERSION"
+      - name: Publish verified full release and mark latest
+        id: activation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+        run: |
+          set +e
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -F prerelease=false -f make_latest=true > "$RUNNER_TEMP/activation-response.json"
+          activation_status=$?
+          set -e
+          gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" > "$RUNNER_TEMP/activation-observed-state.json"
+          if [ "$activation_status" -ne 0 ]; then
+            echo 'Publication API result was ambiguous; observed state was captured and no retry was attempted.' >&2
+            exit 1
+          fi
+          node --input-type=module -e 'import { readFileSync } from "node:fs"; const sent=JSON.parse(readFileSync(process.argv[1])); const observed=JSON.parse(readFileSync(process.argv[2])); if (sent.id !== observed.id || observed.draft || observed.prerelease) throw new Error("publication response and observed state differ");' "$RUNNER_TEMP/activation-response.json" "$RUNNER_TEMP/activation-observed-state.json"
+      - name: Bounded read-only post-publication verification
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_TAG: ${{ steps.identity.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
+        run: |
+          node tools/release/verify-published-release.mjs \
+            --stage "$RUNNER_TEMP/draft-download" \
+            --release-id "$RELEASE_ID" \
+            --expected-tag "$RELEASE_TAG" \
+            --expected-source-sha "$SOURCE_COMMIT" \
+            --expected-version "$PRODUCT_VERSION"
+          echo 'Production release activated and verified. Positive Windows installation acceptance remains separate.' >> "$GITHUB_STEP_SUMMARY"

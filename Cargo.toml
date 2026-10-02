@@ -4,7 +4,7 @@ members = ["crates/*", "apps/desktop/src-tauri"]
 default-members = ["crates/nexus-model", "crates/nexus-core", "crates/nexus-secrets", "crates/nexus-ssh", "crates/nexus-discovery", "crates/nexus-operations", "crates/nexus-audit"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -20,6 +20,7 @@ tokio-util = { version = "0.7.18", features = ["rt"] }
 tracing = "0.1.44"
 uuid = { version = "1.23", features = ["serde", "v4"] }
 base64 = "0.22.1"
+minisign-verify = "=0.2.5"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 zeroize = { version = "1.8.2", features = ["derive", "serde"] }
 tempfile = "3.26"

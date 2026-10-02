@@ -24,7 +24,7 @@ const plan: FileOperationPlan = {
   id: 'plan-a', hostId: host.id, hostSessionId: session.hostSessionId, sftpSessionId: session.id,
   kind: 'editText', risk: 'high', conflictPolicy: null,
   items: [{ sourceDisplay: 'Edited text', destinationDisplay: document.path, sizeBytes: '4' }],
-  expiresAt: '2026-10-01T20:00:00Z',
+  expiresAt: '9999-12-31T23:59:59Z',
 };
 function job(state: TransferJob['state']): TransferJob {
   return { id: 'job-a', hostId: host.id, hostSessionId: session.hostSessionId, sftpSessionId: session.id,

@@ -9,16 +9,20 @@ import {
   workspacePackageVersion,
 } from './release-common.mjs';
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 const metadata = () => ({ packages: [{ name: 'nexus-desktop', version: VERSION }] });
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'nexusops-release-version-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, 'apps/desktop/src-tauri'), { recursive: true });
+  await mkdir(join(root, 'packages/protocol'), { recursive: true });
+  await mkdir(join(root, 'packages/ui'), { recursive: true });
   await writeFile(join(root, 'Cargo.toml'), `[workspace.package]\nversion = "${VERSION}"\n`);
   await writeFile(join(root, 'package.json'), JSON.stringify({ version: VERSION }));
   await writeFile(join(root, 'apps/desktop/package.json'), JSON.stringify({ version: VERSION }));
+  await writeFile(join(root, 'packages/protocol/package.json'), JSON.stringify({ version: VERSION }));
+  await writeFile(join(root, 'packages/ui/package.json'), JSON.stringify({ version: VERSION }));
   await writeFile(
     join(root, 'apps/desktop/src-tauri/tauri.conf.json'),
     JSON.stringify({ version: VERSION }),
@@ -27,7 +31,12 @@ async function fixture(t) {
     join(root, 'package-lock.json'),
     JSON.stringify({
       version: VERSION,
-      packages: { '': { version: VERSION }, 'apps/desktop': { version: VERSION } },
+      packages: {
+        '': { version: VERSION },
+        'apps/desktop': { version: VERSION },
+        'packages/protocol': { version: VERSION },
+        'packages/ui': { version: VERSION },
+      },
     }),
   );
   return root;
@@ -78,6 +87,19 @@ test('desktop package mismatch fails', async (t) => {
   await assert.rejects(verifyReleaseVersion(root, metadata), /desktop package does not match/);
 });
 
+for (const [label, path] of [
+  ['protocol package', 'packages/protocol/package.json'],
+  ['UI package', 'packages/ui/package.json'],
+]) {
+  test(`${label} mismatch fails`, async (t) => {
+    const root = await fixture(t);
+    await changeJson(root, path, (data) => {
+      data.version = '0.2.0';
+    });
+    await assert.rejects(verifyReleaseVersion(root, metadata), new RegExp(`${label} does not match`));
+  });
+}
+
 test('package-lock root or desktop mismatch fails', async (t) => {
   const root = await fixture(t);
   await changeJson(root, 'package-lock.json', (data) => {
@@ -89,6 +111,19 @@ test('package-lock root or desktop mismatch fails', async (t) => {
     data.packages[''].version = '0.2.0';
   });
   await assert.rejects(verifyReleaseVersion(root, metadata), /package-lock root does not match/);
+});
+
+test('package-lock protocol or UI mismatch fails', async (t) => {
+  const root = await fixture(t);
+  await changeJson(root, 'package-lock.json', (data) => {
+    data.packages['packages/protocol'].version = '0.2.0';
+  });
+  await assert.rejects(verifyReleaseVersion(root, metadata), /package-lock protocol does not match/);
+  await changeJson(root, 'package-lock.json', (data) => {
+    data.packages['packages/protocol'].version = VERSION;
+    data.packages['packages/ui'].version = '0.2.0';
+  });
+  await assert.rejects(verifyReleaseVersion(root, metadata), /package-lock UI does not match/);
 });
 
 test('invalid SemVer fails', async (t) => {

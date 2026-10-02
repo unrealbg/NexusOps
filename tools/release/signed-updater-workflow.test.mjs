@@ -48,7 +48,9 @@ const PLATFORM_STEPS = [
 
 test('signed candidate workflow is manual, pinned, minimally privileged and has no bootstrap', async () => {
   const source = await workflow();
-  assert.match(source, /^on:\s*\n  workflow_dispatch:\s*$/m);
+  assert.match(source, /^on:\s*\n  workflow_dispatch:\s*\n    inputs:/m);
+  assert.match(source, /^      expected_source_sha:\s*\n(?:        .+\n)*        required: true$/m);
+  assert.match(source, /^      expected_version:\s*\n(?:        .+\n)*        required: true$/m);
   assert.doesNotMatch(source, /^  (?:push|pull_request|schedule|release|create):/m);
   assert.match(source, /^permissions:\s*\n  contents: read\s*\n  id-token: write\s*\n  attestations: write\s*$/m);
   assert.doesNotMatch(source, /(?:contents|packages|pull-requests|issues|deployments): write/);
@@ -68,6 +70,14 @@ test('bundling and staging are secret-free before three narrow detached signer s
   const source = await workflow();
   const { beforeSteps, steps } = workflowSteps(source);
   assert.doesNotMatch(beforeSteps, /TAURI_SIGNING_PRIVATE_KEY/);
+  const identity = namedStep(steps, 'Derive verified release identity');
+  assert.match(identity, /^        id: identity$/m);
+  assert.match(identity, /release-identity\.mjs/);
+  assert.match(identity, /^          EXPECTED_SOURCE_SHA: \$\{\{ inputs\.expected_source_sha \}\}$/m);
+  assert.match(identity, /^          EXPECTED_VERSION: \$\{\{ inputs\.expected_version \}\}$/m);
+  assert.match(identity, /--expected-source-sha "\$EXPECTED_SOURCE_SHA"/);
+  assert.match(identity, /--expected-version "\$EXPECTED_VERSION"/);
+  assert.doesNotMatch(identity, /run:[\s\S]*\$\{\{ inputs\./);
   assert.match(source, /prepare-updater-bundle-config\.mjs --output/);
   assert.doesNotMatch(source, /beforeBundleCommand|beforeBuildCommand/);
   const expectedSignerNames = PLATFORM_STEPS.map(({ signName }) => signName);
@@ -108,19 +118,21 @@ test('bundling and staging are secret-free before three narrow detached signer s
     assert.ok(steps.indexOf(signer) > stageIndex);
     assert.match(signer, new RegExp(`^        if: runner\\.os == '${os}'$`, 'm'));
     assert.match(signer, /^          STAGED_ARTIFACT: \$\{\{ steps\.stage\.outputs\.artifact_path \}\}$/m);
+    assert.match(signer, /^          PRODUCT_VERSION: \$\{\{ steps\.identity\.outputs\.product_version \}\}$/m);
     assert.match(signer, /^          TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}$/m);
     assert.match(signer, /^          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY_PASSWORD \}\}$/m);
     assert.match(signer, /^\s*node tools\/release\/require-updater-signing-env\.mjs$/m);
     assert.equal([...signer.matchAll(/\$\{\{ secrets\./g)].length, 2);
     const signCommand = signer.split(/\r?\n/).find((line) => new RegExp(`\\b${cli.replace('.', '\\.')} signer sign\\b`).test(line));
     assert.ok(signCommand, `${signName} must call the detached Tauri signer`);
-    assert.match(signCommand, /--app-version 0\.1\.0\b/);
+    assert.match(signCommand, /--app-version "\$PRODUCT_VERSION"/);
+    assert.doesNotMatch(signCommand, /--app-version\s+(?:v?\d+\.\d+\.\d+|"?\$\{\{\s*inputs\.)/);
     assert.match(signCommand, /"\$STAGED_ARTIFACT"/);
     const runBody = signer.split(/^        run: \|\r?\n/m)[1];
     assert.ok(runBody, `${signName} needs a shell command block`);
     assert.deepEqual(runBody.trim().split(/\r?\n/).map((line) => line.trim()), [
       'node tools/release/require-updater-signing-env.mjs',
-      `./node_modules/.bin/${cli} signer sign --app-version 0.1.0 "$STAGED_ARTIFACT"`,
+      `./node_modules/.bin/${cli} signer sign --app-version "$PRODUCT_VERSION" "$STAGED_ARTIFACT"`,
     ]);
     assert.doesNotMatch(signer, /\btauri(?:\.cmd)?\s+(?:bundle|build)\b/i);
     assert.doesNotMatch(signer, /\b(?:npm|npx|pnpm|yarn|bun|cargo|rustup|curl|wget|linuxdeploy|apt(?:-get)?|dnf|yum|pacman|apk|brew|choco|winget|scoop|pip3?|corepack)\b/i);
