@@ -56,6 +56,8 @@ The standard publication `GITHUB_TOKEN` cannot read the repository immutable-rel
 
 The owner supplies an exact successful signed-candidate run ID, reviewed source SHA and version. The workflow requires its own source to be the reviewed `main` checkout and requires the candidate run to be the exact Signed updater candidate workflow, `workflow_dispatch`, completed successfully at the asserted SHA. It accepts exactly three platform artifacts.
 
+Those workflow artifacts use the exact envelope `NexusOps-updater-<version>-<platform>-<architecture>-<short-source-sha>`. This internal transport name is distinct from each contained signed payload's public Release filename.
+
 Every candidate must match source commit, version, public-key hash, platform, architecture, basename, byte length, payload SHA-256 and signature SHA-256. The trusted comment and cryptographic signature are verified. The draft path does not rebuild or resign anything.
 
 The workflow checks `refs/tags/v0.1.1`. If absent, it creates one lightweight tag explicitly at the expected source commit. If present, it must already be a lightweight commit ref at that exact SHA. The workflow never moves, deletes, recreates or force-updates an existing tag.
@@ -92,7 +94,8 @@ After Authorization B, acceptance uses an isolated disposable Windows environmen
 
 - Release tooling and synthetic policy tests exist for review.
 - Product metadata is `0.1.1`.
-- No production `0.1.1` candidate has been signed.
+- Signed-candidate workflow run `36989647850` is valid signed generation evidence, but Authorization A stopped before mutation because its produced workflow artifact names exposed a producer/verifier contract mismatch. That run is not authorized for draft publication and is superseded after the tooling fix; a later authorization must generate a new candidate from the then-reviewed source.
+- No production `0.1.1` candidate is currently authorized for draft publication.
 - No production tag or draft has been created.
 - No GitHub Release or `latest.json` has been published.
 - The production updater endpoint has not been activated.

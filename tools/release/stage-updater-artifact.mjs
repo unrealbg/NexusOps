@@ -8,6 +8,7 @@ import {
   detectPlatformArchitecture,
   hashOrdinaryFile,
   parseStageArgument,
+  updaterCandidateArtifactName,
   verifyReleaseSource,
   verifyReleaseVersion,
 } from './release-common.mjs';
@@ -59,7 +60,7 @@ export async function stageUpdaterArtifact(
     stage,
     stagedArtifact,
     stagedSignature: `${stagedArtifact}.sig`,
-    artifactName: `NexusOps-updater-${productVersion}-${platform}-${architecture}-${sourceCommit.slice(0, 8)}`,
+    artifactName: updaterCandidateArtifactName(identity),
   };
 }
 

@@ -4,7 +4,12 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { REPOSITORY_ROOT, releaseArtifactName, verifyReleaseSource } from './release-common.mjs';
+import {
+  REPOSITORY_ROOT,
+  releaseArtifactName,
+  updaterCandidateArtifactName,
+  verifyReleaseSource,
+} from './release-common.mjs';
 
 function git(root, args) {
   return execFileSync('git', args, {
@@ -63,6 +68,43 @@ test('release artifact name is derived only from verified metadata', () => {
     /invalid release artifact/,
   );
 });
+
+test('ordinary and signed updater workflow artifact namespaces stay distinct', () => {
+  const identity = {
+    productVersion: '0.1.1',
+    platform: 'windows',
+    architecture: 'x86_64',
+    sourceCommit: '62fd0832ca252448b6bb13b58af347c50e697a53',
+  };
+  assert.equal(
+    releaseArtifactName(identity),
+    'NexusOps-0.1.1-windows-x86_64-62fd0832',
+  );
+  assert.equal(
+    updaterCandidateArtifactName(identity),
+    'NexusOps-updater-0.1.1-windows-x86_64-62fd0832',
+  );
+});
+
+for (const [label, identity] of [
+  ['invalid version', { productVersion: 'v0.1.1' }],
+  ['invalid platform', { platform: 'freebsd' }],
+  ['invalid architecture', { architecture: 'armv7' }],
+  ['short source SHA', { sourceCommit: '62fd0832' }],
+  ['uppercase source SHA', { sourceCommit: 'A'.repeat(40) }],
+]) {
+  test(`signed updater workflow artifact name rejects ${label}`, () => {
+    assert.throws(() =>
+      updaterCandidateArtifactName({
+        productVersion: '0.1.1',
+        platform: 'linux',
+        architecture: 'x86_64',
+        sourceCommit: 'a'.repeat(40),
+        ...identity,
+      }),
+    );
+  });
+}
 
 test('manual release workflow fails closed without preinstalled rustup and has no live bootstrap', async () => {
   const workflow = await readFile(

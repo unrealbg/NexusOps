@@ -16,6 +16,7 @@ import {
 } from './release-publication-common.mjs';
 
 const SHA = 'a'.repeat(40);
+const PRODUCTION_SHAPE_SHA = '62fd0832ca252448b6bb13b58af347c50e697a53';
 const VERSION = '0.1.1';
 const RUN_ID = 123;
 
@@ -48,6 +49,14 @@ test('candidate run binds exact workflow, result, source and three artifacts', (
   assert.deepEqual(validateCandidateRun(run(), artifacts(), expectation), expectedCandidateArtifacts(VERSION, SHA));
 });
 
+test('candidate artifact names match the exact production workflow envelope', () => {
+  assert.deepEqual(expectedCandidateArtifacts('0.1.1', PRODUCTION_SHAPE_SHA), [
+    'NexusOps-updater-0.1.1-linux-x86_64-62fd0832',
+    'NexusOps-updater-0.1.1-macos-aarch64-62fd0832',
+    'NexusOps-updater-0.1.1-windows-x86_64-62fd0832',
+  ]);
+});
+
 test('candidate run cannot be rebound to a different expected version', () => {
   assert.throws(() => validateCandidateRun(run(), artifacts(), { ...expectation, version: '0.1.2' }));
 });
@@ -69,6 +78,12 @@ for (const [label, mutate] of [
   ['missing artifact', (a) => { a.artifacts.pop(); }],
   ['extra artifact', (a) => { a.artifacts.push({ ...a.artifacts[0], id: 99, name: 'extra' }); }],
   ['duplicate platform artifact', (a) => { a.artifacts[1].name = a.artifacts[0].name; }],
+  ['missing updater prefix', (a) => { a.artifacts[0].name = a.artifacts[0].name.replace('NexusOps-updater-', 'NexusOps-'); }],
+  ['generic NexusOps artifact name', (a) => { a.artifacts[0].name = 'NexusOps-0.1.1-linux-x86_64-aaaaaaaa'; }],
+  ['wrong artifact version', (a) => { a.artifacts[0].name = a.artifacts[0].name.replace('0.1.1', '0.1.2'); }],
+  ['wrong artifact platform', (a) => { a.artifacts[0].name = a.artifacts[0].name.replace('-linux-', '-freebsd-'); }],
+  ['wrong artifact architecture', (a) => { a.artifacts[0].name = a.artifacts[0].name.replace('-x86_64-', '-armv7-'); }],
+  ['wrong artifact short SHA', (a) => { a.artifacts[0].name = a.artifacts[0].name.replace('-aaaaaaaa', '-bbbbbbbb'); }],
   ['expired artifact', (a) => { a.artifacts[0].expired = true; }],
   ['bad digest', (a) => { a.artifacts[0].digest = 'sha256:no'; }],
 ]) {

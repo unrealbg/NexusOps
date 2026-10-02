@@ -5,6 +5,7 @@ import test from 'node:test';
 import { REPOSITORY_ROOT } from './release-common.mjs';
 
 const WORKFLOW = join(REPOSITORY_ROOT, '.github/workflows/signed-updater-candidate.yml');
+const STAGER = join(REPOSITORY_ROOT, 'tools/release/stage-updater-artifact.mjs');
 
 async function workflow() {
   return readFile(WORKFLOW, 'utf8');
@@ -64,6 +65,13 @@ test('signed candidate workflow is manual, pinned, minimally privileged and has 
   assert.doesNotMatch(source, /sh\.rustup\.rs|actions-rust-lang\/setup-rust-toolchain/i);
   assert.doesNotMatch(source, /\b(?:curl|wget)\b[^\r\n]*\|\s*(?:sh|bash)\b/i);
   assert.doesNotMatch(source, /\bInvoke-WebRequest\b[^\r\n]*\|\s*(?:Invoke-Expression|iex|sh|bash)\b/i);
+});
+
+test('signed updater staging uses the canonical workflow artifact-name helper', async () => {
+  const source = await readFile(STAGER, 'utf8');
+  assert.match(source, /\bupdaterCandidateArtifactName\b/);
+  assert.match(source, /artifactName:\s*updaterCandidateArtifactName\(identity\)/);
+  assert.doesNotMatch(source, /artifactName:\s*`NexusOps-updater-/);
 });
 
 test('bundling and staging are secret-free before three narrow detached signer steps', async () => {
