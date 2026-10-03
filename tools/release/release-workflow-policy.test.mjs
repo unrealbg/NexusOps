@@ -134,3 +134,88 @@ test('source policy rejects duplicate post-tag release-request regeneration', as
   );
   assert.throws(() => validateReleaseWorkflowPolicy(value), /exactly once/);
 });
+
+test('source policy rejects a removed publisher-decision gate', async () => {
+  const value = await sources();
+  value.publish = removeNamedStep(value.publish, 'Require version-bound Windows publisher decision');
+  assert.throws(() => validateReleaseWorkflowPolicy(value), /lacks the identity, publisher-decision or activation step/);
+});
+
+test('source policy rejects a publisher-decision gate after activation', async () => {
+  const value = await sources();
+  const name = 'Require version-bound Windows publisher decision';
+  const marker = `      - name: ${name}`;
+  const start = value.publish.indexOf(marker);
+  const next = value.publish.indexOf('\n      - ', start + marker.length);
+  const step = value.publish.slice(start, next);
+  const without = `${value.publish.slice(0, start)}${value.publish.slice(next + 1)}`;
+  const activation = '      - name: Publish verified full release and mark latest';
+  const activationStart = without.indexOf(activation);
+  const activationNext = without.indexOf('\n      - ', activationStart + activation.length);
+  value.publish = `${without.slice(0, activationNext + 1)}${step}\n${without.slice(activationNext + 1)}`;
+  assert.throws(() => validateReleaseWorkflowPolicy(value), /precede publication/);
+});
+
+test('source policy rejects a publisher-decision gate before verified identity', async () => {
+  const value = await sources();
+  const name = 'Require version-bound Windows publisher decision';
+  const marker = `      - name: ${name}`;
+  const start = value.publish.indexOf(marker);
+  const next = value.publish.indexOf('\n      - ', start + marker.length);
+  const step = value.publish.slice(start, next);
+  const without = `${value.publish.slice(0, start)}${value.publish.slice(next + 1)}`;
+  const identity = '      - name: Derive verified release identity';
+  const identityStart = without.indexOf(identity);
+  value.publish = `${without.slice(0, identityStart)}${step}\n${without.slice(identityStart)}`;
+  assert.throws(() => validateReleaseWorkflowPolicy(value), /must follow verified identity/);
+});
+
+for (const version of ['0.1.1', '0.1.2']) {
+  test(`source policy rejects a static v${version} publisher decision`, async () => {
+    const value = await sources();
+    value.publish = value.publish.replace(
+      'owner_accepts_unsigned_publisher_for_v${PRODUCT_VERSION}',
+      `owner_accepts_unsigned_publisher_for_v${version}`,
+    );
+    assert.throws(() => validateReleaseWorkflowPolicy(value), /exact version-bound token|hard-codes/);
+  });
+}
+
+for (const [label, from, to, pattern] of [
+  [
+    'unused authenticode decision',
+    'if [ "$AUTHENTICODE_DECISION" != "$expected" ]; then',
+    'if [ "$PRODUCT_VERSION" != "$expected" ]; then',
+    /exact version-bound token/,
+  ],
+  [
+    'unverified product version binding',
+    'PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}',
+    'PRODUCT_VERSION: ${{ inputs.expected_version }}',
+    /exact input and verified-version bindings/,
+  ],
+  [
+    'missing authenticode input binding',
+    'AUTHENTICODE_DECISION: ${{ inputs.authenticode_decision }}',
+    'AUTHENTICODE_DECISION: unavailable',
+    /exact input and verified-version bindings/,
+  ],
+  [
+    'direct authenticode input interpolation',
+    '"$AUTHENTICODE_DECISION" != "$expected"',
+    '"${{ inputs.authenticode_decision }}" != "$expected"',
+    /directly into a run command/,
+  ],
+  [
+    'arbitrary publisher decision acceptance',
+    'if [ "$AUTHENTICODE_DECISION" != "$expected" ]; then',
+    'if [ -z "$AUTHENTICODE_DECISION" ]; then',
+    /exact version-bound token/,
+  ],
+]) {
+  test(`source policy rejects ${label}`, async () => {
+    const value = await sources();
+    value.publish = value.publish.replace(from, to);
+    assert.throws(() => validateReleaseWorkflowPolicy(value), pattern);
+  });
+}

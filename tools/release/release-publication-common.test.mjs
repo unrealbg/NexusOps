@@ -150,14 +150,120 @@ test('release state binds ID, tag, source and draft/published phase', () => {
   assert.equal(validateReleaseState(published, releaseExpectation, 'published'), true);
 });
 
-test('first-release activation rejects another published release', () => {
-  assert.equal(validateNoConflictingReleaseState([release()], 42, 'v0.1.1'), true);
+function versionedRelease(version, id, draft) {
+  return {
+    id,
+    tag_name: `v${version}`,
+    target_commitish: SHA,
+    draft,
+    prerelease: false,
+  };
+}
+
+test('multi-release validation accepts older published releases before the expected draft', () => {
+  const expected = versionedRelease('0.1.2', 42, true);
+  assert.equal(
+    validateNoConflictingReleaseState(
+      [expected, versionedRelease('0.1.1', 41, false), versionedRelease('0.1.0', 40, false)],
+      42,
+      'v0.1.2',
+      '0.1.2',
+    ),
+    true,
+  );
+});
+
+test('multi-release validation rejects duplicate or differently bound expected tags', () => {
+  const expected = versionedRelease('0.1.2', 42, true);
   assert.throws(
-    () => validateNoConflictingReleaseState([
-      release(),
-      { ...release(), id: 41, tag_name: 'v0.1.0', draft: false },
-    ], 42, 'v0.1.1'),
-    /another published release/,
+    () => validateNoConflictingReleaseState(
+      [expected, versionedRelease('0.1.2', 41, false)],
+      42,
+      'v0.1.2',
+      '0.1.2',
+    ),
+    /missing, duplicated or bound/,
+  );
+  assert.throws(
+    () => validateNoConflictingReleaseState([versionedRelease('0.1.2', 41, true)], 42, 'v0.1.2', '0.1.2'),
+    /missing, duplicated or bound/,
+  );
+});
+
+for (const version of ['0.1.2+published', '0.1.3', '0.2.0', '1.0.0']) {
+  test(`multi-release validation rejects conflicting published ${version}`, () => {
+    assert.throws(
+      () => validateNoConflictingReleaseState(
+        [versionedRelease('0.1.2', 42, true), versionedRelease(version, 41, false)],
+        42,
+        'v0.1.2',
+        '0.1.2',
+      ),
+      /same as or newer/,
+    );
+  });
+}
+
+test('multi-release validation uses numeric and prerelease SemVer precedence', () => {
+  assert.throws(
+    () => validateNoConflictingReleaseState(
+      [versionedRelease('0.1.9', 42, true), versionedRelease('0.1.10', 41, false)],
+      42,
+      'v0.1.9',
+      '0.1.9',
+    ),
+    /same as or newer/,
+  );
+  assert.equal(
+    validateNoConflictingReleaseState(
+      [versionedRelease('1.0.0-rc.10', 42, true), versionedRelease('1.0.0-rc.2', 41, false)],
+      42,
+      'v1.0.0-rc.10',
+      '1.0.0-rc.10',
+    ),
+    true,
+  );
+  assert.throws(
+    () => validateNoConflictingReleaseState(
+      [versionedRelease('1.0.0-rc.10', 42, true), versionedRelease('1.0.0', 41, false)],
+      42,
+      'v1.0.0-rc.10',
+      '1.0.0-rc.10',
+    ),
+    /same as or newer/,
+  );
+});
+
+test('multi-release validation ignores build metadata in precedence', () => {
+  assert.throws(
+    () => validateNoConflictingReleaseState(
+      [versionedRelease('0.1.2+target', 42, true), versionedRelease('0.1.2+published', 41, false)],
+      42,
+      'v0.1.2+target',
+      '0.1.2+target',
+    ),
+    /same as or newer/,
+  );
+});
+
+test('multi-release validation fails closed on malformed history and expectation', () => {
+  const expected = versionedRelease('0.1.2', 42, true);
+  assert.throws(
+    () => validateNoConflictingReleaseState(
+      [expected, { ...versionedRelease('0.1.1', 41, false), tag_name: 'v0.01.1' }],
+      42,
+      'v0.1.2',
+      '0.1.2',
+    ),
+    /not exact SemVer/,
+  );
+  assert.throws(
+    () => validateNoConflictingReleaseState([expected], 42, 'v0.1.2', '0.01.2'),
+    /not exact SemVer/,
+  );
+  assert.throws(
+    () => validateNoConflictingReleaseState([expected], 42, 'v0.1.1', '0.1.2'),
+    /differs from expected version/,
   );
 });
 
