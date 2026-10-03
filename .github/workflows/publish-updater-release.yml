@@ -24,12 +24,9 @@ on:
         required: true
         type: string
       authenticode_decision:
-        description: Explicit owner decision for Windows publisher identity
+        description: Exact version-bound owner acceptance of the unsigned Windows publisher
         required: true
-        type: choice
-        options:
-          - owner_accepts_unsigned_publisher_for_v0.1.1
-          - authenticode_completed_and_verified
+        type: string
 
 permissions:
   actions: read
@@ -74,6 +71,17 @@ jobs:
             --expected-source-sha "$EXPECTED_SOURCE_SHA" \
             --expected-version "$EXPECTED_VERSION"
           test "$EXPECTED_TAG" = "v$EXPECTED_VERSION"
+      - name: Require version-bound Windows publisher decision
+        shell: bash
+        env:
+          AUTHENTICODE_DECISION: ${{ inputs.authenticode_decision }}
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
+        run: |
+          expected="owner_accepts_unsigned_publisher_for_v${PRODUCT_VERSION}"
+          if [ "$AUTHENTICODE_DECISION" != "$expected" ]; then
+            echo 'Windows publisher decision does not match the verified product version' >&2
+            exit 1
+          fi
       - name: Read and download exact draft assets
         shell: bash
         env:

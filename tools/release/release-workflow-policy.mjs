@@ -52,6 +52,12 @@ function inputRequired(source, name, label) {
   if (!block || !/^        required: true$/m.test(block)) fail(`${label} lacks required ${name}`);
 }
 
+function inputTypeRequired(source, name, type, label) {
+  const block = new RegExp(`^      ${name}:\\s*\\n((?:        .+\\n)+)`, 'm').exec(source)?.[1];
+  if (!block || !new RegExp(`^        type: ${type}$`, 'm').test(block))
+    fail(`${label} ${name} type changed`);
+}
+
 function namedWorkflowSteps(source, label) {
   const steps = source.split(/^      - /m).slice(1);
   const byName = new Map();
@@ -94,6 +100,37 @@ function requireDraftRequestPreflight(source) {
     fail('draft workflow regenerates the release request after tag mutation');
   if (!/--input "\$RUNNER_TEMP\/release-request\.json"/.test(draft.source))
     fail('draft workflow does not reuse the preflight release request');
+}
+
+function requireVersionBoundPublisherDecision(source) {
+  const steps = namedWorkflowSteps(source, 'publish workflow');
+  const identityName = 'Derive verified release identity';
+  const gateName = 'Require version-bound Windows publisher decision';
+  const activationName = 'Publish verified full release and mark latest';
+  const identity = steps.get(identityName);
+  const gate = steps.get(gateName);
+  const activation = steps.get(activationName);
+  if (!identity || !gate || !activation)
+    fail('publish workflow lacks the identity, publisher-decision or activation step');
+  if (!(identity.index < gate.index && gate.index < activation.index))
+    fail('publisher-decision gate must follow verified identity and precede publication');
+  if (
+    !/^\s+AUTHENTICODE_DECISION: \$\{\{ inputs\.authenticode_decision \}\}$/m.test(gate.source) ||
+    !/^\s+PRODUCT_VERSION: \$\{\{ steps\.identity\.outputs\.product_version \}\}$/m.test(gate.source)
+  ) {
+    fail('publisher-decision gate lacks exact input and verified-version bindings');
+  }
+  if (
+    !/expected="owner_accepts_unsigned_publisher_for_v\$\{PRODUCT_VERSION\}"/.test(gate.source) ||
+    !/if \[ "\$AUTHENTICODE_DECISION" != "\$expected" \]; then/.test(gate.source) ||
+    !/Windows publisher decision does not match the verified product version/.test(gate.source)
+  ) {
+    fail('publisher-decision gate does not enforce the exact version-bound token');
+  }
+  if ((source.match(/inputs\.authenticode_decision/g) ?? []).length !== 1)
+    fail('authenticode decision input is unused or escaped its gate');
+  if (/owner_accepts_unsigned_publisher_for_v\d+\.\d+\.\d+/.test(source))
+    fail('publish workflow hard-codes a version-specific publisher decision');
 }
 
 export function validateReleaseWorkflowPolicy({ signing, draft, publish, publishedVerifier }) {
@@ -147,6 +184,7 @@ export function validateReleaseWorkflowPolicy({ signing, draft, publish, publish
 
   for (const name of ['release_id', 'candidate_run_id', 'expected_tag', 'expected_source_sha', 'expected_version', 'authenticode_decision'])
     inputRequired(publish, name, 'publish workflow');
+  inputTypeRequired(publish, 'authenticode_decision', 'string', 'publish workflow');
   if (!/^permissions:\s*\n  actions: read\s*\n  contents: write\s*$/m.test(publish))
     fail('publish workflow permissions changed');
   if (/TAURI_SIGNING_PRIVATE_KEY|id-token: write|attestations: write|administration: write/.test(publish))
@@ -182,6 +220,7 @@ export function validateReleaseWorkflowPolicy({ signing, draft, publish, publish
   const activationIndex = publishSteps.findIndex((step) => /^name: Publish verified full release and mark latest$/m.test(step));
   if (activationIndex < 0 || immutableIndex >= activationIndex)
     fail('immutable-release preflight must precede publication');
+  requireVersionBoundPublisherDecision(publish);
   if (!/immutable-releases[\s\S]*verify-draft-release\.mjs[\s\S]*--immutable-json/.test(publish))
     fail('publish workflow lacks the immutable-release gate');
   if (!/verify-candidate-run\.mjs/.test(publish)) fail('publish workflow does not rebind candidate authority');

@@ -85,13 +85,64 @@ export function validateTagRef(tagRef, expectedTag, expectedSourceCommit) {
   return true;
 }
 
-export function validateNoConflictingReleaseState(releases, expectedReleaseId, expectedTag) {
+function parseSemverForPrecedence(value, label) {
+  assertSemver(value, label);
+  const match =
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(
+      value,
+    );
+  return {
+    core: match.slice(1, 4).map(BigInt),
+    prerelease: match[4]?.split('.') ?? null,
+  };
+}
+
+function compareSemverPrecedence(left, right) {
+  for (let index = 0; index < left.core.length; index += 1) {
+    if (left.core[index] !== right.core[index]) return left.core[index] < right.core[index] ? -1 : 1;
+  }
+  if (left.prerelease === null || right.prerelease === null) {
+    if (left.prerelease === right.prerelease) return 0;
+    return left.prerelease === null ? 1 : -1;
+  }
+  const length = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPart = left.prerelease[index];
+    const rightPart = right.prerelease[index];
+    if (leftPart === undefined || rightPart === undefined) return leftPart === undefined ? -1 : 1;
+    if (leftPart === rightPart) continue;
+    const leftNumeric = /^\d+$/.test(leftPart);
+    const rightNumeric = /^\d+$/.test(rightPart);
+    if (leftNumeric && rightNumeric) return BigInt(leftPart) < BigInt(rightPart) ? -1 : 1;
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftPart < rightPart ? -1 : 1;
+  }
+  return 0;
+}
+
+export function validateNoConflictingReleaseState(
+  releases,
+  expectedReleaseId,
+  expectedTag,
+  expectedVersion,
+) {
   if (!Array.isArray(releases)) fail('repository release list is invalid');
+  const expected = parseSemverForPrecedence(expectedVersion, 'expected release version');
+  if (expectedTag !== `v${expectedVersion}`) fail('expected release tag differs from expected version');
   const sameTag = releases.filter((release) => release?.tag_name === expectedTag);
   if (sameTag.length !== 1 || sameTag[0].id !== expectedReleaseId)
     fail('release tag is missing, duplicated or bound to another release');
-  if (releases.some((release) => release?.id !== expectedReleaseId && release?.draft === false))
-    fail('another published release makes first-release activation ambiguous');
+  for (const release of releases) {
+    if (release?.id === expectedReleaseId || release?.draft !== false) continue;
+    if (typeof release.tag_name !== 'string' || !release.tag_name.startsWith('v'))
+      fail('published release has an invalid product version tag');
+    const published = parseSemverForPrecedence(
+      release.tag_name.slice(1),
+      'published release product version',
+    );
+    if (compareSemverPrecedence(published, expected) >= 0)
+      fail('published release is the same as or newer than the expected version');
+  }
   return true;
 }
 

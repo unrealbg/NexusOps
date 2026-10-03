@@ -41,7 +41,7 @@ export async function verifyDraftRelease(values, cryptoRunner) {
   const releases = JSON.parse(await readFile(values['releases-json'], 'utf8'));
   validateReleaseState(release, { releaseId, tag, sourceCommit, version }, 'draft');
   validateTagRef(tagRef, tag, sourceCommit);
-  validateNoConflictingReleaseState(releases, releaseId, tag);
+  validateNoConflictingReleaseState(releases, releaseId, tag, version);
   validateReleaseAssets(release.assets, version);
   await validateReleaseNotes(REPOSITORY_ROOT, version, release.body);
   const downloaded = resolve(values.downloaded);
