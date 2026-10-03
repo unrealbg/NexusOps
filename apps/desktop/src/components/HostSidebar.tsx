@@ -2,6 +2,7 @@ import type { Host } from '@nexusops/protocol';
 import { Button } from '@nexusops/ui';
 import { Icon } from './Icon';
 import { useHostSession } from '../api/queries';
+import { applicationVersion as builtApplicationVersion } from '../applicationVersion';
 import { ConnectionBadge } from './ConnectionBadge';
 
 function HostItem({
@@ -45,13 +46,26 @@ export function HostSidebar({
   onAdd,
   activeSection,
   onSection,
+  applicationVersion = builtApplicationVersion,
 }: {
   hosts: Host[];
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onAdd: () => void;
-  activeSection: 'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security' | 'logs' | 'containers';
-  onSection: (section: 'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security' | 'logs' | 'containers') => void;
+  activeSection:
+    'overview' | 'terminal' | 'files' | 'services' | 'network' | 'security' | 'logs' | 'containers';
+  onSection: (
+    section:
+      | 'overview'
+      | 'terminal'
+      | 'files'
+      | 'services'
+      | 'network'
+      | 'security'
+      | 'logs'
+      | 'containers',
+  ) => void;
+  applicationVersion?: string;
 }) {
   return (
     <aside className="sidebar">
@@ -182,7 +196,7 @@ export function HostSidebar({
           <strong>Direct. Agentless.</strong>
           <span>Secure SSH connections</span>
         </div>
-        <span className="version">v0.1</span>
+        <span className="version">v{applicationVersion}</span>
       </div>
     </aside>
   );
