@@ -52,6 +52,50 @@ function inputRequired(source, name, label) {
   if (!block || !/^        required: true$/m.test(block)) fail(`${label} lacks required ${name}`);
 }
 
+function namedWorkflowSteps(source, label) {
+  const steps = source.split(/^      - /m).slice(1);
+  const byName = new Map();
+  for (const [index, step] of steps.entries()) {
+    const name = /^name: ([^\r\n]+)$/m.exec(step)?.[1];
+    if (!name) continue;
+    if (byName.has(name)) fail(`${label} duplicates named step: ${name}`);
+    byName.set(name, { index, source: step });
+  }
+  return byName;
+}
+
+function requireDraftRequestPreflight(source) {
+  const steps = namedWorkflowSteps(source, 'draft workflow');
+  const preflightName = 'Prepare deterministic draft release request';
+  const tagName = 'Create or verify exact lightweight release tag';
+  const draftName = 'Create empty draft bound to the verified tag';
+  const preflight = steps.get(preflightName);
+  const tag = steps.get(tagName);
+  const draft = steps.get(draftName);
+  if (!preflight || !tag || !draft) fail('draft workflow lacks required release-request, tag or draft step');
+  if (!(preflight.index < tag.index && tag.index < draft.index))
+    fail('draft workflow must prepare the release request before tag mutation and draft creation');
+  if (
+    !/^\s+PRODUCT_VERSION: \$\{\{ steps\.identity\.outputs\.product_version \}\}$/m.test(preflight.source) ||
+    !/^\s+SOURCE_COMMIT: \$\{\{ steps\.identity\.outputs\.source_commit \}\}$/m.test(preflight.source)
+  ) {
+    fail('draft workflow release-request preflight lacks verified identity bindings');
+  }
+  if (
+    !/node tools\/release\/release-request\.mjs \\\r?\n\s+--version "\$PRODUCT_VERSION" \\\r?\n\s+--source-commit "\$SOURCE_COMMIT" \\\r?\n\s+> "\$RUNNER_TEMP\/release-request\.json"/.test(preflight.source)
+  ) {
+    fail('draft workflow release-request preflight command changed or is missing');
+  }
+  if (/\bgh\s+(?:api|release|run)\b|GH_TOKEN/.test(preflight.source))
+    fail('draft workflow release-request preflight gained GitHub mutation authority');
+  if ((source.match(/tools\/release\/release-request\.mjs/g) ?? []).length !== 1)
+    fail('draft workflow must generate the release request exactly once before tag mutation');
+  if (/release-request\.mjs/.test(draft.source))
+    fail('draft workflow regenerates the release request after tag mutation');
+  if (!/--input "\$RUNNER_TEMP\/release-request\.json"/.test(draft.source))
+    fail('draft workflow does not reuse the preflight release request');
+}
+
 export function validateReleaseWorkflowPolicy({ signing, draft, publish, publishedVerifier }) {
   for (const [label, source] of Object.entries({ signing, draft, publish })) {
     if (typeof source !== 'string') fail(`${label} workflow source is missing`);
@@ -99,6 +143,7 @@ export function validateReleaseWorkflowPolicy({ signing, draft, publish, publish
   if (!/r\.assets\.length !== 0/.test(draft))
     fail('draft workflow does not require a new empty release');
   if (/--clobber|--overwrite|\bforce\b/i.test(draft)) fail('draft workflow permits asset replacement');
+  requireDraftRequestPreflight(draft);
 
   for (const name of ['release_id', 'candidate_run_id', 'expected_tag', 'expected_source_sha', 'expected_version', 'authenticode_decision'])
     inputRequired(publish, name, 'publish workflow');
