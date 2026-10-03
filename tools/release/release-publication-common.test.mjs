@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createLatestJson, releaseAssetAllowlist } from './latest-json.mjs';
+import { REPOSITORY_ROOT } from './release-common.mjs';
+import { createDraftReleaseRequest } from './release-request.mjs';
 import {
   comparePublicationDirectories,
   expectedCandidateArtifacts,
@@ -19,6 +21,26 @@ const SHA = 'a'.repeat(40);
 const PRODUCTION_SHAPE_SHA = '62fd0832ca252448b6bb13b58af347c50e697a53';
 const VERSION = '0.1.1';
 const RUN_ID = 123;
+
+test('committed 0.1.2 notes produce the exact deterministic draft request', async () => {
+  const sourceCommit = 'b'.repeat(40);
+  const body = await readFile(join(REPOSITORY_ROOT, 'docs/release/notes/v0.1.2.md'), 'utf8');
+  assert.deepEqual(await createDraftReleaseRequest('0.1.2', sourceCommit), {
+    tag_name: 'v0.1.2',
+    target_commitish: sourceCommit,
+    name: 'NexusOps v0.1.2',
+    body,
+    draft: true,
+    prerelease: false,
+    make_latest: 'false',
+  });
+});
+
+test('draft request fails closed when committed release notes are missing', async (t) => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'nexusops-release-notes-missing-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await assert.rejects(createDraftReleaseRequest('0.1.2', 'b'.repeat(40), root), /missing or unreadable/);
+});
 
 function run() {
   return {

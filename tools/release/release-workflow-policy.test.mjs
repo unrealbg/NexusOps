@@ -83,3 +83,54 @@ test('source policy rejects immutable preflight after publication', async () => 
   value.publish = `${value.publish.slice(0, start)}${value.publish.slice(end)}\n${step}\n`;
   assert.throws(() => validateReleaseWorkflowPolicy(value), /must precede publication/);
 });
+
+function removeNamedStep(source, name) {
+  const marker = `      - name: ${name}`;
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1);
+  const next = source.indexOf('\n      - ', start + marker.length);
+  return `${source.slice(0, start)}${next < 0 ? '' : source.slice(next + 1)}`;
+}
+
+test('source policy rejects missing draft release-request preflight', async () => {
+  const value = await sources();
+  value.draft = removeNamedStep(value.draft, 'Prepare deterministic draft release request');
+  assert.throws(() => validateReleaseWorkflowPolicy(value), /lacks required release-request/);
+});
+
+test('source policy rejects draft release-request preparation after tag mutation', async () => {
+  const value = await sources();
+  const name = 'Prepare deterministic draft release request';
+  const marker = `      - name: ${name}`;
+  const start = value.draft.indexOf(marker);
+  const next = value.draft.indexOf('\n      - ', start + marker.length);
+  const step = value.draft.slice(start, next);
+  const without = `${value.draft.slice(0, start)}${value.draft.slice(next + 1)}`;
+  const tag = '      - name: Create or verify exact lightweight release tag';
+  const tagStart = without.indexOf(tag);
+  const tagNext = without.indexOf('\n      - ', tagStart + tag.length);
+  value.draft = `${without.slice(0, tagNext + 1)}${step}\n${without.slice(tagNext + 1)}`;
+  assert.throws(() => validateReleaseWorkflowPolicy(value), /before tag mutation/);
+});
+
+test('source policy rejects release-request generation only after tag mutation', async () => {
+  const value = await sources();
+  const command = /          node tools\/release\/release-request\.mjs[\s\S]*?            > "\$RUNNER_TEMP\/release-request\.json"\r?\n/;
+  const match = value.draft.match(command);
+  assert.ok(match);
+  value.draft = value.draft.replace(match[0], '          test -f docs/release/notes/v0.1.2.md\n');
+  value.draft = value.draft.replace(
+    '          gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
+    `${match[0]}          gh api --method POST "repos/$GITHUB_REPOSITORY/releases"`,
+  );
+  assert.throws(() => validateReleaseWorkflowPolicy(value), /preflight command changed or is missing/);
+});
+
+test('source policy rejects duplicate post-tag release-request regeneration', async () => {
+  const value = await sources();
+  value.draft = value.draft.replace(
+    '          gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
+    '          node tools/release/release-request.mjs --version "$PRODUCT_VERSION" --source-commit "$SOURCE_COMMIT" > "$RUNNER_TEMP/release-request.json"\n          gh api --method POST "repos/$GITHUB_REPOSITORY/releases"',
+  );
+  assert.throws(() => validateReleaseWorkflowPolicy(value), /exactly once/);
+});

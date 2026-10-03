@@ -83,6 +83,16 @@ jobs:
             --run-id "$CANDIDATE_RUN_ID" \
             --expected-source-sha "$SOURCE_COMMIT" \
             --expected-version "$PRODUCT_VERSION"
+      - name: Prepare deterministic draft release request
+        shell: bash
+        env:
+          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
+        run: |
+          node tools/release/release-request.mjs \
+            --version "$PRODUCT_VERSION" \
+            --source-commit "$SOURCE_COMMIT" \
+            > "$RUNNER_TEMP/release-request.json"
       - name: Create or verify exact lightweight release tag
         shell: bash
         env:
@@ -105,8 +115,6 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          PRODUCT_VERSION: ${{ steps.identity.outputs.product_version }}
-          SOURCE_COMMIT: ${{ steps.identity.outputs.source_commit }}
           RELEASE_TAG: ${{ steps.identity.outputs.tag }}
         run: |
           if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/existing-release.json" 2> "$RUNNER_TEMP/release.err"; then
@@ -116,7 +124,6 @@ jobs:
             cat "$RUNNER_TEMP/release.err" >&2
             exit 1
           fi
-          node tools/release/release-request.mjs --version "$PRODUCT_VERSION" --source-commit "$SOURCE_COMMIT" > "$RUNNER_TEMP/release-request.json"
           gh api --method POST "repos/$GITHUB_REPOSITORY/releases" --input "$RUNNER_TEMP/release-request.json" > "$RUNNER_TEMP/release.json"
           node --input-type=module -e 'import { readFileSync, appendFileSync } from "node:fs"; const r=JSON.parse(readFileSync(process.argv[1])); if (!r.draft || r.prerelease || r.tag_name !== process.env.RELEASE_TAG || r.assets.length !== 0) throw new Error("new release is not an empty exact draft"); appendFileSync(process.env.GITHUB_OUTPUT, `release_id=${r.id}\n`);' "$RUNNER_TEMP/release.json"
       - name: Upload exact verified release assets without replacement
