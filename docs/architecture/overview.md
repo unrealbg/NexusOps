@@ -10,6 +10,7 @@ flowchart TD
   PROVIDERS --> POLICY[Operation / Policy layer]
   POLICY --> SSH[SSH transport / nexus-ssh]
   CORE --> FILES[Typed file plans / nexus-sftp]
+  CORE --> REMOTE[Internal remote-operation authority / no production operation]
   FILES --> SSH
   SSH --> HOST[Remote Linux host / existing SSH server]
   CORE --> REPO[Local host metadata]
@@ -61,6 +62,6 @@ Audit events contain host ID, UTC timestamp, operation identity and risk, actor,
 
 TanStack Query owns host metadata/session snapshots. Zustand owns selection only. Goal 02C remote text remains in component-local memory and its short-lived typed save authority; see [Remote text editor](editor.md). Live monitoring history is likewise component-local, bounded, and cleared by host/session identity rather than persisted. Credentials remain in uncontrolled form controls and one short-lived IPC payload; save bypasses mutation caches. Components are grouped into shell, hosts, connection and overview concerns. CSS tokens and primitives permit future light themes; only the dark theme is shipped.
 
-Capabilities use a validated registry and observed facts. Future service/container providers can add capability identifiers without changing SSH. The operation engine currently accepts only its private fixed-command plans with `ReadOnly` risk, supports validation and verification, and reports rollback as unnecessary. File mutations use the adjacent one-shot typed-plan boundary described in [SFTP files architecture](sftp.md). The fixed discovery engine still rejects write risk and tampered kinds.
+Capabilities use a validated registry and observed facts. Future service/container providers can add capability identifiers without changing SSH. The operation engine permanently accepts only its private fixed-command plans with `ReadOnly` risk; it has no serializable command input and still rejects every write risk and tampered kind. File mutations use the adjacent one-shot typed-plan boundary described in [SFTP files architecture](sftp.md). Goal 05A adds a separate internal, memory-only [remote-operation authority foundation](remote-operations.md) with a 120-second one-shot authority, non-queuing admission and explicit dispatch ambiguity. It exposes no production operation, renderer API or SSH mutation mapping.
 
 See the [ADRs](../adr/0001-workspace-and-boundaries.md) for decisions and the [threat model](../security/threat-model.md) for boundaries that remain outside this goal.

@@ -35,6 +35,7 @@ nexus-operations = { path = "crates/nexus-operations" }
 nexus-audit = { path = "crates/nexus-audit" }
 nexus-terminal = { path = "crates/nexus-terminal" }
 nexus-sftp = { path = "crates/nexus-sftp" }
+nexus-remote-operations = { path = "crates/nexus-remote-operations" }
 
 [profile.dev]
 debug = 0

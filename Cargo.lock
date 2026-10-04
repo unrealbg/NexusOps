@@ -3018,6 +3018,7 @@ dependencies = [
  "nexus-discovery",
  "nexus-model",
  "nexus-operations",
+ "nexus-remote-operations",
  "nexus-secrets",
  "nexus-sftp",
  "nexus-ssh",
@@ -3087,6 +3088,17 @@ dependencies = [
 
 [[package]]
 name = "nexus-operations"
+version = "0.1.2"
+dependencies = [
+ "async-trait",
+ "nexus-model",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "nexus-remote-operations"
 version = "0.1.2"
 dependencies = [
  "async-trait",

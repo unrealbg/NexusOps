@@ -32,6 +32,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: npm ci
       - run: npm run test:release
+      - run: npm run test:remote-operations-source
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test

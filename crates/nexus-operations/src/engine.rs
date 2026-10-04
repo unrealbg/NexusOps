@@ -97,8 +97,10 @@ impl OperationEngine {
         Ok(())
     }
 
-    /// Future write operations must introduce an explicit compensating plan.
-    /// The current allowlist cannot mutate a host, so rollback performs no work.
+    /// This engine remains read-only, so rollback performs no work. Remote
+    /// mutations use a separate native authority model. Compensation is defined
+    /// per concrete operation when trustworthy and may not exist; no generic
+    /// rollback is promised.
     pub fn rollback(&self, plan: &OperationPlan) -> Result<RollbackStatus, AppError> {
         self.validate(plan)?;
         Ok(RollbackStatus::NotRequired)

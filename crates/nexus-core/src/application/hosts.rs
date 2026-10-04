@@ -11,6 +11,12 @@ impl Application {
         credential: Option<CredentialInput>,
     ) -> Result<Host, AppError> {
         let started = Instant::now();
+        let edited_id = input.id;
+        let _host_operation = if let Some(id) = edited_id {
+            Some(self.remote_operations.lifecycle_guard(id).await?)
+        } else {
+            None
+        };
         let _mutation = self.mutation.lock().await;
         let previous = input.id.map(|id| self.repository.get(id)).transpose()?;
         let host = input.into_host()?;
@@ -67,6 +73,7 @@ impl Application {
             }
             return Err(error);
         }
+        self.remote_operations.revoke_host(host.id)?;
         self.rotation_plans.lock().await.remove(&host.id);
         // Invalidate pending trust immediately after the metadata commit, even if cleanup fails.
         {
@@ -97,18 +104,26 @@ impl Application {
     }
     pub async fn delete_host(&self, id: HostId) -> Result<(), AppError> {
         let started = Instant::now();
-        let _mutation = self.mutation.lock().await;
-        let stored = self.repository.get(id)?;
-        self.disconnect_inner(id).await?;
-        // Metadata first: a crash can leave encrypted garbage, never a host referring to deleted secrets.
-        self.repository.delete(id)?;
-        self.rotation_plans.lock().await.remove(&id);
-        self.service_gates.lock().await.remove(&id);
-        self.network_gates.lock().await.remove(&id);
-        self.log_gates.lock().await.remove(&id);
-        self.container_gates.lock().await.remove(&id);
+        let _host_operation = self.remote_operations.lifecycle_guard(id).await?;
+        let (stored, work) = {
+            let _mutation = self.mutation.lock().await;
+            let stored = self.repository.get(id)?;
+            let work = self.prepare_disconnect(id).await?;
+            (stored, work)
+        };
+        self.finish_disconnect(id, work).await?;
+        {
+            let _mutation = self.mutation.lock().await;
+            // Metadata first: a crash can leave encrypted garbage, never a host referring to deleted secrets.
+            self.repository.delete(id)?;
+            self.rotation_plans.lock().await.remove(&id);
+            self.service_gates.lock().await.remove(&id);
+            self.network_gates.lock().await.remove(&id);
+            self.log_gates.lock().await.remove(&id);
+            self.container_gates.lock().await.remove(&id);
+            self.sessions.lock().await.remove(&id);
+        }
         self.remove_secret(stored.credential_id).await?;
-        self.sessions.lock().await.remove(&id);
         self.remove_monitor(id).await;
         self.terminals.remove_host(id).await;
         self.record(id, "host.delete", AuditOutcome::Success, started)

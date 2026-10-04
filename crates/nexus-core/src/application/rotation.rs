@@ -63,6 +63,7 @@ impl Application {
         &self,
         id: HostId,
     ) -> Result<HostKeyRotationPlan, AppError> {
+        let _host_operation = self.remote_operations.lifecycle_guard(id).await?;
         let _mutation = self.mutation.lock().await;
         // A re-plan attempt retires the preceding authority for this host.
         self.rotation_plans.lock().await.remove(&id);
@@ -128,6 +129,7 @@ impl Application {
         plan_id: HostKeyRotationPlanId,
     ) -> Result<(), AppError> {
         let started = Instant::now();
+        let _host_operation = self.remote_operations.lifecycle_guard(id).await?;
         let _mutation = self.mutation.lock().await;
         let authority = {
             let mut plans = self.rotation_plans.lock().await;
