@@ -4,6 +4,7 @@ impl Application {
     /// Read local metadata atomically with respect to host edit/delete and trust acceptance.
     /// This does not reconcile sessions, access secrets, audit, or perform network I/O.
     pub async fn get_host_ssh_trust(&self, id: HostId) -> Result<SshEndpointTrust, AppError> {
+        let _host_operation = self.remote_operations.lifecycle_guard(id).await?;
         let _mutation = self.mutation.lock().await;
         let host = self.repository.get(id)?.host;
         host.connection.validate().map_err(|_| {

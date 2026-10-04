@@ -1,6 +1,7 @@
 use crate::{ConnectionProvider, HostRepository, StoredHost, sessions::SessionSlot};
 use nexus_audit::{AuditActor, AuditEvent, AuditLog, AuditOutcome};
 use nexus_model::*;
+use nexus_remote_operations::RemoteOperationFoundation;
 use nexus_secrets::{CredentialInput, EncryptedSecretStore, PlatformKeyProvider, SecretStore};
 use nexus_sftp::{FilePlanStore, SftpClient, TransferManager};
 use nexus_ssh::{KnownHosts, SshProvider};
@@ -32,6 +33,7 @@ pub struct Application {
     pub(crate) log_limit: Semaphore,
     pub(crate) container_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
     pub(crate) container_limit: Semaphore,
+    pub(crate) remote_operations: RemoteOperationFoundation,
     rotation_plans: Mutex<HashMap<HostId, RotationAuthority>>,
     sessions: Mutex<HashMap<HostId, Arc<SessionSlot>>>,
     mutation: Mutex<()>,
@@ -131,6 +133,7 @@ impl Application {
             log_limit: Semaphore::new(4),
             container_gates: Mutex::new(HashMap::new()),
             container_limit: Semaphore::new(4),
+            remote_operations: RemoteOperationFoundation::default(),
             rotation_plans: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             mutation: Mutex::new(()),
@@ -152,19 +155,43 @@ impl Application {
         outcome: AuditOutcome,
         started: Instant,
     ) -> Result<(), AppError> {
+        let risk = match kind {
+            "connection.connect" | "connection.disconnect" | "discovery.refresh" => {
+                OperationRisk::ReadOnly
+            }
+            "identity.trust" | "identity.rotate" => OperationRisk::High,
+            "host.save" | "host.delete" | "file.create_directory" => OperationRisk::Low,
+            "file.rename" | "file.transfer.accepted" | "file.editor_save.accepted" => {
+                OperationRisk::Moderate
+            }
+            "file.delete" => OperationRisk::Destructive,
+            _ => {
+                return Err(AppError::new(
+                    ErrorCode::Policy,
+                    "The audit operation kind has no reviewed risk classification.",
+                ));
+            }
+        };
+        self.record_with_risk(id, kind, risk, outcome, started)
+    }
+
+    /// Records native-controlled operation identity and risk. Future mutation
+    /// callers must provide their reviewed risk explicitly; unknown kinds never
+    /// fall back to ReadOnly.
+    fn record_with_risk(
+        &self,
+        id: HostId,
+        kind: &str,
+        risk: OperationRisk,
+        outcome: AuditOutcome,
+        started: Instant,
+    ) -> Result<(), AppError> {
         self.audit.record(&AuditEvent::new(
             id,
             Operation {
                 id: HostId::new().to_string(),
                 kind: kind.into(),
-                risk: match kind {
-                    "identity.trust" | "identity.rotate" => OperationRisk::High,
-                    "host.save" | "host.delete" => OperationRisk::Low,
-                    "file.create_directory" => OperationRisk::Low,
-                    "file.rename" | "file.transfer.accepted" => OperationRisk::Moderate,
-                    "file.delete" => OperationRisk::Destructive,
-                    _ => OperationRisk::ReadOnly,
-                },
+                risk,
             },
             AuditActor::User,
             outcome,
@@ -175,25 +202,29 @@ impl Application {
     /// Repeating this operation after successful cleanup is safe; transfer admission remains
     /// permanently closed and remote session resources are not recreated here.
     pub async fn shutdown(&self) -> Result<(), AppError> {
-        let _mutation = self.mutation.lock().await;
-        self.rotation_plans.lock().await.clear();
-        let slots = self
-            .sessions
-            .lock()
-            .await
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for slot in &slots {
-            let mut data = slot.data.lock().await;
-            data.generation += 1;
-            data.refreshing = false;
-            if data.view.state == ConnectionState::Connecting {
-                data.cancel.cancel();
-            } else if data.view.state == ConnectionState::Connected {
-                data.view.state = ConnectionState::Disconnecting;
+        self.remote_operations.begin_shutdown()?;
+        let slots = {
+            let _mutation = self.mutation.lock().await;
+            self.rotation_plans.lock().await.clear();
+            let slots = self
+                .sessions
+                .lock()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            for slot in &slots {
+                let mut data = slot.data.lock().await;
+                data.generation += 1;
+                data.refreshing = false;
+                if data.view.state == ConnectionState::Connecting {
+                    data.cancel.cancel();
+                } else if data.view.state == ConnectionState::Connected {
+                    data.view.state = ConnectionState::Disconnecting;
+                }
             }
-        }
+            slots
+        };
         self.transfers.shutdown();
         let sessions = self
             .sftp_sessions

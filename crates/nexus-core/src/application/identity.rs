@@ -7,6 +7,7 @@ impl Application {
         challenge: HostKeyChallenge,
     ) -> Result<(), AppError> {
         let started = Instant::now();
+        let _host_operation = self.remote_operations.lifecycle_guard(id).await?;
         let _mutation = self.mutation.lock().await;
         self.repository.get(id)?;
         let slot = self.slot(id).await;

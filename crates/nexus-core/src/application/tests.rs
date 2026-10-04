@@ -5,6 +5,7 @@ use nexus_operations::{ReadOnlyCommand, RemoteSession};
 use nexus_secrets::{Credential, KeyProvider};
 use nexus_terminal::{TerminalChannel, TerminalConnector, TerminalRead};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 use zeroize::Zeroizing;
@@ -256,6 +257,7 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         log_limit: Semaphore::new(4),
         container_gates: Mutex::new(HashMap::new()),
         container_limit: Semaphore::new(4),
+        remote_operations: nexus_remote_operations::RemoteOperationFoundation::default(),
         rotation_plans: Mutex::new(HashMap::new()),
         mutation: Mutex::new(()),
         sessions: Mutex::new(HashMap::new()),
@@ -290,6 +292,86 @@ fn terminal_size() -> TerminalSize {
         pixel_width: 900,
         pixel_height: 540,
     }
+}
+
+#[test]
+fn audit_risk_is_native_typed_and_unknown_kinds_fail_closed() {
+    let (directory, app, _) = setup(false);
+    let host = HostId::new();
+    app.record_with_risk(
+        host,
+        "future.reviewed_mutation",
+        OperationRisk::High,
+        AuditOutcome::OutcomeUnknown,
+        Instant::now(),
+    )
+    .expect("typed audit record");
+    let contents =
+        std::fs::read_to_string(directory.path().join("audit.jsonl")).expect("audit contents");
+    let value: serde_json::Value = serde_json::from_str(contents.trim()).expect("audit JSON");
+    assert_eq!(value["operation"]["risk"], "high");
+    assert_eq!(value["outcome"], "outcomeUnknown");
+    for forbidden in [
+        "command",
+        "executable",
+        "argv",
+        "environment",
+        "stdout",
+        "stderr",
+        "error",
+        "credential",
+        "payload",
+        "target",
+    ] {
+        assert!(!contents.contains(forbidden));
+    }
+    assert_eq!(
+        app.record(
+            host,
+            "future.unclassified_mutation",
+            AuditOutcome::Failed,
+            Instant::now(),
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Policy
+    );
+}
+
+#[tokio::test]
+async fn host_operation_waiter_does_not_hold_global_metadata_gate() {
+    let (_directory, app, _) = setup(false);
+    let first = app
+        .save_host(input(), Some(credential()))
+        .await
+        .expect("first host");
+    let execution_gate = app
+        .remote_operations
+        .lifecycle_guard(first.id)
+        .await
+        .expect("host operation gate");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let waiter = {
+        let app = Arc::clone(&app);
+        let started = Arc::clone(&started);
+        tokio::spawn(async move {
+            started.notify_one();
+            app.disconnect_host(first.id).await
+        })
+    };
+    started.notified().await;
+    tokio::task::yield_now().await;
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        app.save_host(input(), Some(credential())),
+    )
+    .await
+    .expect("unrelated metadata must not wait for Host A")
+    .expect("second host");
+
+    drop(execution_gate);
+    waiter.await.expect("waiter task").expect("disconnect");
 }
 
 #[test]

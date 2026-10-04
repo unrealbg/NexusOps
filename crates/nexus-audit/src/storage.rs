@@ -162,6 +162,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_events_remain_readable_and_outcome_unknown_round_trips() {
+        let legacy = format!(
+            r#"{{"host":"{}","timestamp":"2026-10-04T12:00:00Z","operation":{{"id":"legacy-01","kind":"connection.connect","risk":"readOnly"}},"actor":"user","outcome":"success","durationMs":12}}"#,
+            HostId::new()
+        );
+        let legacy_event: AuditEvent = serde_json::from_str(&legacy).expect("legacy event");
+        assert_eq!(legacy_event.outcome, AuditOutcome::Success);
+
+        let mut unknown = event();
+        unknown.outcome = AuditOutcome::OutcomeUnknown;
+        let encoded = serde_json::to_string(&unknown).expect("unknown outcome JSON");
+        let decoded: AuditEvent = serde_json::from_str(&encoded).expect("unknown outcome event");
+        assert_eq!(decoded.outcome, AuditOutcome::OutcomeUnknown);
+        for forbidden in [
+            "command",
+            "executable",
+            "argv",
+            "environment",
+            "stdout",
+            "stderr",
+            "output",
+            "error",
+            "credential",
+            "payload",
+            "target",
+        ] {
+            assert!(!encoded.contains(forbidden));
+        }
+    }
+
+    #[test]
     fn rotation_bounds_both_files_and_keeps_json_lines_complete() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("events.jsonl");

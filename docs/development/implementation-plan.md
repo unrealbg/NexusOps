@@ -19,3 +19,11 @@ The initial workspace was empty. NexusOps is a new Rust workspace and npm worksp
 - A failed optional probe must preserve the usable connection.
 - Generated Rust/TypeScript contracts and tests must prevent IPC drift.
 - Native OS dependencies and keychains differ; Windows is verified locally and other platforms have CI build coverage.
+
+## Goal 05A remote-operation foundation
+
+Goal 05A introduces `nexus-remote-operations` beside the permanently read-only operation engine. The internal crate owns one-shot native authority, a 120-second monotonic TTL, one pending plan per host, one executing operation per host, a process-wide execution limit of one, lifecycle revocation, fresh-revalidation hooks and dispatch-aware outcomes. It has no concrete production operation, persistence, IPC, frontend surface or SSH mutation transport.
+
+Lifecycle work takes the host operation gate before the short application metadata gate and releases metadata/session locks before transport work. Execution admission is non-queuing. Consumed authority is never restored, including after `OutcomeUnknown`; compensation is operation-specific and may not exist. Audit adds the compatible `OutcomeUnknown` value and an explicit native-risk path while unknown legacy string kinds fail closed.
+
+The provisional next operation is a separately reviewed `systemd reset-failed` action for exactly one backend-observed loaded failed `.service`. Its observation identity, unit grammar, fixed SSH mapping, privilege rules, bounds, ambiguity handling, post-operation observation and native acceptance remain future work. Goal 05A does not implement or expose it.

@@ -16,6 +16,7 @@ pub enum AuditOutcome {
     Success,
     Failed,
     Cancelled,
+    OutcomeUnknown,
 }
 
 /// Deliberately closed metadata schema: no error text, credential, command or output field.
