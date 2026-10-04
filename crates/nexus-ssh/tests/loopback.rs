@@ -13,10 +13,15 @@ use std::{
 };
 
 use nexus_model::{
-    AuthenticationMethod, ErrorCode, Host, HostConnectionConfig, HostFingerprint, HostId,
+    AppError, AuthenticationMethod, ErrorCode, Host, HostConnectionConfig, HostFingerprint, HostId,
     HostKeyChallenge, HostSessionId,
 };
 use nexus_operations::{ReadOnlyCommand, RemoteSession};
+use nexus_remote_operations::{
+    AuthorityBinding, AuthorityRevalidator, ConsumedAuthority, MutationTransportOutcome, PlanDraft,
+    RemoteOperationFoundation, SystemdResetFailed, SystemdResetFailedPreconditions,
+    SystemdServiceUnitName,
+};
 use nexus_secrets::Credential;
 use nexus_sftp::SftpConnector;
 use nexus_ssh::{KnownHosts, SshProvider};
@@ -39,6 +44,8 @@ struct FixtureHandler {
     command_count: Arc<AtomicUsize>,
     journal_commands: Arc<AtomicUsize>,
     docker_commands: Arc<AtomicUsize>,
+    reset_failed_commands: Arc<AtomicUsize>,
+    last_reset_failed_command: Arc<std::sync::Mutex<Vec<u8>>>,
     channel_closes: Arc<AtomicUsize>,
     mode: Arc<AtomicU8>,
     approved_key: PublicKey,
@@ -115,6 +122,16 @@ impl server::Handler for FixtureHandler {
         if command == ReadOnlyCommand::DockerContainers.command().as_bytes() {
             self.docker_commands.fetch_add(1, Ordering::SeqCst);
         }
+        let reset_failed = command == b"LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password reset-failed -- broken.service";
+        if reset_failed {
+            self.reset_failed_commands.fetch_add(1, Ordering::SeqCst);
+            *self.last_reset_failed_command.lock().unwrap() = command.to_vec();
+        }
+        if self.mode.load(Ordering::SeqCst) == 6 {
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         session.channel_success(channel)?;
         match self.mode.load(Ordering::SeqCst) {
             1 => {
@@ -126,12 +143,22 @@ impl server::Handler for FixtureHandler {
                 session.data(channel, &b"{malformed synthetic journal data}"[..])?;
             }
             5 => {} // Valid successful empty Docker inventory.
+            7 => {
+                session.close(channel)?;
+                return Ok(());
+            }
             3 => {
                 session.exit_status_request(channel, 1)?;
                 session.close(channel)?;
                 return Ok(());
             }
             _ => {
+                if reset_failed {
+                    session.exit_status_request(channel, 0)?;
+                    session.eof(channel)?;
+                    session.close(channel)?;
+                    return Ok(());
+                }
                 let Some(text) = probe_responses::response(command) else {
                     session.channel_failure(channel)?;
                     session.close(channel)?;
@@ -177,6 +204,8 @@ impl Fixture {
             command_count: Arc::new(AtomicUsize::new(0)),
             journal_commands: Arc::new(AtomicUsize::new(0)),
             docker_commands: Arc::new(AtomicUsize::new(0)),
+            reset_failed_commands: Arc::new(AtomicUsize::new(0)),
+            last_reset_failed_command: Arc::new(std::sync::Mutex::new(Vec::new())),
             channel_closes: Arc::new(AtomicUsize::new(0)),
             mode: Arc::new(AtomicU8::new(0)),
             approved_key: user_key.public_key().clone(),
@@ -243,6 +272,138 @@ fn password() -> Credential {
         private_key: None,
         passphrase: None,
     }
+}
+
+struct AllowResetFailed;
+
+#[async_trait::async_trait]
+impl AuthorityRevalidator<SystemdResetFailed> for AllowResetFailed {
+    type DispatchGuard = ();
+
+    async fn revalidate(&self, _: &ConsumedAuthority<SystemdResetFailed>) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+async fn execute_reset_failed(
+    session: &nexus_ssh::SshSession,
+    host_id: HostId,
+    cancellation: CancellationToken,
+) -> nexus_remote_operations::ExecutionResult {
+    let binding = AuthorityBinding {
+        host_id,
+        host_session_id: HostSessionId::new(),
+        generation: 1,
+    };
+    let foundation = RemoteOperationFoundation::default();
+    let receipt = foundation
+        .plan::<SystemdResetFailed>(
+            PlanDraft::new(
+                binding,
+                SystemdServiceUnitName::parse("broken.service").unwrap(),
+                SystemdResetFailedPreconditions,
+                (),
+            ),
+            binding,
+        )
+        .unwrap();
+    foundation
+        .execute::<SystemdResetFailed, _, _>(
+            receipt.id,
+            binding,
+            &AllowResetFailed,
+            session,
+            cancellation,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn reset_failed_uses_the_exact_fixed_command_and_confirms_exit_status() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    let execution =
+        execute_reset_failed(session.as_ref(), fixture.host.id, CancellationToken::new()).await;
+    assert_eq!(
+        execution.terminal,
+        nexus_remote_operations::ExecutionTerminal::Transport(
+            MutationTransportOutcome::CompletionConfirmed { success: true }
+        )
+    );
+    assert_eq!(
+        fixture.handler.reset_failed_commands.load(Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        fixture.handler.last_reset_failed_command.lock().unwrap().as_slice(),
+        b"LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password reset-failed -- broken.service"
+    );
+    assert!(!session.is_closed());
+}
+
+#[tokio::test]
+async fn reset_failed_transport_classifies_rejection_failure_and_ambiguous_completion() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    for (mode, expected) in [
+        (
+            6,
+            MutationTransportOutcome::NotDispatched(
+                nexus_remote_operations::NotDispatchedReason::Rejected,
+            ),
+        ),
+        (
+            3,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            7,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
+        (
+            1,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::OutputLimit,
+            ),
+        ),
+    ] {
+        fixture.handler.mode.store(mode, Ordering::SeqCst);
+        let result =
+            execute_reset_failed(session.as_ref(), fixture.host.id, CancellationToken::new()).await;
+        assert_eq!(
+            result.terminal,
+            nexus_remote_operations::ExecutionTerminal::Transport(expected),
+            "mode {mode}"
+        );
+    }
+    assert_eq!(
+        fixture.handler.reset_failed_commands.load(Ordering::SeqCst),
+        4
+    );
+
+    let before = fixture.handler.reset_failed_commands.load(Ordering::SeqCst);
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let result = execute_reset_failed(session.as_ref(), fixture.host.id, cancelled).await;
+    assert_eq!(
+        result.terminal,
+        nexus_remote_operations::ExecutionTerminal::CancelledBeforeDispatch
+    );
+    assert_eq!(
+        fixture.handler.reset_failed_commands.load(Ordering::SeqCst),
+        before
+    );
 }
 
 #[tokio::test]

@@ -43,6 +43,13 @@ impl ExecutionAdmission {
         Ok(self.host_gate(host_id)?.lock_owned().await)
     }
 
+    /// User-facing publication never waits behind lifecycle or execution work.
+    pub fn try_lifecycle_guard(&self, host_id: HostId) -> Result<OwnedMutexGuard<()>, AppError> {
+        self.host_gate(host_id)?
+            .try_lock_owned()
+            .map_err(|_| busy())
+    }
+
     fn host_gate(&self, host_id: HostId) -> Result<Arc<AsyncMutex<()>>, AppError> {
         let mut gates = self.host_gates.lock().map_err(|_| unavailable())?;
         Ok(gates

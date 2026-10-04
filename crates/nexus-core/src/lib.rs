@@ -2,6 +2,7 @@
 mod application;
 mod provider;
 mod repository;
+mod service_observations;
 mod sessions;
 pub use application::Application;
 pub use provider::{ConnectedTransport, ConnectionProvider};

@@ -3152,6 +3152,7 @@ dependencies = [
  "nexus-discovery",
  "nexus-model",
  "nexus-operations",
+ "nexus-remote-operations",
  "nexus-secrets",
  "nexus-sftp",
  "nexus-terminal",

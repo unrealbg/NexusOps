@@ -1,10 +1,10 @@
 # Remote operation authority foundation
 
-Goal 05A adds a native, memory-only foundation for future reviewed remote mutations. It does not add a production mutation, Tauri command, IPC DTO, TypeScript API, frontend action or SSH mutation mapping. `nexus-operations` remains the fixed read-only operation engine. The adjacent `nexus-remote-operations` crate is transport-independent and has no Tauri, renderer, core or SSH dependency.
+Goal 05A added the native, memory-only foundation. Goal 05B uses it for exactly one production semantic operation, `SystemdResetFailed`, while `nexus-operations` and `RemoteSession::execute` remain permanently read-only. `nexus-remote-operations` stays transport-independent; the reviewed SSH adapter implements its typed mutation transport in one focused module.
 
 ## Authority ownership
 
-An authority is minted from a sealed native operation type. Goal 05A ships no production implementation of that type; deterministic fake operations exist only under Rust test configuration. The stored record binds an unpredictable UUID plan ID to `HostId`, exact `HostSessionId`, session generation, native operation type, native `OperationRisk`, backend-owned target and preconditions, issue/expiry instants and a private native payload. It stores no credential, username or authentication method. Private payloads have no Serde or TypeScript representation.
+An authority is minted from a sealed native operation type. `SystemdResetFailed` is the only production implementation. The stored record binds an unpredictable UUID plan ID to `HostId`, exact `HostSessionId`, session generation, native operation type, native `OperationRisk`, backend-owned target and preconditions, issue/expiry instants and a private native payload. It stores no credential, username or authentication method. Private targets, preconditions and payloads have no Serde or TypeScript representation.
 
 The store permits one pending authority per host. Publishing a replacement atomically removes the previous authority. The fixed TTL is 120 seconds using Tokio's monotonic clock. Expiry is enforced both by a best-effort timer and synchronously whenever authority is observed or consumed. Authorities are not persisted and cannot survive process restart.
 
@@ -30,13 +30,13 @@ Routine remote mutations will use ordinary process command admission. They must 
 
 ## Revalidation and outcomes
 
-After one-shot consume and before dispatch, a future concrete revalidator must establish that the host still exists; the exact host session, generation and transport remain current and open; shutdown has not started; the authority is unexpired; operation identity and risk are unchanged; target identity and preconditions remain current; and the operation remains permitted. Renderer state and TTL alone are never sufficient. No remote compare-and-swap guarantee is implied.
+After one-shot consume and before dispatch, the concrete service revalidator establishes that the host still exists; the exact host session, generation and transport remain current and open; shutdown has not started; operation identity and Moderate risk are unchanged; and a fresh fixed inventory still reports the private target as `loaded / failed / failed`. Renderer state and TTL alone are never sufficient. No remote compare-and-swap guarantee is implied.
 
 The mutation transport contract has explicit dispatch certainty:
 
 - `NotDispatched` identifies cancellation, timeout, connection failure or policy rejection known to occur before dispatch.
 - `CompletionConfirmed` records a positively confirmed success or failure.
-- `CompletionUnknown` records cancellation, timeout or connection loss after dispatch occurred or may have occurred.
+- `CompletionUnknown` records cancellation, timeout, connection loss or bounded-output overflow after dispatch occurred or may have occurred.
 
 Internal outcomes are `Success`, `Failed`, `Cancelled` and `OutcomeUnknown`. `OutcomeUnknown` is terminal. It never triggers automatic retry, replay or authority restoration. A later attempt requires a fresh backend observation and plan. Confirmed failure does not claim the remote command had no partial side effects. There is no generic rollback: compensation is operation-specific and may not exist.
 
@@ -48,6 +48,4 @@ Audit remains metadata-only. It contains no command, executable, argv, environme
 
 ## Goal boundary
 
-Goal 05A provides only internal authority, admission, revocation, outcome and audit primitives with fake transport tests. Source-policy tests reject mutation Tauri commands, renderer/protocol mutation APIs, serializable private payloads, production operation implementations and SSH coupling.
-
-The provisional Goal 05B candidate is `systemd reset-failed` for exactly one backend-observed, currently loaded and failed `.service` unit. It remains design-only here. A later milestone must separately define a backend-minted observation identity, strict operational unit-name grammar, fixed native SSH mapping, failed-state revalidation, privilege behavior, timeout/output bounds, dispatch ambiguity, fresh post-operation observation and disposable native acceptance. A current `ServiceEntry.unit` must never be interpolated directly into shell text.
+Goal 05B permits exactly three operation-specific IPC commands and display DTOs. Source policy retains each Rust source path and allows one native operation module plus one SSH adapter module while rejecting additional operations, adapters, generic command strings, argv/environment payloads and generic renderer mutation APIs elsewhere. The current `ServiceEntry.unit` display string is never accepted back as operational input. Real systemd mutation acceptance remains a separate owner-authorized gate.

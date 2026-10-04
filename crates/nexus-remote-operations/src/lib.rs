@@ -7,17 +7,19 @@ mod admission;
 mod authority;
 mod outcome;
 mod store;
+mod systemd_reset_failed;
 
 pub use admission::{ExecutionAdmission, ExecutionPermit};
-pub use authority::{
-    AuthorityBinding, ConsumedAuthority, NativeOperation, PlanDraft, PlanReceipt,
-    RemoteOperationPlanId,
-};
+pub use authority::{AuthorityBinding, ConsumedAuthority, NativeOperation, PlanDraft, PlanReceipt};
+pub use nexus_model::RemoteOperationPlanId;
 pub use outcome::{
-    AuthorityRevalidator, CompletionUnknownReason, ExecutionResult, MutationTransport,
-    MutationTransportOutcome, NotDispatchedReason, RemoteOperationOutcome,
+    AuthorityRevalidator, CompletionUnknownReason, ExecutionResult, ExecutionTerminal,
+    MutationTransport, MutationTransportOutcome, NotDispatchedReason, RemoteOperationOutcome,
 };
 pub use store::{AuthorityStore, PLAN_TTL};
+pub use systemd_reset_failed::{
+    SystemdResetFailed, SystemdResetFailedPreconditions, SystemdServiceUnitName,
+};
 
 use nexus_model::{AppError, ErrorCode, HostId, HostSessionId};
 use tokio::sync::OwnedMutexGuard;
@@ -50,6 +52,10 @@ impl RemoteOperationFoundation {
         self.admission.lifecycle_guard(host_id).await
     }
 
+    pub fn try_lifecycle_guard(&self, host_id: HostId) -> Result<OwnedMutexGuard<()>, AppError> {
+        self.admission.try_lifecycle_guard(host_id)
+    }
+
     pub fn revoke_host(&self, host_id: HostId) -> Result<bool, AppError> {
         self.authorities.revoke_host(host_id)
     }
@@ -77,7 +83,7 @@ impl RemoteOperationFoundation {
     where
         O: NativeOperation,
         R: AuthorityRevalidator<O>,
-        T: MutationTransport<O>,
+        T: MutationTransport<O> + ?Sized,
     {
         if self.authorities.is_sealed()? {
             return Err(shutting_down());
@@ -89,15 +95,32 @@ impl RemoteOperationFoundation {
             return Err(shutting_down());
         }
         let authority = self.authorities.consume::<O>(plan_id, binding)?;
-        revalidator.revalidate(&authority).await?;
-        if self.authorities.is_sealed()? || cancellation.is_cancelled() {
+        if cancellation.is_cancelled() {
             return Ok(ExecutionResult {
                 outcome: RemoteOperationOutcome::Cancelled,
+                terminal: ExecutionTerminal::CancelledBeforeDispatch,
             });
         }
-        let outcome = transport.dispatch(&authority, cancellation).await;
+        let dispatch_guard = match revalidator.revalidate(&authority).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                return Ok(ExecutionResult {
+                    outcome: RemoteOperationOutcome::Failed,
+                    terminal: ExecutionTerminal::RevalidationFailed,
+                });
+            }
+        };
+        if self.authorities.is_sealed().unwrap_or(true) || cancellation.is_cancelled() {
+            return Ok(ExecutionResult {
+                outcome: RemoteOperationOutcome::Cancelled,
+                terminal: ExecutionTerminal::CancelledBeforeDispatch,
+            });
+        }
+        let transport_outcome = transport.dispatch(&authority, cancellation).await;
+        drop(dispatch_guard);
         Ok(ExecutionResult {
-            outcome: outcome.operation_outcome(),
+            outcome: transport_outcome.operation_outcome(),
+            terminal: ExecutionTerminal::Transport(transport_outcome),
         })
     }
 }

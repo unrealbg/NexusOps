@@ -11,6 +11,10 @@ import type {
   SystemJournalSnapshot,
   ContainerSnapshot,
   ServiceSnapshot,
+  ServiceObservationId,
+  RemoteOperationPlanId,
+  ServiceResetFailedPlan,
+  ServiceResetFailedResult,
   SshEndpointTrust,
   HostSession,
   TerminalOutputBatch,
@@ -98,6 +102,25 @@ export const monitorApi = {
 export const servicesApi = {
   list: (hostId: string, hostSessionId: string) =>
     request<ServiceSnapshot>('list_host_services', { hostId, hostSessionId }),
+  planResetFailed: (
+    hostId: string,
+    hostSessionId: string,
+    serviceObservationId: ServiceObservationId,
+  ) => request<ServiceResetFailedPlan>('plan_service_reset_failed', {
+    hostId, hostSessionId, serviceObservationId,
+  }),
+  discardResetFailed: (
+    hostId: string,
+    hostSessionId: string,
+    planId: RemoteOperationPlanId,
+  ) => request<boolean>('discard_service_reset_failed', { hostId, hostSessionId, planId }),
+  executeResetFailed: (
+    hostId: string,
+    hostSessionId: string,
+    planId: RemoteOperationPlanId,
+  ) => request<ServiceResetFailedResult>('execute_service_reset_failed', {
+    hostId, hostSessionId, planId,
+  }),
 };
 
 /** One fixed read-only network observation; no renderer-supplied remote arguments. */

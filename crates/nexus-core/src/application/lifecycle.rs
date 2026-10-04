@@ -49,6 +49,8 @@ impl Application {
         }
         if let Some(connection_id) = closed_connection {
             self.remote_operations.revoke_session(id, connection_id)?;
+            self.service_observations
+                .revoke_session(id, connection_id)?;
             self.close_sftp(id, connection_id).await?;
             self.terminals
                 .disconnect_connection(id, connection_id)
@@ -68,6 +70,7 @@ impl Application {
 
     pub(super) async fn prepare_disconnect(&self, id: HostId) -> Result<DisconnectWork, AppError> {
         self.remote_operations.revoke_host(id)?;
+        self.service_observations.revoke_host(id)?;
         self.rotation_plans.lock().await.remove(&id);
         let started = Instant::now();
         let slot = self.slot(id).await;

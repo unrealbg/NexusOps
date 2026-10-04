@@ -93,6 +93,7 @@ impl<'a> ServiceProperties<'a> {
             active_state: active_state.to_owned(),
             sub_state: sub_state.to_owned(),
             description: description.to_owned(),
+            reset_failed_observation_id: None,
         })
     }
 }

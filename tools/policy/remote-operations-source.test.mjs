@@ -10,12 +10,12 @@ import {
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-test('Goal 05A exposes no production remote-mutation authority to renderer or SSH', async () => {
+test('Goal 05B exposes only the reviewed systemd reset-failed vertical slice', async () => {
   const result = await verifyRemoteOperationsSource(repositoryRoot);
   assert.ok(result.commandCount > 0);
 });
 
-test('policy rejects a mutation Tauri command or TypeScript execution API', async () => {
+test('policy rejects an unreviewed mutation Tauri command or generic TypeScript execution API', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(
     () => verifyRemoteOperationsSourceText({
@@ -33,14 +33,14 @@ test('policy rejects a mutation Tauri command or TypeScript execution API', asyn
   );
 });
 
-test('policy rejects serializable or concrete production mutation payloads', async () => {
+test('policy rejects serializable or additional concrete production mutation payloads', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,
       remoteProductionSources: [
         ...fixture.remoteProductionSources,
-        '#[derive(serde::Serialize)] struct ExposedPayload { command: String }',
+        { path: 'crates/nexus-remote-operations/src/unreviewed.rs', source: '#[derive(serde::Serialize)] struct ExposedPayload { command: String }' },
       ],
     }),
     /private remote-operation production source/,
@@ -50,21 +50,24 @@ test('policy rejects serializable or concrete production mutation payloads', asy
       ...fixture,
       remoteProductionSources: [
         ...fixture.remoteProductionSources,
-        'impl NativeOperation for ProductionMutation {}',
+        { path: 'crates/nexus-remote-operations/src/unreviewed.rs', source: 'impl NativeOperation for ProductionMutation {}' },
       ],
     }),
-    /private remote-operation production source/,
+    /exactly SystemdResetFailed/,
   );
 });
 
-test('policy rejects SSH coupling and serializable ReadOnlyCommand', async () => {
+test('policy rejects SSH coupling outside the reviewed adapter and serializable ReadOnlyCommand', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,
-      sshCargoSource: `${fixture.sshCargoSource}\nnexus-remote-operations.workspace = true`,
+      sshProductionSources: [
+        ...fixture.sshProductionSources,
+        { path: 'crates/nexus-ssh/src/unreviewed.rs', source: 'use nexus_remote_operations::SystemdResetFailed; // unreviewed adapter' },
+      ],
     }),
-    /SSH production source/,
+    /unreviewed SSH production source/,
   );
   assert.throws(
     () => verifyRemoteOperationsSourceText({
@@ -75,5 +78,27 @@ test('policy rejects SSH coupling and serializable ReadOnlyCommand', async () =>
       ),
     }),
     /non-serializable/,
+  );
+});
+
+test('policy rejects changes to the exact reset-failed command and its bounds', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_reset_failed.rs')
+        ? { ...file, source: file.source.replace('--no-ask-password reset-failed -- ', 'reset-failed ') }
+        : file),
+    }),
+    /systemd SSH transport policy is missing/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_reset_failed.rs')
+        ? { ...file, source: file.source.replace('const OUTPUT_LIMIT: usize = 8 * 1024;', 'const OUTPUT_LIMIT: usize = 64 * 1024;') }
+        : file),
+    }),
+    /systemd SSH transport policy is missing/,
   );
 });

@@ -24,6 +24,7 @@ pub enum CompletionUnknownReason {
     Cancelled,
     Timeout,
     ConnectionLost,
+    OutputLimit,
 }
 
 /// Transport result encodes whether mutation dispatch could have happened.
@@ -51,7 +52,12 @@ impl MutationTransportOutcome {
 
 #[async_trait]
 pub trait AuthorityRevalidator<O: NativeOperation>: Send + Sync {
-    async fn revalidate(&self, authority: &ConsumedAuthority<O>) -> Result<(), AppError>;
+    type DispatchGuard: Send;
+
+    async fn revalidate(
+        &self,
+        authority: &ConsumedAuthority<O>,
+    ) -> Result<Self::DispatchGuard, AppError>;
 }
 
 #[async_trait]
@@ -66,4 +72,12 @@ pub trait MutationTransport<O: NativeOperation>: Send + Sync {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExecutionResult {
     pub outcome: RemoteOperationOutcome,
+    pub terminal: ExecutionTerminal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionTerminal {
+    RevalidationFailed,
+    CancelledBeforeDispatch,
+    Transport(MutationTransportOutcome),
 }
