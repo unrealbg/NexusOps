@@ -44,27 +44,31 @@ Payload URLs are exact tag-specific URLs under `https://github.com/unrealbg/Nexu
 
 | Phase | Manual workflow | Permissions | Signing secrets | Result |
 | --- | --- | --- | --- | --- |
-| Candidate | `signed-updater-candidate.yml` | `contents: read`, `id-token: write`, `attestations: write` | Detached signer steps only | Three immutable workflow artifacts |
-| Authorization A | `prepare-updater-release-draft.yml` | `actions: read`, `contents: write` | None | Exact tag and verified draft with seven assets |
-| Authorization B | `publish-updater-release.yml` | `actions: read`, `contents: write` | None | Existing verified draft becomes full/latest |
+| Authorization A — signed candidate | `signed-updater-candidate.yml` | `contents: read`, `id-token: write`, `attestations: write` | Detached signer steps only | Three immutable workflow artifacts |
+| Authorization B — draft preparation | `prepare-updater-release-draft.yml` | `actions: read`, `contents: write` | None | Exact tag and verified draft with seven assets |
+| Publication authorization — activation | `publish-updater-release.yml` | `actions: read`, `contents: write` | None | Existing verified draft becomes full/latest |
 
 All workflows are `workflow_dispatch` only. They do not run from push, pull request, schedule, merge or `workflow_run`. Release-authority actions use reviewed full commit SHA pins. General `ci.yml` has floating actions and must not become release authority.
 
-The standard publication `GITHUB_TOKEN` cannot read the repository immutable-release setting because that endpoint requires Repository Administration read authority. Authorization B therefore exposes `IMMUTABILITY_READ_TOKEN` only to its single pre-publication settings-read step. The intended credential is a fine-grained PAT or GitHub App installation credential with Repository Administration: read, without Administration: write or Contents: write. It has no signing, tag, asset, Release creation or activation role. Repository immutability must be enabled separately through an owner-authorized settings operation; Goal 04I neither enables nor disables it.
+The standard publication `GITHUB_TOKEN` cannot read the repository immutable-release setting because that endpoint requires Repository Administration read authority. The publication workflow therefore exposes `IMMUTABILITY_READ_TOKEN` only to its single pre-publication settings-read step. The intended credential is a fine-grained PAT or GitHub App installation credential with Repository Administration: read, without Administration: write or Contents: write. It has no signing, tag, asset, Release creation or activation role. Repository immutability must be enabled separately through an owner-authorized settings operation; Goal 04I neither enables nor disables it.
 
-## Authorization A — draft preparation
+## Authorization A — signed candidate
 
-The owner supplies an exact successful signed-candidate run ID, reviewed source SHA and version. The workflow requires its own source to be the reviewed `main` checkout and requires the candidate run to be the exact Signed updater candidate workflow, `workflow_dispatch`, completed successfully at the asserted SHA. It accepts exactly three platform artifacts.
+The owner authorizes exactly one signed-candidate dispatch for an exact reviewed source SHA and version. The signed-candidate workflow derives the same identity from the clean reviewed `main` checkout, builds the three supported platform updater payloads and exposes the production signing key only to the detached signer steps. It has no tag, Release, asset-publication or repository-content write authority. A failed or ambiguous run is not retried without fresh authorization.
 
-Those workflow artifacts use the exact envelope `NexusOps-updater-<version>-<platform>-<architecture>-<short-source-sha>`. This internal transport name is distinct from each contained signed payload's public Release filename.
+A successful Authorization A run produces exactly three workflow artifacts using the envelope `NexusOps-updater-<version>-<platform>-<architecture>-<short-source-sha>`. This internal transport name is distinct from each contained signed payload's public Release filename.
 
-Every candidate must match source commit, version, public-key hash, platform, architecture, basename, byte length, payload SHA-256 and signature SHA-256. The trusted comment and cryptographic signature are verified. The draft path does not rebuild or resign anything.
+Every candidate must match source commit, version, public-key hash, platform, architecture, basename, byte length, payload SHA-256 and signature SHA-256. The trusted comment and cryptographic signature are verified before later draft authority is accepted.
+
+## Authorization B — draft preparation
+
+The owner supplies the exact successful signed-candidate run ID, reviewed source SHA and version. The draft workflow requires its own source to be the reviewed `main` checkout and requires the candidate run to be the exact Signed updater candidate workflow, `workflow_dispatch`, completed successfully at the asserted SHA. It accepts exactly three platform artifacts, re-verifies their identity and cryptography, and does not rebuild or resign anything.
 
 The workflow checks `refs/tags/v<version>`. If absent, it creates one lightweight tag explicitly at the expected source commit. If present, it must already be a lightweight commit ref at that exact SHA. The workflow never moves, deletes, recreates or force-updates an existing tag.
 
 It creates a new empty release with `draft=true`, `prerelease=false` and `make_latest=false`, using the committed release notes. Any preexisting release or asset blocks preparation. It uploads the exact seven files without clobber, authenticates and downloads every asset by release-asset ID, then rehashes and re-verifies the complete set. Successful completion leaves a draft only.
 
-## Authorization B — activation
+## Publication authorization — activation
 
 Publication is a separate explicit owner dispatch. Inputs bind the release ID, candidate run ID, tag, source SHA and version. The owner must also record the Authenticode decision. Before activation, the workflow independently re-reads the tag, draft, repository release list, immutable-release setting, candidate run and every candidate/draft byte.
 
