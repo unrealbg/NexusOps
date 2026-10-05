@@ -563,15 +563,29 @@ export function verifyRemoteOperationsSourceText({
     'const CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);',
     'const OUTPUT_LIMIT: usize = 8 * 1024;',
     'LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password reset-failed -- ',
-    'Some(ChannelMsg::ExitStatus { exit_status }) if accepted =>',
-    'Some(ChannelMsg::ExitSignal { .. }) if accepted =>',
+    'Some(ChannelMsg::ExitStatus { exit_status }) =>',
+    'Some(ChannelMsg::ExitSignal { .. }) =>',
     'Some(ChannelMsg::Success) if !accepted => accepted = true,',
+    'Some(ChannelMsg::Failure) if !accepted && !execution_evidence =>',
+    'Some(ChannelMsg::Data { data })',
+    'Some(ChannelMsg::ExtendedData { data, .. }) =>',
+    'Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None =>',
+    'CompletionUnknownReason::Cancelled',
+    'CompletionUnknownReason::Timeout',
   ]) {
     if (!systemdTransportProduction.includes(required)) fail(`systemd SSH transport policy is missing ${required}`);
   }
   requireAbsent(
     systemdTransportProduction,
-    ['sudo', 'pkexec', 'Vec<SystemdServiceUnitName>', 'command: String', 'verb: String'],
+    [
+      'sudo',
+      'pkexec',
+      'Vec<SystemdServiceUnitName>',
+      'command: String',
+      'verb: String',
+      'Some(ChannelMsg::ExitStatus { exit_status }) if accepted =>',
+      'Some(ChannelMsg::ExitSignal { .. }) if accepted =>',
+    ],
     'reviewed systemd SSH transport',
   );
   if (!systemdTransportProduction.includes('authority.target().as_str()')) {

@@ -143,6 +143,35 @@ impl server::Handler for FixtureHandler {
             session.close(channel)?;
             return Ok(());
         }
+        if mode == 11 {
+            session.exit_status_request(channel, 1)?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        if mode == 12 {
+            session.exit_signal_request(channel, Sig::TERM, false, "", "")?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        if mode == 13 {
+            session.data(channel, &b"pre-accept stdout"[..])?;
+            session.extended_data(channel, 1, &b"pre-accept stderr"[..])?;
+            session.channel_success(channel)?;
+            session.exit_status_request(channel, 0)?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        if mode == 15 {
+            session.data(channel, &b"possible execution"[..])?;
+            session.channel_failure(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        if mode == 17 {
+            session.data(channel, vec![b'x'; 8 * 1024 + 1])?;
+            session.close(channel)?;
+            return Ok(());
+        }
         session.channel_success(channel)?;
         match mode {
             1 => {
@@ -160,6 +189,11 @@ impl server::Handler for FixtureHandler {
             }
             9 => {
                 session.exit_signal_request(channel, Sig::TERM, false, "", "")?;
+                session.close(channel)?;
+                return Ok(());
+            }
+            16 => {
+                session.channel_failure(channel)?;
                 session.close(channel)?;
                 return Ok(());
             }
@@ -423,7 +457,7 @@ async fn reset_failed_transport_classifies_rejection_failure_and_ambiguous_compl
 }
 
 #[tokio::test]
-async fn reset_failed_requires_request_acceptance_before_terminal_confirmation() {
+async fn reset_failed_accepts_terminal_evidence_without_prior_request_success() {
     let fixture = Fixture::start().await;
     let session = fixture
         .trusted_provider()
@@ -437,9 +471,19 @@ async fn reset_failed_requires_request_acceptance_before_terminal_confirmation()
         ),
         (
             8,
-            MutationTransportOutcome::CompletionUnknown(
-                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
-            ),
+            MutationTransportOutcome::CompletionConfirmed { success: true },
+        ),
+        (
+            11,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            12,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            13,
+            MutationTransportOutcome::CompletionConfirmed { success: true },
         ),
         (
             10,
@@ -447,7 +491,26 @@ async fn reset_failed_requires_request_acceptance_before_terminal_confirmation()
                 nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
             ),
         ),
+        (
+            15,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
+        (
+            16,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
+        (
+            17,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::OutputLimit,
+            ),
+        ),
     ] {
+        let before = fixture.handler.reset_failed_commands.load(Ordering::SeqCst);
         fixture.handler.mode.store(mode, Ordering::SeqCst);
         let result =
             execute_reset_failed(session.as_ref(), fixture.host.id, CancellationToken::new()).await;
@@ -456,10 +519,15 @@ async fn reset_failed_requires_request_acceptance_before_terminal_confirmation()
             nexus_remote_operations::ExecutionTerminal::Transport(expected),
             "mode {mode}"
         );
+        assert_eq!(
+            fixture.handler.reset_failed_commands.load(Ordering::SeqCst),
+            before + 1,
+            "mode {mode} must dispatch exactly once"
+        );
     }
     assert_eq!(
         fixture.handler.reset_failed_commands.load(Ordering::SeqCst),
-        3
+        9
     );
 }
 
