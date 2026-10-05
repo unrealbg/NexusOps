@@ -23,6 +23,10 @@ export function verifyRemoteOperationsSourceText({
 }) {
   const commandNames = [...commandsSource.matchAll(/#\[tauri::command\][\s\S]*?pub\s+(?:async\s+)?fn\s+([a-z0-9_]+)/g)]
     .map((match) => match[1]);
+  const commandSections = commandsSource.split('#[tauri::command]').slice(1).map((source) => ({
+    name: /pub\s+(?:async\s+)?fn\s+([a-z0-9_]+)/.exec(source)?.[1],
+    source,
+  }));
   const allowedMutationCommands = new Set([
     'plan_service_reset_failed',
     'discard_service_reset_failed',
@@ -49,6 +53,26 @@ export function verifyRemoteOperationsSourceText({
       || name.startsWith('docker_')) {
       fail(`forbidden remote-mutation Tauri command: ${name}`);
     }
+  }
+  const mutationSurfaceFragments = [
+    'ServiceObservationId',
+    'RemoteOperationPlanId',
+    'ServiceResetFailedPlan',
+    'ServiceResetFailedResult',
+    'ServiceResetFailedOutcome',
+    'ServiceResetFailedAuditStatus',
+    'ServiceResetFailedPostObservationStatus',
+    '.plan_service_reset_failed(',
+    '.discard_service_reset_failed(',
+    '.execute_service_reset_failed(',
+  ];
+  const mutationSurfaceCommands = commandSections.filter(({ source }) =>
+    mutationSurfaceFragments.some((fragment) => source.includes(fragment)));
+  if (mutationSurfaceCommands.length !== 3
+      || mutationSurfaceCommands.some(({ name }) => !allowedMutationCommands.has(name))
+      || [...allowedMutationCommands].some((allowed) =>
+        mutationSurfaceCommands.filter(({ name }) => name === allowed).length !== 1)) {
+    fail('only the three reviewed service reset-failed commands may expose mutation authority');
   }
 
   const rendererSurface = `${protocolSource}\n${clientSource}`;
@@ -142,6 +166,9 @@ export function verifyRemoteOperationsSourceText({
     'const CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);',
     'const OUTPUT_LIMIT: usize = 8 * 1024;',
     'LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password reset-failed -- ',
+    'Some(ChannelMsg::ExitStatus { exit_status }) if accepted =>',
+    'Some(ChannelMsg::ExitSignal { .. }) if accepted =>',
+    'Some(ChannelMsg::Success) if !accepted => accepted = true,',
   ]) {
     if (!systemdTransportProduction.includes(required)) fail(`systemd SSH transport policy is missing ${required}`);
   }

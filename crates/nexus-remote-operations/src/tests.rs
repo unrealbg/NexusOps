@@ -416,6 +416,49 @@ async fn failed_revalidation_dispatches_nothing_and_consumed_authority_never_ret
 }
 
 #[tokio::test]
+async fn cancellation_during_revalidation_stays_cancelled_and_dispatches_nothing() {
+    let foundation = Arc::new(RemoteOperationFoundation::default());
+    let owner = binding(HostId::new());
+    let id = foundation
+        .authorities
+        .insert(draft(owner, 1), owner)
+        .unwrap()
+        .id;
+    let revalidator = Arc::new(FakeRevalidator::allowed());
+    revalidator.stall.store(true, Ordering::SeqCst);
+    let transport = Arc::new(transport(MutationTransportOutcome::CompletionConfirmed {
+        success: true,
+    }));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let execution = {
+        let foundation = Arc::clone(&foundation);
+        let revalidator = Arc::clone(&revalidator);
+        let transport = Arc::clone(&transport);
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            foundation
+                .execute::<FakeOperation, _, _>(
+                    id,
+                    owner,
+                    revalidator.as_ref(),
+                    transport.as_ref(),
+                    cancellation,
+                )
+                .await
+                .unwrap()
+        })
+    };
+    revalidator.entered.notified().await;
+    cancellation.cancel();
+    revalidator.release.notify_one();
+    let result = execution.await.unwrap();
+    assert_eq!(result.outcome, RemoteOperationOutcome::Cancelled);
+    assert_eq!(result.terminal, ExecutionTerminal::CancelledBeforeDispatch);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    assert!(!foundation.authorities.contains(id).unwrap());
+}
+
+#[tokio::test]
 async fn every_backend_revalidation_failure_dispatches_nothing() {
     for reason in [
         "host removed",

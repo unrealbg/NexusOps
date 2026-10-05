@@ -64,7 +64,12 @@ impl MutationTransport<SystemdResetFailed> for SshSession {
             let mut output_bytes = 0usize;
             loop {
                 match channel.wait().await {
-                    Some(ChannelMsg::Success) => accepted = true,
+                    Some(ChannelMsg::Success) if !accepted => accepted = true,
+                    Some(ChannelMsg::Success) => {
+                        return MutationTransportOutcome::CompletionUnknown(
+                            CompletionUnknownReason::ConnectionLost,
+                        );
+                    }
                     Some(ChannelMsg::Failure) if !accepted => {
                         return MutationTransportOutcome::NotDispatched(
                             NotDispatchedReason::Rejected,
@@ -75,16 +80,23 @@ impl MutationTransport<SystemdResetFailed> for SshSession {
                             CompletionUnknownReason::ConnectionLost,
                         );
                     }
-                    Some(ChannelMsg::ExitStatus { exit_status }) => {
+                    Some(ChannelMsg::ExitStatus { exit_status }) if accepted => {
                         return MutationTransportOutcome::CompletionConfirmed {
                             success: exit_status == 0,
                         };
                     }
-                    Some(ChannelMsg::ExitSignal { .. }) => {
+                    Some(ChannelMsg::ExitSignal { .. }) if accepted => {
                         return MutationTransportOutcome::CompletionConfirmed { success: false };
                     }
+                    Some(ChannelMsg::ExitStatus { .. }) | Some(ChannelMsg::ExitSignal { .. }) => {
+                        return MutationTransportOutcome::CompletionUnknown(
+                            CompletionUnknownReason::ConnectionLost,
+                        );
+                    }
                     Some(ChannelMsg::Data { data })
-                    | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    | Some(ChannelMsg::ExtendedData { data, .. })
+                        if accepted =>
+                    {
                         output_bytes = output_bytes.saturating_add(data.len());
                         if output_bytes > OUTPUT_LIMIT {
                             return MutationTransportOutcome::CompletionUnknown(
@@ -92,7 +104,17 @@ impl MutationTransport<SystemdResetFailed> for SshSession {
                             );
                         }
                     }
+                    Some(ChannelMsg::Data { .. }) | Some(ChannelMsg::ExtendedData { .. }) => {
+                        return MutationTransportOutcome::CompletionUnknown(
+                            CompletionUnknownReason::ConnectionLost,
+                        );
+                    }
                     Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                        return MutationTransportOutcome::CompletionUnknown(
+                            CompletionUnknownReason::ConnectionLost,
+                        );
+                    }
+                    Some(_) if !accepted => {
                         return MutationTransportOutcome::CompletionUnknown(
                             CompletionUnknownReason::ConnectionLost,
                         );

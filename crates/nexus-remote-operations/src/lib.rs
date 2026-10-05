@@ -104,6 +104,12 @@ impl RemoteOperationFoundation {
         let dispatch_guard = match revalidator.revalidate(&authority).await {
             Ok(guard) => guard,
             Err(_) => {
+                if cancellation.is_cancelled() {
+                    return Ok(ExecutionResult {
+                        outcome: RemoteOperationOutcome::Cancelled,
+                        terminal: ExecutionTerminal::CancelledBeforeDispatch,
+                    });
+                }
                 return Ok(ExecutionResult {
                     outcome: RemoteOperationOutcome::Failed,
                     terminal: ExecutionTerminal::RevalidationFailed,

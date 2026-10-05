@@ -887,6 +887,59 @@ async fn reset_failed_discard_and_session_turnover_revoke_one_shot_authority() {
 }
 
 #[tokio::test]
+async fn reset_failed_cancellation_during_revalidation_is_cancelled_audited_and_never_dispatched() {
+    let (dir, app, provider) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let snapshot = app.list_host_services(host.id, session).await.unwrap();
+    let observation = snapshot.entries[1].reset_failed_observation_id.unwrap();
+    let plan = app
+        .plan_service_reset_failed(host.id, session, observation)
+        .await
+        .unwrap();
+    provider.services.stall.store(true, Ordering::SeqCst);
+    let executing = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.execute_service_reset_failed(host.id, session, plan.plan_id)
+                .await
+        })
+    };
+    let permit = provider.services.entered.acquire().await.unwrap();
+    permit.forget();
+    let slot = app.slot(host.id).await;
+    slot.data.lock().await.cancel.cancel();
+    provider.services.release.add_permits(1);
+
+    let result = executing.await.unwrap().unwrap();
+    assert_eq!(result.outcome, ServiceResetFailedOutcome::Cancelled);
+    assert_eq!(
+        result.audit_status,
+        ServiceResetFailedAuditStatus::Persisted
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+    let mutation_events = audit_events(dir.path())
+        .into_iter()
+        .filter(|event| event.operation.kind == "service.reset_failed")
+        .collect::<Vec<_>>();
+    assert_eq!(mutation_events.len(), 1);
+    assert_eq!(mutation_events[0].outcome, AuditOutcome::Cancelled);
+    assert_eq!(
+        app.execute_service_reset_failed(host.id, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+}
+
+#[tokio::test]
 async fn reset_failed_audit_failure_does_not_change_confirmed_remote_truth_or_retry() {
     let (dir, app, provider) = setup(false);
     let host = app.save_host(input(), Some(credential())).await.unwrap();

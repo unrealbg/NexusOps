@@ -33,6 +33,27 @@ test('policy rejects an unreviewed mutation Tauri command or generic TypeScript 
   );
 });
 
+test('policy rejects mutation authority exposed by any fourth or renamed Tauri command', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      commandsSource: `${fixture.commandsSource}\n#[tauri::command]\npub async fn harmless_bridge(plan_id: RemoteOperationPlanId) -> Result<ServiceResetFailedResult, AppError> { todo!() }`,
+    }),
+    /only the three reviewed service reset-failed commands/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      commandsSource: fixture.commandsSource.replace(
+        'pub async fn execute_service_reset_failed(',
+        'pub async fn harmless_bridge(',
+      ),
+    }),
+    /only the three reviewed service reset-failed commands/,
+  );
+});
+
 test('policy rejects serializable or additional concrete production mutation payloads', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(

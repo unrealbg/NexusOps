@@ -26,7 +26,7 @@ use nexus_secrets::Credential;
 use nexus_sftp::SftpConnector;
 use nexus_ssh::{KnownHosts, SshProvider};
 use russh::{
-    Channel, ChannelId,
+    Channel, ChannelId, Sig,
     keys::{Algorithm, HashAlg, PrivateKey, PublicKey, ssh_key::LineEnding},
     server::{self, Auth, Server as _},
 };
@@ -127,13 +127,24 @@ impl server::Handler for FixtureHandler {
             self.reset_failed_commands.fetch_add(1, Ordering::SeqCst);
             *self.last_reset_failed_command.lock().unwrap() = command.to_vec();
         }
-        if self.mode.load(Ordering::SeqCst) == 6 {
+        let mode = self.mode.load(Ordering::SeqCst);
+        if mode == 6 {
             session.channel_failure(channel)?;
             session.close(channel)?;
             return Ok(());
         }
+        if mode == 8 {
+            session.exit_status_request(channel, 0)?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        if mode == 10 {
+            session.data(channel, &b"pre-accept anomaly"[..])?;
+            session.close(channel)?;
+            return Ok(());
+        }
         session.channel_success(channel)?;
-        match self.mode.load(Ordering::SeqCst) {
+        match mode {
             1 => {
                 // Output is sent incrementally by russh with SSH window backpressure.
                 session.data(channel, vec![b'x'; 128 * 1024])?;
@@ -144,6 +155,11 @@ impl server::Handler for FixtureHandler {
             }
             5 => {} // Valid successful empty Docker inventory.
             7 => {
+                session.close(channel)?;
+                return Ok(());
+            }
+            9 => {
+                session.exit_signal_request(channel, Sig::TERM, false, "", "")?;
                 session.close(channel)?;
                 return Ok(());
             }
@@ -403,6 +419,105 @@ async fn reset_failed_transport_classifies_rejection_failure_and_ambiguous_compl
     assert_eq!(
         fixture.handler.reset_failed_commands.load(Ordering::SeqCst),
         before
+    );
+}
+
+#[tokio::test]
+async fn reset_failed_requires_request_acceptance_before_terminal_confirmation() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    for (mode, expected) in [
+        (
+            9,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            8,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
+        (
+            10,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
+    ] {
+        fixture.handler.mode.store(mode, Ordering::SeqCst);
+        let result =
+            execute_reset_failed(session.as_ref(), fixture.host.id, CancellationToken::new()).await;
+        assert_eq!(
+            result.terminal,
+            nexus_remote_operations::ExecutionTerminal::Transport(expected),
+            "mode {mode}"
+        );
+    }
+    assert_eq!(
+        fixture.handler.reset_failed_commands.load(Ordering::SeqCst),
+        3
+    );
+}
+
+#[tokio::test]
+async fn reset_failed_timeout_and_cancellation_after_dispatch_are_unknown() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    fixture.handler.mode.store(2, Ordering::SeqCst);
+
+    let timed_session = session.clone();
+    let timed_host = fixture.host.id;
+    let timed = tokio::spawn(async move {
+        execute_reset_failed(timed_session.as_ref(), timed_host, CancellationToken::new()).await
+    });
+    timeout(Duration::from_secs(2), async {
+        while fixture.handler.reset_failed_commands.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("request dispatched");
+    let timed = timed.await.unwrap();
+    assert_eq!(
+        timed.terminal,
+        nexus_remote_operations::ExecutionTerminal::Transport(
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::Timeout,
+            )
+        )
+    );
+
+    let cancellation = CancellationToken::new();
+    let cancelling = cancellation.clone();
+    let cancelled_session = session.clone();
+    let cancelled_host = fixture.host.id;
+    let cancelled = tokio::spawn(async move {
+        execute_reset_failed(cancelled_session.as_ref(), cancelled_host, cancelling).await
+    });
+    timeout(Duration::from_secs(2), async {
+        while fixture.handler.reset_failed_commands.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("second request dispatched");
+    cancellation.cancel();
+    let cancelled = cancelled.await.unwrap();
+    assert_eq!(
+        cancelled.terminal,
+        nexus_remote_operations::ExecutionTerminal::Transport(
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::Cancelled,
+            )
+        )
     );
 }
 
