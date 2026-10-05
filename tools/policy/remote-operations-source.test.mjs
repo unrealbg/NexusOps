@@ -20,7 +20,13 @@ test('policy rejects an unreviewed mutation Tauri command or generic TypeScript 
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,
-      commandsSource: `${fixture.commandsSource}\n#[tauri::command]\npub async fn execute_remote_operation() {}`,
+      tauriProductionSources: [
+        ...fixture.tauriProductionSources,
+        {
+          path: 'apps/desktop/src-tauri/src/unreviewed.rs',
+          source: '#[tauri::command]\npub async fn execute_remote_operation() {}',
+        },
+      ],
     }),
     /forbidden remote-mutation Tauri command/,
   );
@@ -33,25 +39,62 @@ test('policy rejects an unreviewed mutation Tauri command or generic TypeScript 
   );
 });
 
-test('policy rejects mutation authority exposed by any fourth or renamed Tauri command', async () => {
+test('policy rejects mutation authority exposed by a fourth command in another production module', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,
-      commandsSource: `${fixture.commandsSource}\n#[tauri::command]\npub async fn harmless_bridge(plan_id: RemoteOperationPlanId) -> Result<ServiceResetFailedResult, AppError> { todo!() }`,
+      tauriProductionSources: [
+        ...fixture.tauriProductionSources,
+        {
+          path: 'apps/desktop/src-tauri/src/harmless.rs',
+          source: '#[tauri::command]\npub async fn harmless_bridge(plan_id: RemoteOperationPlanId) -> Result<ServiceResetFailedResult, AppError> { todo!() }',
+        },
+      ],
     }),
     /only the three reviewed service reset-failed commands/,
   );
+});
+
+test('policy rejects a renamed reviewed mutation command', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,
-      commandsSource: fixture.commandsSource.replace(
-        'pub async fn execute_service_reset_failed(',
-        'pub async fn harmless_bridge(',
-      ),
+      tauriProductionSources: fixture.tauriProductionSources.map((file) =>
+        file.path === 'apps/desktop/src-tauri/src/commands.rs'
+          ? {
+            ...file,
+            source: file.source.replace(
+              'pub async fn execute_service_reset_failed(',
+              'pub async fn harmless_bridge(',
+            ),
+          }
+          : file),
     }),
     /only the three reviewed service reset-failed commands/,
   );
+});
+
+test('policy discovers noncanonical and imported Tauri command attributes', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  for (const source of [
+    '#[ tauri :: command ( rename_all = "snake_case" ) ]\npub async fn harmless_bridge(plan_id: RemoteOperationPlanId) -> Result<ServiceResetFailedResult, AppError> { todo!() }',
+    'use tauri::command as desktop_command;\n#[desktop_command]\npub async fn harmless_bridge(plan_id: RemoteOperationPlanId) -> Result<ServiceResetFailedResult, AppError> { todo!() }',
+    'use tauri::{command as desktop_command, State};\n#[desktop_command]\npub async fn harmless_bridge(plan_id: RemoteOperationPlanId) -> Result<ServiceResetFailedResult, AppError> { todo!() }',
+    'use tauri as desktop_runtime;\n#[desktop_runtime::command]\npub async fn harmless_bridge(plan_id: RemoteOperationPlanId) -> Result<ServiceResetFailedResult, AppError> { todo!() }',
+  ]) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        tauriProductionSources: [
+          ...fixture.tauriProductionSources,
+          { path: 'apps/desktop/src-tauri/src/alternate.rs', source },
+        ],
+      }),
+      /only the three reviewed service reset-failed commands/,
+    );
+  }
 });
 
 test('policy rejects serializable or additional concrete production mutation payloads', async () => {

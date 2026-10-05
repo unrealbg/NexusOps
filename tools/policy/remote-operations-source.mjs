@@ -12,7 +12,7 @@ function requireAbsent(text, fragments, context) {
 }
 
 export function verifyRemoteOperationsSourceText({
-  commandsSource,
+  tauriProductionSources,
   protocolSource,
   clientSource,
   remoteProductionSources,
@@ -21,12 +21,52 @@ export function verifyRemoteOperationsSourceText({
   readOnlyCommandSource,
   capabilitySource,
 }) {
-  const commandNames = [...commandsSource.matchAll(/#\[tauri::command\][\s\S]*?pub\s+(?:async\s+)?fn\s+([a-z0-9_]+)/g)]
-    .map((match) => match[1]);
-  const commandSections = commandsSource.split('#[tauri::command]').slice(1).map((source) => ({
-    name: /pub\s+(?:async\s+)?fn\s+([a-z0-9_]+)/.exec(source)?.[1],
-    source,
-  }));
+  const commandSections = tauriProductionSources.flatMap(({ path, source }) => {
+    const attributePatterns = [/#\s*\[\s*(?:::)?\s*tauri\s*::\s*command\b(?:\s*\([^)]*\))?\s*\]/g];
+    const importedCommandNames = new Set();
+    for (const match of source.matchAll(
+      /\buse\s+(?:::)?\s*tauri\s*::\s*command(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*;/g,
+    )) {
+      importedCommandNames.add(match[1] ?? 'command');
+    }
+    for (const match of source.matchAll(
+      /\buse\s+(?:::)?\s*tauri\s*::\s*\{([^}]*)\}\s*;/g,
+    )) {
+      for (const item of match[1].split(',')) {
+        const commandImport = /^\s*command(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?\s*$/.exec(item);
+        if (commandImport) importedCommandNames.add(commandImport[1] ?? 'command');
+      }
+    }
+    for (const attributeName of importedCommandNames) {
+      attributePatterns.push(new RegExp(
+        `#\\s*\\[\\s*${attributeName}(?:\\s*\\([^)]*\\))?\\s*\\]`,
+        'g',
+      ));
+    }
+    for (const match of source.matchAll(
+      /\b(?:use|extern\s+crate)\s+tauri\s+as\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/g,
+    )) {
+      attributePatterns.push(new RegExp(
+        `#\\s*\\[\\s*${match[1]}\\s*::\\s*command\\b(?:\\s*\\([^)]*\\))?\\s*\\]`,
+        'g',
+      ));
+    }
+
+    const attributes = attributePatterns.flatMap((pattern) =>
+      [...source.matchAll(pattern)].map((match) => ({ index: match.index, end: match.index + match[0].length })))
+      .sort((left, right) => left.index - right.index);
+
+    return attributes.map((attribute, index) => {
+      const end = attributes[index + 1]?.index ?? source.length;
+      const commandSource = source.slice(attribute.index, end);
+      const declaration = /\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(
+        source.slice(attribute.end, end),
+      );
+      if (!declaration) fail(`Tauri command declaration is missing after attribute in ${path}`);
+      return { path, name: declaration[1], source: commandSource };
+    });
+  });
+  const commandNames = commandSections.map(({ name }) => name);
   const allowedMutationCommands = new Set([
     'plan_service_reset_failed',
     'discard_service_reset_failed',
@@ -68,10 +108,13 @@ export function verifyRemoteOperationsSourceText({
   ];
   const mutationSurfaceCommands = commandSections.filter(({ source }) =>
     mutationSurfaceFragments.some((fragment) => source.includes(fragment)));
+  const reviewedCommandPath = 'apps/desktop/src-tauri/src/commands.rs';
   if (mutationSurfaceCommands.length !== 3
-      || mutationSurfaceCommands.some(({ name }) => !allowedMutationCommands.has(name))
+      || mutationSurfaceCommands.some(({ path, name }) =>
+        path !== reviewedCommandPath || !allowedMutationCommands.has(name))
       || [...allowedMutationCommands].some((allowed) =>
-        mutationSurfaceCommands.filter(({ name }) => name === allowed).length !== 1)) {
+        mutationSurfaceCommands.filter(({ path, name }) =>
+          path === reviewedCommandPath && name === allowed).length !== 1)) {
     fail('only the three reviewed service reset-failed commands may expose mutation authority');
   }
 
@@ -187,7 +230,8 @@ export function verifyRemoteOperationsSourceText({
     'ServiceResetFailedPlan',
     'ServiceResetFailedResult',
   ]) {
-    if (!rendererSurface.includes(required) && !commandsSource.includes(required)) {
+    if (!rendererSurface.includes(required)
+        && !tauriProductionSources.some(({ source }) => source.includes(required))) {
       fail(`reviewed reset-failed surface is missing ${required}`);
     }
   }
@@ -219,7 +263,7 @@ async function rustSources(root, directory, excluded = new Set()) {
 
 export async function remoteOperationsSourceFixture(root) {
   return {
-    commandsSource: await readFile(join(root, 'apps/desktop/src-tauri/src/commands.rs'), 'utf8'),
+    tauriProductionSources: await rustSources(root, join(root, 'apps/desktop/src-tauri/src')),
     protocolSource: await readFile(join(root, 'packages/protocol/src/index.ts'), 'utf8'),
     clientSource: await readFile(join(root, 'apps/desktop/src/api/client.ts'), 'utf8'),
     remoteProductionSources: await rustSources(
