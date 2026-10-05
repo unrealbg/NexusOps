@@ -123,7 +123,7 @@ pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest
         { path: 'apps/desktop/src-tauri/src/local_bridge.rs', source: bridgeSource },
       ],
     }),
-    /Goal 05B application mutation calls must remain inside the three reviewed Tauri commands/,
+    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
   );
 });
 
@@ -144,7 +144,7 @@ test('policy rejects a Tauri command delegating to a facade in another productio
         },
       ],
     }),
-    /Goal 05B application mutation calls must remain inside the three reviewed Tauri commands/,
+    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
   );
 });
 
@@ -174,7 +174,82 @@ pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest
         { path: 'apps/desktop/src-tauri/src/dto_bridge.rs', source: bridgeSource },
       ],
     }),
-    /Goal 05B application mutation calls must remain inside the three reviewed Tauri commands/,
+    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+  );
+});
+
+test('policy rejects a reset-failed function item referenced through an Application type alias', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const bridgeSource = `
+use nexus_core::Application as CoreApp;
+
+pub async fn perform_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(), AppError> {
+  let execute = CoreApp::execute_service_reset_failed;
+  execute(app, request.host_id, request.host_session_id, request.plan_id).await?;
+  Ok(())
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      tauriProductionSources: [
+        ...fixture.tauriProductionSources,
+        { path: 'apps/desktop/src-tauri/src/alias_bridge.rs', source: bridgeSource },
+        {
+          path: 'apps/desktop/src-tauri/src/alias_commands.rs',
+          source: '#[tauri::command]\npub async fn harmless_bridge(app: State<\'_, Application>, request: BridgeRequest) -> Result<(), AppError> { crate::alias_bridge::perform_bridge(app.inner(), request).await }',
+        },
+      ],
+    }),
+    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+  );
+});
+
+test('policy rejects a reset-failed first-class function item reference', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const bridgeSource = `
+pub async fn perform_bridge(app: &Application, request: BridgeRequest) -> Result<(), AppError> {
+  let execute = Application::execute_service_reset_failed;
+  execute(app, request.host_id, request.host_session_id, request.plan_id).await?;
+  Ok(())
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      tauriProductionSources: [
+        ...fixture.tauriProductionSources,
+        { path: 'apps/desktop/src-tauri/src/function_item_bridge.rs', source: bridgeSource },
+        {
+          path: 'apps/desktop/src-tauri/src/function_item_commands.rs',
+          source: '#[tauri::command]\npub async fn harmless_bridge(app: State<\'_, Application>, request: BridgeRequest) -> Result<(), AppError> { crate::function_item_bridge::perform_bridge(app.inner(), request).await }',
+        },
+      ],
+    }),
+    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+  );
+});
+
+test('policy rejects a direct reset-failed UFCS call through an Application type alias', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const bridgeSource = `
+use nexus_core::Application as CoreApp;
+
+pub async fn perform_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(), AppError> {
+  CoreApp::execute_service_reset_failed(app, request.host_id, request.host_session_id, request.plan_id).await?;
+  Ok(())
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      tauriProductionSources: [
+        ...fixture.tauriProductionSources,
+        { path: 'apps/desktop/src-tauri/src/aliased_ufcs_bridge.rs', source: bridgeSource },
+        {
+          path: 'apps/desktop/src-tauri/src/aliased_ufcs_commands.rs',
+          source: '#[tauri::command]\npub async fn harmless_bridge(app: State<\'_, Application>, request: BridgeRequest) -> Result<(), AppError> { crate::aliased_ufcs_bridge::perform_bridge(app.inner(), request).await }',
+        },
+      ],
+    }),
+    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
   );
 });
 
