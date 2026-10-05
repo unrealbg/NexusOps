@@ -498,11 +498,11 @@ test('policy rejects changes to the exact reset-failed command and its bounds', 
       ...fixture,
       sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_reset_failed.rs')
         ? { ...file, source: file.source.replace(
+          'Some(ChannelMsg::Eof) => {}\n                    Some(ChannelMsg::Close) | None =>',
           'Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None =>',
-          'Some(ChannelMsg::Close) | None =>',
         ) }
         : file),
     }),
-    /systemd SSH transport policy is missing/,
+    /systemd SSH transport policy is missing|reviewed systemd SSH transport contains forbidden text/,
   );
 });

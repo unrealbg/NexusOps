@@ -99,7 +99,8 @@ impl MutationTransport<SystemdResetFailed> for SshSession {
                             );
                         }
                     }
-                    Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                    Some(ChannelMsg::Eof) => {}
+                    Some(ChannelMsg::Close) | None => {
                         return MutationTransportOutcome::CompletionUnknown(
                             CompletionUnknownReason::ConnectionLost,
                         );

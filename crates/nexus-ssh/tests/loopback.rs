@@ -172,6 +172,33 @@ impl server::Handler for FixtureHandler {
             session.close(channel)?;
             return Ok(());
         }
+        if mode == 18 {
+            session.eof(channel)?;
+            session.exit_status_request(channel, 0)?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        if mode == 19 {
+            session.eof(channel)?;
+            session.exit_status_request(channel, 1)?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        if mode == 20 {
+            session.eof(channel)?;
+            session.exit_signal_request(channel, Sig::TERM, false, "", "")?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        if mode == 21 {
+            session.eof(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
+        if mode == 22 {
+            session.eof(channel)?;
+            return Ok(());
+        }
         session.channel_success(channel)?;
         match mode {
             1 => {
@@ -509,6 +536,24 @@ async fn reset_failed_accepts_terminal_evidence_without_prior_request_success() 
                 nexus_remote_operations::CompletionUnknownReason::OutputLimit,
             ),
         ),
+        (
+            18,
+            MutationTransportOutcome::CompletionConfirmed { success: true },
+        ),
+        (
+            19,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            20,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            21,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
     ] {
         let before = fixture.handler.reset_failed_commands.load(Ordering::SeqCst);
         fixture.handler.mode.store(mode, Ordering::SeqCst);
@@ -527,7 +572,7 @@ async fn reset_failed_accepts_terminal_evidence_without_prior_request_success() 
     }
     assert_eq!(
         fixture.handler.reset_failed_commands.load(Ordering::SeqCst),
-        9
+        13
     );
 }
 
@@ -539,7 +584,7 @@ async fn reset_failed_timeout_and_cancellation_after_dispatch_are_unknown() {
         .connect(&fixture.host, password(), CancellationToken::new())
         .await
         .expect("connect");
-    fixture.handler.mode.store(2, Ordering::SeqCst);
+    fixture.handler.mode.store(22, Ordering::SeqCst);
 
     let timed_session = session.clone();
     let timed_host = fixture.host.id;
@@ -586,6 +631,11 @@ async fn reset_failed_timeout_and_cancellation_after_dispatch_are_unknown() {
                 nexus_remote_operations::CompletionUnknownReason::Cancelled,
             )
         )
+    );
+    assert_eq!(
+        fixture.handler.reset_failed_commands.load(Ordering::SeqCst),
+        2,
+        "timeout and cancellation scenarios must each dispatch exactly once"
     );
 }
 

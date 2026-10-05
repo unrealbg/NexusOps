@@ -569,7 +569,8 @@ export function verifyRemoteOperationsSourceText({
     'Some(ChannelMsg::Failure) if !accepted && !execution_evidence =>',
     'Some(ChannelMsg::Data { data })',
     'Some(ChannelMsg::ExtendedData { data, .. }) =>',
-    'Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None =>',
+    'Some(ChannelMsg::Eof) => {}',
+    'Some(ChannelMsg::Close) | None =>',
     'CompletionUnknownReason::Cancelled',
     'CompletionUnknownReason::Timeout',
   ]) {
@@ -585,6 +586,7 @@ export function verifyRemoteOperationsSourceText({
       'verb: String',
       'Some(ChannelMsg::ExitStatus { exit_status }) if accepted =>',
       'Some(ChannelMsg::ExitSignal { .. }) if accepted =>',
+      'Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None =>',
     ],
     'reviewed systemd SSH transport',
   );
