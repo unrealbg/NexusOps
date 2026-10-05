@@ -355,6 +355,64 @@ pub async fn harmless_reset_bridge(app: &CoreApp, request: BridgeRequest) -> Res
   );
 });
 
+test('policy rejects an Application wrapper using an aliased remote-operation foundation field', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const source = `
+impl Application {
+  pub async fn harmless_foundation_bridge(&self, request: BridgeRequest) -> Result<(), AppError> {
+    let foundation = &self.remote_operations;
+    foundation.execute::<SystemdResetFailed, _, _>(
+      request.plan_id,
+      request.binding,
+      &request.revalidator,
+      request.transport,
+      request.cancellation,
+    ).await?;
+    Ok(())
+  }
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: [
+        ...(fixture.coreProductionSources ?? []),
+        { path: 'crates/nexus-core/src/application/aliased_foundation.rs', source },
+      ],
+    }),
+    /Goal 05B nexus-core remote-operation foundation access/,
+  );
+});
+
+test('policy rejects an exported facade using an aliased RemoteOperationFoundation type', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const source = `
+use nexus_remote_operations::RemoteOperationFoundation as Foundation;
+
+pub async fn harmless_foundation_bridge(
+  foundation: &Foundation,
+  request: BridgeRequest,
+) -> Result<(), AppError> {
+  foundation.execute::<SystemdResetFailed, _, _>(
+    request.plan_id,
+    request.binding,
+    &request.revalidator,
+    request.transport,
+    request.cancellation,
+  ).await?;
+  Ok(())
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: [
+        ...(fixture.coreProductionSources ?? []),
+        { path: 'crates/nexus-core/src/aliased_foundation.rs', source },
+      ],
+    }),
+    /Goal 05B nexus-core remote-operation foundation access/,
+  );
+});
+
 test('policy rejects serializable or additional concrete production mutation payloads', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(

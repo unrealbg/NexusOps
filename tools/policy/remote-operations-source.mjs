@@ -135,6 +135,17 @@ function rustIdentifierIndices(source, identifier, context) {
   return indices;
 }
 
+function rustNamedFunctionSections(source, name, context) {
+  const functionIndices = new Set(rustIdentifierIndices(source, 'fn', context));
+  const pattern = new RegExp(`\\bfn\\s+${name}\\b`, 'g');
+  return [...source.matchAll(pattern)]
+    .filter((match) => functionIndices.has(match.index))
+    .map((match) => ({
+      start: match.index,
+      end: rustFunctionEnd(source, match.index, source.length, context),
+    }));
+}
+
 function handlerRegistrationIndices(path, source, identifier) {
   if (path !== 'apps/desktop/src-tauri/src/main.rs') return [];
   const indices = [];
@@ -311,17 +322,17 @@ export function verifyRemoteOperationsSourceText({
   const reviewedCoreOperations = [
     {
       name: 'plan_service_reset_failed',
-      boundaryPattern: String.raw`\bremote_operations\s*\.\s*plan\s*::\s*<\s*SystemdResetFailed\b`,
+      foundationOperation: 'plan',
       dtoNames: ['ServiceResetFailedPlan'],
     },
     {
       name: 'discard_service_reset_failed',
-      boundaryPattern: String.raw`\bremote_operations\s*\.\s*discard\s*\(`,
+      foundationOperation: 'discard',
       dtoNames: [],
     },
     {
       name: 'execute_service_reset_failed',
-      boundaryPattern: String.raw`\bremote_operations\s*\.\s*execute\s*::\s*<\s*SystemdResetFailed\b`,
+      foundationOperation: 'execute',
       dtoNames: [
         'ServiceResetFailedResult',
         'ServiceResetFailedOutcome',
@@ -359,17 +370,92 @@ export function verifyRemoteOperationsSourceText({
     fail('Goal 05B nexus-core application boundary must not have alternate wrappers or references');
   }
 
+  const applicationSource = coreProductionSources.find(({ path }) =>
+    path === 'crates/nexus-core/src/application.rs');
+  if (!applicationSource) {
+    fail('Goal 05B nexus-core remote-operation foundation access is missing Application');
+  }
+  const reviewedFoundationFragments = [
+    'use nexus_remote_operations::RemoteOperationFoundation;',
+    'pub(crate) remote_operations: RemoteOperationFoundation,',
+    'remote_operations: RemoteOperationFoundation::default(),',
+  ];
+  const reviewedFoundationTypeIndices = reviewedFoundationFragments.map((fragment) => {
+    const start = applicationSource.source.indexOf(fragment);
+    if (start === -1 || applicationSource.source.indexOf(fragment, start + 1) !== -1) {
+      fail('Goal 05B nexus-core remote-operation foundation access must remain fixed');
+    }
+    return start + fragment.lastIndexOf('RemoteOperationFoundation');
+  });
+  const foundationTypeReferences = coreProductionSources.flatMap(({ path, source }) =>
+    rustIdentifierIndices(source, 'RemoteOperationFoundation', path)
+      .map((index) => ({ path, index })));
+  if (foundationTypeReferences.length !== reviewedFoundationTypeIndices.length
+      || foundationTypeReferences.some((reference) =>
+        reference.path !== applicationSource.path
+        || !reviewedFoundationTypeIndices.includes(reference.index))) {
+    fail('Goal 05B nexus-core remote-operation foundation access must not be aliased or exported');
+  }
+
+  const reviewedFoundationAccesses = [
+    { path: 'crates/nexus-core/src/application.rs', name: 'open', count: 1 },
+    { path: 'crates/nexus-core/src/application.rs', name: 'shutdown', count: 1 },
+    { path: 'crates/nexus-core/src/application/connection.rs', name: 'connect_host', count: 2 },
+    { path: 'crates/nexus-core/src/application/rotation.rs', name: 'plan_host_key_rotation', count: 1 },
+    { path: 'crates/nexus-core/src/application/rotation.rs', name: 'execute_host_key_rotation', count: 1 },
+    { path: reviewedCorePath, name: 'list_host_services', count: 1 },
+    { path: reviewedCorePath, name: 'plan_service_reset_failed', count: 2 },
+    { path: reviewedCorePath, name: 'discard_service_reset_failed', count: 2 },
+    { path: reviewedCorePath, name: 'execute_service_reset_failed', count: 1 },
+    { path: 'crates/nexus-core/src/application/lifecycle.rs', name: 'get_session', count: 2 },
+    { path: 'crates/nexus-core/src/application/lifecycle.rs', name: 'disconnect_host', count: 1 },
+    { path: 'crates/nexus-core/src/application/lifecycle.rs', name: 'prepare_disconnect', count: 1 },
+    { path: 'crates/nexus-core/src/application/hosts.rs', name: 'save_host', count: 2 },
+    { path: 'crates/nexus-core/src/application/hosts.rs', name: 'delete_host', count: 1 },
+    { path: 'crates/nexus-core/src/application/security.rs', name: 'get_host_ssh_trust', count: 1 },
+    { path: 'crates/nexus-core/src/application/identity.rs', name: 'trust_host_key', count: 1 },
+  ];
+  const reviewedFoundationFieldFragment = 'pub(crate) remote_operations: RemoteOperationFoundation,';
+  const reviewedFoundationFieldIndex = applicationSource.source.indexOf(
+    reviewedFoundationFieldFragment,
+  ) + reviewedFoundationFieldFragment.indexOf('remote_operations');
+  const allowedFoundationFieldReferences = new Set([
+    `${applicationSource.path}:${reviewedFoundationFieldIndex}`,
+  ]);
+  for (const reviewed of reviewedFoundationAccesses) {
+    const file = coreProductionSources.find(({ path }) => path === reviewed.path);
+    if (!file) {
+      fail('Goal 05B nexus-core remote-operation foundation access is missing a reviewed source');
+    }
+    const sections = rustNamedFunctionSections(file.source, reviewed.name, file.path);
+    if (sections.length !== 1) {
+      fail(`Goal 05B nexus-core remote-operation foundation access requires ${reviewed.name}`);
+    }
+    const references = rustIdentifierIndices(file.source, 'remote_operations', file.path)
+      .filter((index) => index >= sections[0].start && index < sections[0].end);
+    if (references.length !== reviewed.count) {
+      fail(`Goal 05B nexus-core remote-operation foundation access changed in ${reviewed.name}`);
+    }
+    for (const index of references) {
+      allowedFoundationFieldReferences.add(`${file.path}:${index}`);
+    }
+  }
+  const foundationFieldReferences = coreProductionSources.flatMap(({ path, source }) =>
+    rustIdentifierIndices(source, 'remote_operations', path)
+      .map((index) => `${path}:${index}`));
+  if (foundationFieldReferences.length !== allowedFoundationFieldReferences.size
+      || foundationFieldReferences.some((reference) =>
+        !allowedFoundationFieldReferences.has(reference))) {
+    fail('Goal 05B nexus-core remote-operation foundation access must remain in reviewed functions');
+  }
+
   for (const definition of reviewedCoreDefinitions) {
-    const boundaryReferences = coreProductionSources.flatMap(({ path, source }) => {
-      const codeIndices = new Set(rustIdentifierIndices(source, 'remote_operations', path));
-      return [...source.matchAll(new RegExp(definition.boundaryPattern, 'g'))]
-        .filter((match) => codeIndices.has(match.index))
-        .map((match) => ({ path, index: match.index }));
-    });
-    if (boundaryReferences.length !== 1
-        || boundaryReferences[0].path !== definition.path
-        || boundaryReferences[0].index < definition.start
-        || boundaryReferences[0].index >= definition.end) {
+    const operationReferences = rustIdentifierIndices(
+      definition.source,
+      definition.foundationOperation,
+      definition.path,
+    ).filter((index) => index >= definition.start && index < definition.end);
+    if (operationReferences.length !== 1) {
       fail(`Goal 05B nexus-core application boundary for ${definition.name} must remain fixed`);
     }
 
