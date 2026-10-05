@@ -151,6 +151,7 @@ function handlerRegistrationIndices(path, source, identifier) {
 
 export function verifyRemoteOperationsSourceText({
   tauriProductionSources,
+  coreProductionSources,
   protocolSource,
   clientSource,
   remoteProductionSources,
@@ -306,6 +307,85 @@ export function verifyRemoteOperationsSourceText({
     fail('only the three reviewed service reset-failed commands may expose mutation authority');
   }
 
+  const reviewedCorePath = 'crates/nexus-core/src/application/services.rs';
+  const reviewedCoreOperations = [
+    {
+      name: 'plan_service_reset_failed',
+      boundaryPattern: String.raw`\bremote_operations\s*\.\s*plan\s*::\s*<\s*SystemdResetFailed\b`,
+      dtoNames: ['ServiceResetFailedPlan'],
+    },
+    {
+      name: 'discard_service_reset_failed',
+      boundaryPattern: String.raw`\bremote_operations\s*\.\s*discard\s*\(`,
+      dtoNames: [],
+    },
+    {
+      name: 'execute_service_reset_failed',
+      boundaryPattern: String.raw`\bremote_operations\s*\.\s*execute\s*::\s*<\s*SystemdResetFailed\b`,
+      dtoNames: [
+        'ServiceResetFailedResult',
+        'ServiceResetFailedOutcome',
+        'ServiceResetFailedAuditStatus',
+        'ServiceResetFailedPostObservationStatus',
+      ],
+    },
+  ];
+  const reviewedCoreDefinitions = reviewedCoreOperations.map((operation) => {
+    const definitions = coreProductionSources.flatMap(({ path, source }) => {
+      const pattern = new RegExp(`\\bpub\\s+async\\s+fn\\s+${operation.name}\\b`, 'g');
+      return [...source.matchAll(pattern)].map((match) => ({
+        path,
+        source,
+        name: operation.name,
+        start: match.index,
+        declarationNameStart: match.index + match[0].lastIndexOf(operation.name),
+        end: rustFunctionEnd(source, match.index, source.length, path),
+      }));
+    });
+    if (definitions.length !== 1 || definitions[0].path !== reviewedCorePath) {
+      fail('Goal 05B nexus-core application boundary must remain the three reviewed methods');
+    }
+    return { ...operation, ...definitions[0] };
+  });
+
+  const coreMethodReferences = coreProductionSources.flatMap(({ path, source }) =>
+    reviewedCoreOperations.flatMap(({ name }) =>
+      rustIdentifierIndices(source, name, path).map((index) => ({ path, name, index }))));
+  if (coreMethodReferences.length !== reviewedCoreDefinitions.length
+      || coreMethodReferences.some((reference) => !reviewedCoreDefinitions.some((definition) =>
+        reference.path === definition.path
+        && reference.name === definition.name
+        && reference.index === definition.declarationNameStart))) {
+    fail('Goal 05B nexus-core application boundary must not have alternate wrappers or references');
+  }
+
+  for (const definition of reviewedCoreDefinitions) {
+    const boundaryReferences = coreProductionSources.flatMap(({ path, source }) => {
+      const codeIndices = new Set(rustIdentifierIndices(source, 'remote_operations', path));
+      return [...source.matchAll(new RegExp(definition.boundaryPattern, 'g'))]
+        .filter((match) => codeIndices.has(match.index))
+        .map((match) => ({ path, index: match.index }));
+    });
+    if (boundaryReferences.length !== 1
+        || boundaryReferences[0].path !== definition.path
+        || boundaryReferences[0].index < definition.start
+        || boundaryReferences[0].index >= definition.end) {
+      fail(`Goal 05B nexus-core application boundary for ${definition.name} must remain fixed`);
+    }
+
+    for (const dtoName of definition.dtoNames) {
+      const dtoReferences = coreProductionSources.flatMap(({ path, source }) =>
+        rustIdentifierIndices(source, dtoName, path).map((index) => ({ path, index })));
+      if (dtoReferences.length === 0
+          || dtoReferences.some((reference) =>
+            reference.path !== definition.path
+            || reference.index < definition.start
+            || reference.index >= definition.end)) {
+        fail(`Goal 05B renderer-facing DTO ${dtoName} must remain in ${definition.name}`);
+      }
+    }
+  }
+
   const rendererSurface = `${protocolSource}\n${clientSource}`;
   requireAbsent(
     rendererSurface,
@@ -452,6 +532,8 @@ async function rustSources(root, directory, excluded = new Set()) {
 export async function remoteOperationsSourceFixture(root) {
   return {
     tauriProductionSources: await rustSources(root, join(root, 'apps/desktop/src-tauri/src')),
+    coreProductionSources: (await rustSources(root, join(root, 'crates/nexus-core/src')))
+      .filter(({ path }) => !path.endsWith('/tests.rs') && !path.includes('/tests/')),
     protocolSource: await readFile(join(root, 'packages/protocol/src/index.ts'), 'utf8'),
     clientSource: await readFile(join(root, 'apps/desktop/src/api/client.ts'), 'utf8'),
     remoteProductionSources: await rustSources(

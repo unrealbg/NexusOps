@@ -253,6 +253,108 @@ pub async fn perform_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(),
   );
 });
 
+test('policy rejects a public Application wrapper around reset-failed execution', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const source = `
+impl Application {
+  pub async fn harmless_reset_bridge(&self, request: BridgeRequest) -> Result<(), AppError> {
+    self.execute_service_reset_failed(request.host_id, request.host_session_id, request.plan_id).await?;
+    Ok(())
+  }
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: [
+        ...(fixture.coreProductionSources ?? []),
+        { path: 'crates/nexus-core/src/application/harmless_bridge.rs', source },
+      ],
+    }),
+    /Goal 05B nexus-core application boundary/,
+  );
+});
+
+test('policy rejects a free nexus-core function delegating reset-failed execution', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const source = `
+pub async fn harmless_reset_bridge(app: &Application, request: BridgeRequest) -> Result<(), AppError> {
+  Application::execute_service_reset_failed(app, request.host_id, request.host_session_id, request.plan_id).await?;
+  Ok(())
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: [
+        ...(fixture.coreProductionSources ?? []),
+        { path: 'crates/nexus-core/src/harmless_bridge.rs', source },
+      ],
+    }),
+    /Goal 05B nexus-core application boundary/,
+  );
+});
+
+test('policy rejects a public Application wrapper around reset-failed planning', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const source = `
+impl Application {
+  pub async fn harmless_plan_bridge(&self, request: BridgeRequest) -> Result<ServiceResetFailedPlan, AppError> {
+    self.plan_service_reset_failed(request.host_id, request.host_session_id, request.observation_id).await
+  }
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: [
+        ...(fixture.coreProductionSources ?? []),
+        { path: 'crates/nexus-core/src/application/harmless_plan.rs', source },
+      ],
+    }),
+    /Goal 05B nexus-core application boundary/,
+  );
+});
+
+test('policy rejects a public Application wrapper around reset-failed discard', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const source = `
+impl Application {
+  pub async fn harmless_discard_bridge(&self, request: BridgeRequest) -> Result<bool, AppError> {
+    self.discard_service_reset_failed(request.host_id, request.host_session_id, request.plan_id).await
+  }
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: [
+        ...(fixture.coreProductionSources ?? []),
+        { path: 'crates/nexus-core/src/application/harmless_discard.rs', source },
+      ],
+    }),
+    /Goal 05B nexus-core application boundary/,
+  );
+});
+
+test('policy rejects a nexus-core function-item alias of a reviewed Application method', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const source = `
+use crate::Application as CoreApp;
+
+pub async fn harmless_reset_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(), AppError> {
+  let execute = CoreApp::execute_service_reset_failed;
+  execute(app, request.host_id, request.host_session_id, request.plan_id).await?;
+  Ok(())
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: [
+        ...(fixture.coreProductionSources ?? []),
+        { path: 'crates/nexus-core/src/application/aliased_bridge.rs', source },
+      ],
+    }),
+    /Goal 05B nexus-core application boundary/,
+  );
+});
+
 test('policy rejects serializable or additional concrete production mutation payloads', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(
