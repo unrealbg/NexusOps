@@ -11,6 +11,69 @@ function requireAbsent(text, fragments, context) {
   }
 }
 
+function rustFunctionEnd(source, start, limit, context) {
+  let bodyStart = -1;
+  let depth = 0;
+  for (let index = start; index < limit; index += 1) {
+    if (source.startsWith('//', index)) {
+      const newline = source.indexOf('\n', index + 2);
+      index = newline === -1 ? limit : newline;
+      continue;
+    }
+    if (source.startsWith('/*', index)) {
+      let commentDepth = 1;
+      index += 2;
+      while (index < limit && commentDepth > 0) {
+        if (source.startsWith('/*', index)) {
+          commentDepth += 1;
+          index += 2;
+        } else if (source.startsWith('*/', index)) {
+          commentDepth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      index -= 1;
+      continue;
+    }
+
+    const rawString = /^(?:b)?r(#{0,255})"/.exec(source.slice(index));
+    if (rawString) {
+      const terminator = `"${rawString[1]}`;
+      const end = source.indexOf(terminator, index + rawString[0].length);
+      if (end === -1 || end >= limit) fail(`unterminated raw string in ${context}`);
+      index = end + terminator.length - 1;
+      continue;
+    }
+    const quoteOffset = source.startsWith('b"', index) ? 1 : 0;
+    if (source[index + quoteOffset] === '"') {
+      index += quoteOffset + 1;
+      while (index < limit) {
+        if (source[index] === '\\') index += 2;
+        else if (source[index] === '"') break;
+        else index += 1;
+      }
+      if (index >= limit) fail(`unterminated string in ${context}`);
+      continue;
+    }
+    const character = /^'(?:\\.|[^'\\\r\n])'/.exec(source.slice(index));
+    if (character) {
+      index += character[0].length - 1;
+      continue;
+    }
+
+    if (source[index] === '{') {
+      if (bodyStart === -1) bodyStart = index;
+      depth += 1;
+    } else if (source[index] === '}' && bodyStart !== -1) {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  fail(`Tauri command function body is missing or unterminated in ${context}`);
+}
+
 export function verifyRemoteOperationsSourceText({
   tauriProductionSources,
   protocolSource,
@@ -58,12 +121,19 @@ export function verifyRemoteOperationsSourceText({
 
     return attributes.map((attribute, index) => {
       const end = attributes[index + 1]?.index ?? source.length;
-      const commandSource = source.slice(attribute.index, end);
       const declaration = /\b(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(
         source.slice(attribute.end, end),
       );
       if (!declaration) fail(`Tauri command declaration is missing after attribute in ${path}`);
-      return { path, name: declaration[1], source: commandSource };
+      const declarationStart = attribute.end + declaration.index;
+      const functionEnd = rustFunctionEnd(source, declarationStart, end, path);
+      return {
+        path,
+        name: declaration[1],
+        source: source.slice(attribute.index, functionEnd),
+        start: attribute.index,
+        end: functionEnd,
+      };
     });
   });
   const commandNames = commandSections.map(({ name }) => name);
@@ -106,9 +176,41 @@ export function verifyRemoteOperationsSourceText({
     '.discard_service_reset_failed(',
     '.execute_service_reset_failed(',
   ];
+  const reviewedCommandPath = 'apps/desktop/src-tauri/src/commands.rs';
+  const applicationMutationCalls = [
+    { name: 'plan_service_reset_failed', method: 'plan_service_reset_failed' },
+    { name: 'discard_service_reset_failed', method: 'discard_service_reset_failed' },
+    { name: 'execute_service_reset_failed', method: 'execute_service_reset_failed' },
+  ];
+  const applicationMutationReferences = tauriProductionSources.flatMap(({ path, source }) =>
+    applicationMutationCalls.flatMap(({ method }) => {
+      const callPattern = new RegExp(
+        `(?:\\.\\s*|\\bApplication\\s*::\\s*)${method}\\s*\\(`,
+        'g',
+      );
+      return [...source.matchAll(callPattern)].map((match) => ({
+        path,
+        method,
+        index: match.index,
+      }));
+    }));
+  const applicationCallsAreReviewed = applicationMutationReferences.length === 3
+    && applicationMutationCalls.every(({ name, method }) => {
+      const command = commandSections.find(({ path, name: commandName }) =>
+        path === reviewedCommandPath && commandName === name);
+      const references = applicationMutationReferences.filter((reference) =>
+        reference.method === method);
+      return command
+        && references.length === 1
+        && references[0].path === reviewedCommandPath
+        && references[0].index >= command.start
+        && references[0].index < command.end;
+    });
+  if (!applicationCallsAreReviewed) {
+    fail('Goal 05B application mutation calls must remain inside the three reviewed Tauri commands');
+  }
   const mutationSurfaceCommands = commandSections.filter(({ source }) =>
     mutationSurfaceFragments.some((fragment) => source.includes(fragment)));
-  const reviewedCommandPath = 'apps/desktop/src-tauri/src/commands.rs';
   if (mutationSurfaceCommands.length !== 3
       || mutationSurfaceCommands.some(({ path, name }) =>
         path !== reviewedCommandPath || !allowedMutationCommands.has(name))

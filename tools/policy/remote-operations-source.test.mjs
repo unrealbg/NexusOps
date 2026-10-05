@@ -52,7 +52,7 @@ test('policy rejects mutation authority exposed by a fourth command in another p
         },
       ],
     }),
-    /only the three reviewed service reset-failed commands/,
+    /three reviewed .* commands/,
   );
 });
 
@@ -72,7 +72,7 @@ test('policy rejects a renamed reviewed mutation command', async () => {
           }
           : file),
     }),
-    /only the three reviewed service reset-failed commands/,
+    /three reviewed .* commands/,
   );
 });
 
@@ -92,9 +92,90 @@ test('policy discovers noncanonical and imported Tauri command attributes', asyn
           { path: 'apps/desktop/src-tauri/src/alternate.rs', source },
         ],
       }),
-      /only the three reviewed service reset-failed commands/,
+      /three reviewed .* commands/,
     );
   }
+});
+
+test('policy rejects a Tauri command delegating to an earlier local reset-failed helper', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const bridgeSource = `
+struct BridgeRequest {
+  host_id: HostId,
+  host_session_id: HostSessionId,
+  plan_id: RemoteOperationPlanId,
+}
+
+async fn perform_bridge(app: &Application, request: BridgeRequest) -> Result<(), AppError> {
+  app.execute_service_reset_failed(request.host_id, request.host_session_id, request.plan_id).await?;
+  Ok(())
+}
+
+#[tauri::command]
+pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest) -> Result<(), AppError> {
+  perform_bridge(app.inner(), request).await
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      tauriProductionSources: [
+        ...fixture.tauriProductionSources,
+        { path: 'apps/desktop/src-tauri/src/local_bridge.rs', source: bridgeSource },
+      ],
+    }),
+    /Goal 05B application mutation calls must remain inside the three reviewed Tauri commands/,
+  );
+});
+
+test('policy rejects a Tauri command delegating to a facade in another production module', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      tauriProductionSources: [
+        ...fixture.tauriProductionSources,
+        {
+          path: 'apps/desktop/src-tauri/src/bridge.rs',
+          source: 'pub async fn perform_bridge(app: &Application, request: BridgeRequest) -> Result<bool, AppError> { Application::discard_service_reset_failed(app, request.host_id, request.host_session_id, request.plan_id).await }',
+        },
+        {
+          path: 'apps/desktop/src-tauri/src/alternate_commands.rs',
+          source: '#[tauri::command]\npub async fn harmless_bridge(app: State<\'_, Application>, request: BridgeRequest) -> Result<bool, AppError> { crate::bridge::perform_bridge(app.inner(), request).await }',
+        },
+      ],
+    }),
+    /Goal 05B application mutation calls must remain inside the three reviewed Tauri commands/,
+  );
+});
+
+test('policy rejects a local DTO that hides plan authority while its helper calls the application', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const bridgeSource = `
+struct BridgeRequest {
+  host_id: HostId,
+  host_session_id: HostSessionId,
+  plan_id: RemoteOperationPlanId,
+}
+
+async fn plan_through_facade(app: &Application, request: BridgeRequest) -> Result<(), AppError> {
+  app.plan_service_reset_failed(request.host_id, request.host_session_id, ServiceObservationId::new()).await?;
+  Ok(())
+}
+
+#[tauri::command]
+pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest) -> Result<(), AppError> {
+  plan_through_facade(app.inner(), request).await
+}`;
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      tauriProductionSources: [
+        ...fixture.tauriProductionSources,
+        { path: 'apps/desktop/src-tauri/src/dto_bridge.rs', source: bridgeSource },
+      ],
+    }),
+    /Goal 05B application mutation calls must remain inside the three reviewed Tauri commands/,
+  );
 });
 
 test('policy rejects serializable or additional concrete production mutation payloads', async () => {
