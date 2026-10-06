@@ -18,6 +18,8 @@ try {
     [Environment]::SetEnvironmentVariable('NEXUS_OPENSSH_SYSTEMCTL_ABSENT', '1', 'Process')
     cargo test -p nexus-ssh --test openssh_interop openssh_systemd_reset_failed_non_mutating_completion --locked -- --ignored --exact --nocapture
     if ($LASTEXITCODE -ne 0) { throw "OpenSSH Goal 05B non-mutating completion interoperability failed" }
+    cargo test -p nexus-ssh --test openssh_interop openssh_systemd_try_restart_non_mutating_completion --locked -- --ignored --exact --nocapture
+    if ($LASTEXITCODE -ne 0) { throw "OpenSSH Goal 05D non-mutating completion interoperability failed" }
     cargo test -p nexus-ssh --test openssh_monitoring openssh_monitoring_interoperability --locked -- --ignored --exact --nocapture
     if ($LASTEXITCODE -ne 0) { throw "OpenSSH monitoring interoperability failed" }
     cargo test -p nexus-ssh --test openssh_terminal openssh_terminal_pty_interoperability --locked -- --ignored --exact --nocapture

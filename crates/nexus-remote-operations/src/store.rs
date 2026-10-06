@@ -115,7 +115,7 @@ impl AuthorityStore {
     }
 
     /// Discard and consume use the same synchronization boundary; only one wins.
-    pub fn discard(
+    pub fn discard<O: NativeOperation>(
         &self,
         id: RemoteOperationPlanId,
         expected: AuthorityBinding,
@@ -135,6 +135,9 @@ impl AuthorityStore {
         };
         if current.binding != expected {
             return Err(stale());
+        }
+        if current.operation_type != TypeId::of::<O>() || current.risk != O::RISK {
+            return Err(policy());
         }
         Ok(remove_id(&mut state, id).is_some())
     }

@@ -3,6 +3,7 @@ use nexus_model::{
 };
 use nexus_remote_operations::{
     AuthorityBinding, SystemdResetFailedPreconditions, SystemdServiceUnitName,
+    SystemdTryRestartPreconditions,
 };
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 use tokio::time::Instant;
@@ -12,9 +13,21 @@ const MAX_HOST_SETS: usize = 64;
 const MAX_ACTIONABLE_GLOBAL: usize = 4096;
 
 #[derive(Clone)]
-pub(crate) struct ActionableServiceObservation {
+pub(crate) struct ResetFailedObservation {
     pub unit: SystemdServiceUnitName,
     pub preconditions: SystemdResetFailedPreconditions,
+}
+
+#[derive(Clone)]
+pub(crate) struct TryRestartObservation {
+    pub unit: SystemdServiceUnitName,
+    pub preconditions: SystemdTryRestartPreconditions,
+}
+
+#[derive(Clone)]
+enum ActionableServiceObservation {
+    ResetFailed(ResetFailedObservation),
+    TryRestart(TryRestartObservation),
 }
 
 struct ObservationSet {
@@ -76,19 +89,38 @@ impl ServiceObservationStore {
         let mut entries = HashMap::new();
         for entry in &mut snapshot.entries {
             entry.reset_failed_observation_id = None;
-            if entry.load_state == "loaded"
-                && entry.active_state == "failed"
-                && entry.sub_state == "failed"
-                && let Ok(unit) = SystemdServiceUnitName::parse(&entry.unit)
-            {
+            entry.try_restart_observation_id = None;
+            let Ok(unit) = SystemdServiceUnitName::parse(&entry.unit) else {
+                continue;
+            };
+            if SystemdResetFailedPreconditions.matches(
+                &entry.load_state,
+                &entry.active_state,
+                &entry.sub_state,
+            ) {
                 let id = ServiceObservationId::new();
                 entry.reset_failed_observation_id = Some(id);
                 entries.insert(
                     id,
-                    ActionableServiceObservation {
-                        unit,
+                    ActionableServiceObservation::ResetFailed(ResetFailedObservation {
+                        unit: unit.clone(),
                         preconditions: SystemdResetFailedPreconditions,
-                    },
+                    }),
+                );
+            }
+            if SystemdTryRestartPreconditions.matches(
+                &entry.load_state,
+                &entry.active_state,
+                &entry.sub_state,
+            ) {
+                let id = ServiceObservationId::new();
+                entry.try_restart_observation_id = Some(id);
+                entries.insert(
+                    id,
+                    ActionableServiceObservation::TryRestart(TryRestartObservation {
+                        unit,
+                        preconditions: SystemdTryRestartPreconditions,
+                    }),
                 );
             }
         }
@@ -118,7 +150,29 @@ impl ServiceObservationStore {
         Ok(())
     }
 
-    pub fn resolve(
+    pub fn resolve_reset_failed(
+        &self,
+        id: ServiceObservationId,
+        expected: AuthorityBinding,
+    ) -> Result<ResetFailedObservation, AppError> {
+        match self.resolve(id, expected)? {
+            ActionableServiceObservation::ResetFailed(value) => Ok(value),
+            ActionableServiceObservation::TryRestart(_) => Err(stale()),
+        }
+    }
+
+    pub fn resolve_try_restart(
+        &self,
+        id: ServiceObservationId,
+        expected: AuthorityBinding,
+    ) -> Result<TryRestartObservation, AppError> {
+        match self.resolve(id, expected)? {
+            ActionableServiceObservation::TryRestart(value) => Ok(value),
+            ActionableServiceObservation::ResetFailed(_) => Err(stale()),
+        }
+    }
+
+    fn resolve(
         &self,
         id: ServiceObservationId,
         expected: AuthorityBinding,
@@ -243,6 +297,7 @@ mod tests {
                 sub_state: "failed".into(),
                 description: "fixture".into(),
                 reset_failed_observation_id: None,
+                try_restart_observation_id: None,
             }],
         }
     }
@@ -283,16 +338,52 @@ mod tests {
             sub_state: "running".into(),
             description: "active".into(),
             reset_failed_observation_id: None,
+            try_restart_observation_id: None,
+        });
+        value.entries.push(ServiceEntry {
+            unit: "inactive.service".into(),
+            load_state: "loaded".into(),
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            description: "inactive".into(),
+            reset_failed_observation_id: None,
+            try_restart_observation_id: None,
+        });
+        value.entries.push(ServiceEntry {
+            unit: "bad;unit.service".into(),
+            load_state: "loaded".into(),
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            description: "malformed".into(),
+            reset_failed_observation_id: None,
+            try_restart_observation_id: None,
         });
         let owner = binding(host, session, 7);
         store.publish(owner, sequence, &mut value).unwrap();
         let id = value.entries[0].reset_failed_observation_id.unwrap();
         assert!(value.entries[1].reset_failed_observation_id.is_none());
+        let restart_id = value.entries[1].try_restart_observation_id.unwrap();
+        assert!(value.entries[0].try_restart_observation_id.is_none());
+        for entry in &value.entries[2..] {
+            assert!(entry.reset_failed_observation_id.is_none());
+            assert!(entry.try_restart_observation_id.is_none());
+        }
         assert_eq!(
-            store.resolve(id, owner).unwrap().unit.as_str(),
+            store.resolve_reset_failed(id, owner).unwrap().unit.as_str(),
             "worker@1.service"
         );
+        assert_eq!(
+            store
+                .resolve_try_restart(restart_id, owner)
+                .unwrap()
+                .unit
+                .as_str(),
+            "active.service"
+        );
+        assert!(store.resolve_try_restart(id, owner).is_err());
+        assert!(store.resolve_reset_failed(restart_id, owner).is_err());
         store.revoke_session(host, session).unwrap();
-        assert!(store.resolve(id, owner).is_err());
+        assert!(store.resolve_reset_failed(id, owner).is_err());
+        assert!(store.resolve_try_restart(restart_id, owner).is_err());
     }
 }

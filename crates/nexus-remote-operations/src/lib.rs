@@ -8,6 +8,7 @@ mod authority;
 mod outcome;
 mod store;
 mod systemd_reset_failed;
+mod systemd_try_restart;
 
 pub use admission::{ExecutionAdmission, ExecutionPermit};
 pub use authority::{AuthorityBinding, ConsumedAuthority, NativeOperation, PlanDraft, PlanReceipt};
@@ -20,6 +21,7 @@ pub use store::{AuthorityStore, PLAN_TTL};
 pub use systemd_reset_failed::{
     SystemdResetFailed, SystemdResetFailedPreconditions, SystemdServiceUnitName,
 };
+pub use systemd_try_restart::{SystemdTryRestart, SystemdTryRestartPreconditions};
 
 use nexus_model::{AppError, ErrorCode, HostId, HostSessionId};
 use tokio::sync::OwnedMutexGuard;
@@ -40,12 +42,12 @@ impl RemoteOperationFoundation {
         self.authorities.insert(draft, current)
     }
 
-    pub fn discard(
+    pub fn discard<O: NativeOperation>(
         &self,
         plan_id: RemoteOperationPlanId,
         binding: AuthorityBinding,
     ) -> Result<bool, AppError> {
-        self.authorities.discard(plan_id, binding)
+        self.authorities.discard::<O>(plan_id, binding)
     }
 
     pub async fn lifecycle_guard(&self, host_id: HostId) -> Result<OwnedMutexGuard<()>, AppError> {

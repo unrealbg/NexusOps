@@ -52,7 +52,7 @@ test('policy rejects mutation authority exposed by a fourth command in another p
         },
       ],
     }),
-    /three reviewed .* commands/,
+    /six reviewed .* commands/,
   );
 });
 
@@ -72,7 +72,7 @@ test('policy rejects a renamed reviewed mutation command', async () => {
           }
           : file),
     }),
-    /three reviewed .* commands/,
+    /six reviewed .* commands/,
   );
 });
 
@@ -92,7 +92,7 @@ test('policy discovers noncanonical and imported Tauri command attributes', asyn
           { path: 'apps/desktop/src-tauri/src/alternate.rs', source },
         ],
       }),
-      /three reviewed .* commands/,
+      /six reviewed .* commands/,
     );
   }
 });
@@ -123,7 +123,7 @@ pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest
         { path: 'apps/desktop/src-tauri/src/local_bridge.rs', source: bridgeSource },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -144,7 +144,7 @@ test('policy rejects a Tauri command delegating to a facade in another productio
         },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -174,7 +174,7 @@ pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest
         { path: 'apps/desktop/src-tauri/src/dto_bridge.rs', source: bridgeSource },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -200,7 +200,7 @@ pub async fn perform_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(),
         },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -224,7 +224,7 @@ pub async fn perform_bridge(app: &Application, request: BridgeRequest) -> Result
         },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -249,7 +249,7 @@ pub async fn perform_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(),
         },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -516,5 +516,43 @@ test('policy rejects changes to the exact reset-failed command and its bounds', 
         : file),
     }),
     /systemd SSH transport policy is missing/,
+  );
+});
+
+test('policy rejects changes to the exact try-restart semantic and transport bounds', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  for (const [from, to] of [
+    ['--no-ask-password try-restart -- ', '--no-ask-password restart -- '],
+    ['const REQUEST_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);', 'const REQUEST_COMPLETION_TIMEOUT: Duration = Duration::from_secs(60);'],
+    ['const OUTPUT_LIMIT: usize = 8 * 1024;', 'const OUTPUT_LIMIT: usize = 16 * 1024;'],
+    ['ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,', 'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } | ChannelMsg::Close => MessageHandling::Continue,'],
+  ]) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_try_restart.rs')
+          ? { ...file, source: file.source.replace(from, to) }
+          : file),
+      }),
+      /try-restart SSH transport policy is missing|reviewed try-restart SSH transport contains forbidden text/,
+    );
+  }
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      remoteProductionSources: fixture.remoteProductionSources.map((file) => file.path.endsWith('systemd_try_restart.rs')
+        ? { ...file, source: file.source.replace('active == "active" && sub == "running"', 'active == "active"') }
+        : file),
+    }),
+    /try-restart operation policy is missing/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: fixture.coreProductionSources.map((file) => file.path.endsWith('application/services.rs')
+        ? { ...file, source: file.source.replace('.plan::<SystemdTryRestart>(', '.plan::<SystemdResetFailed>(') }
+        : file),
+    }),
+    /native operation binding for plan_service_try_restart must remain fixed/,
   );
 });

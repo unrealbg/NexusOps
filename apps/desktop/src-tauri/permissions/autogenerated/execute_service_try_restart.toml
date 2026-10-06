@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-execute-service-try-restart"
+description = "Enables the execute_service_try_restart command without any pre-configured scope."
+commands.allow = ["execute_service_try_restart"]
+
+[[permission]]
+identifier = "deny-execute-service-try-restart"
+description = "Denies the execute_service_try_restart command without any pre-configured scope."
+commands.deny = ["execute_service_try_restart"]

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use nexus_operations::{ReadOnlyCommand, RemoteSession};
 use nexus_remote_operations::{
     ConsumedAuthority, MutationTransport, MutationTransportOutcome, SystemdResetFailed,
+    SystemdTryRestart,
 };
 use nexus_secrets::{Credential, KeyProvider};
 use nexus_terminal::{TerminalChannel, TerminalConnector, TerminalRead};
@@ -157,6 +158,17 @@ impl MutationTransport<SystemdResetFailed> for TestSession {
     async fn dispatch(
         &self,
         _: &ConsumedAuthority<SystemdResetFailed>,
+        _: CancellationToken,
+    ) -> MutationTransportOutcome {
+        self.service_mutations.fetch_add(1, Ordering::SeqCst);
+        *self.service_outcome.lock().unwrap()
+    }
+}
+#[async_trait]
+impl MutationTransport<SystemdTryRestart> for TestSession {
+    async fn dispatch(
+        &self,
+        _: &ConsumedAuthority<SystemdTryRestart>,
         _: CancellationToken,
     ) -> MutationTransportOutcome {
         self.service_mutations.fetch_add(1, Ordering::SeqCst);
@@ -845,6 +857,81 @@ async fn reset_failed_plans_only_backend_observed_failed_units_and_executes_once
 }
 
 #[tokio::test]
+async fn service_capabilities_are_operation_specific_and_try_restart_is_one_shot() {
+    let (directory, app, session_transport) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let snapshot = app.list_host_services(host.id, session).await.unwrap();
+    let running = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "sshd.service")
+        .unwrap();
+    let failed = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "broken.service")
+        .unwrap();
+    let restart_observation = running
+        .try_restart_observation_id
+        .expect("running capability");
+    let reset_observation = failed
+        .reset_failed_observation_id
+        .expect("failed capability");
+    assert!(running.reset_failed_observation_id.is_none());
+    assert!(failed.try_restart_observation_id.is_none());
+
+    assert!(
+        app.plan_service_try_restart(host.id, session, reset_observation)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.plan_service_reset_failed(host.id, session, restart_observation)
+            .await
+            .is_err()
+    );
+
+    let restart = app
+        .plan_service_try_restart(host.id, session, restart_observation)
+        .await
+        .unwrap();
+    assert_eq!(restart.risk, OperationRisk::High);
+    assert_eq!(restart.unit, "sshd.service");
+    assert!(
+        app.execute_service_reset_failed(host.id, session, restart.plan_id)
+            .await
+            .is_err()
+    );
+    let result = app
+        .execute_service_try_restart(host.id, session, restart.plan_id)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, ServiceTryRestartOutcome::Success);
+    assert!(
+        app.execute_service_try_restart(host.id, session, restart.plan_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        session_transport.service_mutations.load(Ordering::SeqCst),
+        1
+    );
+    let event = audit_events(directory.path())
+        .into_iter()
+        .find(|event| event.operation.kind == "service.try_restart")
+        .expect("try-restart audit");
+    assert_eq!(event.operation.risk, OperationRisk::High);
+    assert_eq!(event.outcome, AuditOutcome::Success);
+}
+
+#[tokio::test]
 async fn reset_failed_discard_and_session_turnover_revoke_one_shot_authority() {
     let (_dir, app, provider) = setup(false);
     let host = app.save_host(input(), Some(credential())).await.unwrap();
@@ -857,6 +944,7 @@ async fn reset_failed_discard_and_session_turnover_revoke_one_shot_authority() {
         .unwrap();
     let snapshot = app.list_host_services(host.id, session).await.unwrap();
     let observation = snapshot.entries[1].reset_failed_observation_id.unwrap();
+    let restart_observation = snapshot.entries[0].try_restart_observation_id.unwrap();
     let discarded = app
         .plan_service_reset_failed(host.id, session, observation)
         .await
@@ -875,9 +963,20 @@ async fn reset_failed_discard_and_session_turnover_revoke_one_shot_authority() {
         .plan_service_reset_failed(host.id, session, observation)
         .await
         .unwrap();
-    app.disconnect_host(host.id).await.unwrap();
+    let restart = app
+        .plan_service_try_restart(host.id, session, restart_observation)
+        .await
+        .unwrap();
     assert_eq!(
         app.execute_service_reset_failed(host.id, session, live.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    app.disconnect_host(host.id).await.unwrap();
+    assert_eq!(
+        app.execute_service_try_restart(host.id, session, restart.plan_id)
             .await
             .unwrap_err()
             .code,
@@ -1579,6 +1678,16 @@ impl MutationTransport<SystemdResetFailed> for SlowRefreshSession {
     async fn dispatch(
         &self,
         _: &ConsumedAuthority<SystemdResetFailed>,
+        _: CancellationToken,
+    ) -> MutationTransportOutcome {
+        MutationTransportOutcome::CompletionConfirmed { success: true }
+    }
+}
+#[async_trait]
+impl MutationTransport<SystemdTryRestart> for SlowRefreshSession {
+    async fn dispatch(
+        &self,
+        _: &ConsumedAuthority<SystemdTryRestart>,
         _: CancellationToken,
     ) -> MutationTransportOutcome {
         MutationTransportOutcome::CompletionConfirmed { success: true }
@@ -2505,6 +2614,16 @@ impl MutationTransport<SystemdResetFailed> for LifecycleTransport {
     async fn dispatch(
         &self,
         _: &ConsumedAuthority<SystemdResetFailed>,
+        _: CancellationToken,
+    ) -> MutationTransportOutcome {
+        MutationTransportOutcome::CompletionConfirmed { success: true }
+    }
+}
+#[async_trait]
+impl MutationTransport<SystemdTryRestart> for LifecycleTransport {
+    async fn dispatch(
+        &self,
+        _: &ConsumedAuthority<SystemdTryRestart>,
         _: CancellationToken,
     ) -> MutationTransportOutcome {
         MutationTransportOutcome::CompletionConfirmed { success: true }
