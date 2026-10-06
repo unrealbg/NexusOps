@@ -486,8 +486,8 @@ test('policy rejects changes to the exact reset-failed command and its bounds', 
       ...fixture,
       sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_reset_failed.rs')
         ? { ...file, source: file.source.replace(
-          'Some(ChannelMsg::ExitStatus { exit_status }) =>',
-          'Some(ChannelMsg::ExitStatus { exit_status }) if accepted =>',
+          'ChannelMsg::ExitStatus { exit_status } =>',
+          'ChannelMsg::ExitStatus { exit_status } if *accepted =>',
         ) }
         : file),
     }),
@@ -498,11 +498,23 @@ test('policy rejects changes to the exact reset-failed command and its bounds', 
       ...fixture,
       sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_reset_failed.rs')
         ? { ...file, source: file.source.replace(
-          'Some(ChannelMsg::Eof) => {}\n                    Some(ChannelMsg::Close) | None =>',
-          'Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None =>',
+          'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+          'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } | ChannelMsg::Close => MessageHandling::Continue,',
         ) }
         : file),
     }),
     /systemd SSH transport policy is missing|reviewed systemd SSH transport contains forbidden text/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_reset_failed.rs')
+        ? { ...file, source: file.source.replace(
+          'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+          'ChannelMsg::Eof => MessageHandling::Continue,',
+        ) }
+        : file),
+    }),
+    /systemd SSH transport policy is missing/,
   );
 });

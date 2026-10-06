@@ -20,6 +20,64 @@ fn command(authority: &ConsumedAuthority<SystemdResetFailed>) -> String {
     format!("{COMMAND_PREFIX}{}", authority.target().as_str())
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum MessageHandling {
+    Continue,
+    Complete(MutationTransportOutcome),
+}
+
+fn handle_message(
+    message: ChannelMsg,
+    accepted: &mut bool,
+    execution_evidence: &mut bool,
+    output_bytes: &mut usize,
+) -> MessageHandling {
+    match message {
+        ChannelMsg::Success if !*accepted => {
+            *accepted = true;
+            MessageHandling::Continue
+        }
+        ChannelMsg::Success => MessageHandling::Complete(
+            MutationTransportOutcome::CompletionUnknown(CompletionUnknownReason::ConnectionLost),
+        ),
+        ChannelMsg::Failure if !*accepted && !*execution_evidence => MessageHandling::Complete(
+            MutationTransportOutcome::NotDispatched(NotDispatchedReason::Rejected),
+        ),
+        ChannelMsg::Failure => MessageHandling::Complete(
+            MutationTransportOutcome::CompletionUnknown(CompletionUnknownReason::ConnectionLost),
+        ),
+        ChannelMsg::ExitStatus { exit_status } => {
+            MessageHandling::Complete(MutationTransportOutcome::CompletionConfirmed {
+                success: exit_status == 0,
+            })
+        }
+        ChannelMsg::ExitSignal { .. } => {
+            MessageHandling::Complete(MutationTransportOutcome::CompletionConfirmed {
+                success: false,
+            })
+        }
+        ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+            *execution_evidence = true;
+            *output_bytes = output_bytes.saturating_add(data.len());
+            if *output_bytes > OUTPUT_LIMIT {
+                MessageHandling::Complete(MutationTransportOutcome::CompletionUnknown(
+                    CompletionUnknownReason::OutputLimit,
+                ))
+            } else {
+                MessageHandling::Continue
+            }
+        }
+        ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,
+        ChannelMsg::Close => MessageHandling::Complete(
+            MutationTransportOutcome::CompletionUnknown(CompletionUnknownReason::ConnectionLost),
+        ),
+        _ if !*accepted => MessageHandling::Complete(MutationTransportOutcome::CompletionUnknown(
+            CompletionUnknownReason::ConnectionLost,
+        )),
+        _ => MessageHandling::Continue,
+    }
+}
+
 #[async_trait]
 impl MutationTransport<SystemdResetFailed> for SshSession {
     async fn dispatch(
@@ -65,52 +123,20 @@ impl MutationTransport<SystemdResetFailed> for SshSession {
             let mut output_bytes = 0usize;
             loop {
                 match channel.wait().await {
-                    Some(ChannelMsg::Success) if !accepted => accepted = true,
-                    Some(ChannelMsg::Success) => {
+                    Some(message) => match handle_message(
+                        message,
+                        &mut accepted,
+                        &mut execution_evidence,
+                        &mut output_bytes,
+                    ) {
+                        MessageHandling::Continue => {}
+                        MessageHandling::Complete(outcome) => return outcome,
+                    },
+                    None => {
                         return MutationTransportOutcome::CompletionUnknown(
                             CompletionUnknownReason::ConnectionLost,
                         );
                     }
-                    Some(ChannelMsg::Failure) if !accepted && !execution_evidence => {
-                        return MutationTransportOutcome::NotDispatched(
-                            NotDispatchedReason::Rejected,
-                        );
-                    }
-                    Some(ChannelMsg::Failure) => {
-                        return MutationTransportOutcome::CompletionUnknown(
-                            CompletionUnknownReason::ConnectionLost,
-                        );
-                    }
-                    Some(ChannelMsg::ExitStatus { exit_status }) => {
-                        return MutationTransportOutcome::CompletionConfirmed {
-                            success: exit_status == 0,
-                        };
-                    }
-                    Some(ChannelMsg::ExitSignal { .. }) => {
-                        return MutationTransportOutcome::CompletionConfirmed { success: false };
-                    }
-                    Some(ChannelMsg::Data { data })
-                    | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        execution_evidence = true;
-                        output_bytes = output_bytes.saturating_add(data.len());
-                        if output_bytes > OUTPUT_LIMIT {
-                            return MutationTransportOutcome::CompletionUnknown(
-                                CompletionUnknownReason::OutputLimit,
-                            );
-                        }
-                    }
-                    Some(ChannelMsg::Eof) => {}
-                    Some(ChannelMsg::Close) | None => {
-                        return MutationTransportOutcome::CompletionUnknown(
-                            CompletionUnknownReason::ConnectionLost,
-                        );
-                    }
-                    Some(_) if !accepted => {
-                        return MutationTransportOutcome::CompletionUnknown(
-                            CompletionUnknownReason::ConnectionLost,
-                        );
-                    }
-                    Some(_) => {}
                 }
             }
         };
@@ -142,6 +168,98 @@ mod tests {
         AuthorityBinding, PlanDraft, RemoteOperationFoundation, SystemdResetFailedPreconditions,
         SystemdServiceUnitName,
     };
+
+    fn handle_sequence(messages: impl IntoIterator<Item = ChannelMsg>) -> MessageHandling {
+        let mut accepted = false;
+        let mut execution_evidence = false;
+        let mut output_bytes = 0;
+        let mut handling = MessageHandling::Continue;
+        for message in messages {
+            handling = handle_message(
+                message,
+                &mut accepted,
+                &mut execution_evidence,
+                &mut output_bytes,
+            );
+            if matches!(handling, MessageHandling::Complete(_)) {
+                break;
+            }
+        }
+        handling
+    }
+
+    #[test]
+    fn window_adjusted_continues_until_terminal_evidence() {
+        for (messages, expected) in [
+            (
+                vec![
+                    ChannelMsg::WindowAdjusted { new_size: 16_384 },
+                    ChannelMsg::ExitStatus { exit_status: 0 },
+                ],
+                MutationTransportOutcome::CompletionConfirmed { success: true },
+            ),
+            (
+                vec![
+                    ChannelMsg::WindowAdjusted { new_size: 16_384 },
+                    ChannelMsg::ExitStatus { exit_status: 127 },
+                ],
+                MutationTransportOutcome::CompletionConfirmed { success: false },
+            ),
+            (
+                vec![
+                    ChannelMsg::WindowAdjusted { new_size: 16_384 },
+                    ChannelMsg::Eof,
+                    ChannelMsg::ExitStatus { exit_status: 0 },
+                ],
+                MutationTransportOutcome::CompletionConfirmed { success: true },
+            ),
+            (
+                vec![
+                    ChannelMsg::Success,
+                    ChannelMsg::WindowAdjusted { new_size: 16_384 },
+                    ChannelMsg::ExitStatus { exit_status: 0 },
+                ],
+                MutationTransportOutcome::CompletionConfirmed { success: true },
+            ),
+        ] {
+            assert_eq!(
+                handle_sequence(messages),
+                MessageHandling::Complete(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn window_adjusted_changes_no_transport_state_and_other_preaccept_messages_fail_closed() {
+        let mut accepted = false;
+        let mut execution_evidence = false;
+        let mut output_bytes = 37;
+        assert_eq!(
+            handle_message(
+                ChannelMsg::WindowAdjusted { new_size: 16_384 },
+                &mut accepted,
+                &mut execution_evidence,
+                &mut output_bytes,
+            ),
+            MessageHandling::Continue
+        );
+        assert!(!accepted);
+        assert!(!execution_evidence);
+        assert_eq!(output_bytes, 37);
+        assert_eq!(
+            handle_message(
+                ChannelMsg::XonXoff {
+                    client_can_do: true,
+                },
+                &mut accepted,
+                &mut execution_evidence,
+                &mut output_bytes,
+            ),
+            MessageHandling::Complete(MutationTransportOutcome::CompletionUnknown(
+                CompletionUnknownReason::ConnectionLost,
+            ))
+        );
+    }
 
     #[test]
     fn command_is_exact_and_contains_only_the_validated_unit() {
