@@ -6,6 +6,7 @@ mod handler;
 mod known_hosts;
 mod provider;
 mod session;
+mod systemd_reset_failed;
 
 pub use known_hosts::KnownHosts;
 pub use provider::SshProvider;

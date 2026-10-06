@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-service-reset-failed"
+description = "Enables the plan_service_reset_failed command without any pre-configured scope."
+commands.allow = ["plan_service_reset_failed"]
+
+[[permission]]
+identifier = "deny-plan-service-reset-failed"
+description = "Denies the plan_service_reset_failed command without any pre-configured scope."
+commands.deny = ["plan_service_reset_failed"]

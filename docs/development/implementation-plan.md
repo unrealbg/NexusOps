@@ -26,4 +26,8 @@ Goal 05A introduces `nexus-remote-operations` beside the permanently read-only o
 
 Lifecycle work takes the host operation gate before the short application metadata gate and releases metadata/session locks before transport work. Execution admission is non-queuing. Consumed authority is never restored, including after `OutcomeUnknown`; compensation is operation-specific and may not exist. Audit adds the compatible `OutcomeUnknown` value and an explicit native-risk path while unknown legacy string kinds fail closed.
 
-The provisional next operation is a separately reviewed `systemd reset-failed` action for exactly one backend-observed loaded failed `.service`. Its observation identity, unit grammar, fixed SSH mapping, privilege rules, bounds, ambiguity handling, post-operation observation and native acceptance remain future work. Goal 05A does not implement or expose it.
+## Goal 05B bounded systemd reset-failed
+
+Goal 05B implements the first and only production native operation: clear the failed-state marker for one backend-observed strict `.service` unit that is freshly revalidated as `loaded / failed / failed`. Opaque observation IDs and one-shot plan IDs remain memory-only and session/generation-bound. The renderer receives no operational target input; it can only plan, discard or execute the fixed operation after a separate review confirmation.
+
+The exact SSH mapping has fixed environment and `systemctl --system --no-pager --no-ask-password reset-failed --` prefix, one validated target, bounded channel/request/cleanup time and 8 KiB combined output. It never uses sudo, generic command execution, retry or rollback. Audit truth and post-operation observation are separate from mutation truth. Source tests and loopback SSH tests are part of this implementation candidate; real systemd mutation and Native Windows acceptance remain separately authorized future work.

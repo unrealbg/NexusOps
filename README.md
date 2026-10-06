@@ -4,7 +4,7 @@ A native, agentless infrastructure control plane. The current milestone provides
 
 No NexusOps software is installed on the remote machine. A working SSH server with an SFTP subsystem, a Linux user account and standard read-only utilities are sufficient. NexusOps requests no sudo, package installation, or service changes. Remote file writes, including text saves, occur only after an exact one-time file plan is shown and approved.
 
-Services provides an on-demand, read-only snapshot of loaded systemd system services for a connected host. It supports manual Refresh and local filtering, with no service controls or background polling. See [services architecture](docs/architecture/services.md).
+Services provides an on-demand snapshot of loaded systemd system services and one explicitly approved, bounded reset-failed operation for backend-observed failed units. It supports manual Refresh and local filtering with no background polling or generic service control. See [services architecture](docs/architecture/services.md).
 
 Network provides an on-demand, read-only snapshot of Linux interface names, operational states, MTUs and IPv4/IPv6 addresses for a connected host. It uses one fixed `ip -j address show` command, manual Refresh and local filtering, with no network controls or background polling. See [network architecture](docs/architecture/network.md).
 

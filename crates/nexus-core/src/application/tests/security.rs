@@ -56,6 +56,18 @@ impl nexus_sftp::SftpConnector for Forbidden {
         panic!("trust read opened SFTP")
     }
 }
+#[async_trait]
+impl nexus_remote_operations::MutationTransport<nexus_remote_operations::SystemdResetFailed>
+    for Forbidden
+{
+    async fn dispatch(
+        &self,
+        _: &nexus_remote_operations::ConsumedAuthority<nexus_remote_operations::SystemdResetFailed>,
+        _: CancellationToken,
+    ) -> nexus_remote_operations::MutationTransportOutcome {
+        panic!("trust read dispatched mutation")
+    }
+}
 
 fn pin(hostname: &str, port: u16) -> HostKeyChallenge {
     HostKeyChallenge {

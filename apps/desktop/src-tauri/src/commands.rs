@@ -6,6 +6,7 @@ use nexus_core::Application;
 use nexus_model::{
     AppError, ContainerSnapshot, Host, HostId, HostInput, HostKeyChallenge, HostKeyRotationPlan,
     HostKeyRotationPlanId, HostMonitorSample, HostSession, HostSessionId, NetworkSnapshot,
+    RemoteOperationPlanId, ServiceObservationId, ServiceResetFailedPlan, ServiceResetFailedResult,
     ServiceSnapshot, SshEndpointTrust, SystemJournalSnapshot, TerminalOutputBatch, TerminalSession,
     TerminalSessionId, TerminalSize, UpdateAnnouncementId, UpdateOperationSnapshot,
     VerifiedArtifactId,
@@ -222,6 +223,45 @@ pub async fn list_host_services(
 ) -> Result<ServiceSnapshot, AppError> {
     let _permit = lifecycle.admit()?;
     app.list_host_services(host_id, host_session_id).await
+}
+
+#[tauri::command]
+pub async fn plan_service_reset_failed(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    service_observation_id: ServiceObservationId,
+) -> Result<ServiceResetFailedPlan, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.plan_service_reset_failed(host_id, host_session_id, service_observation_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn discard_service_reset_failed(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    plan_id: RemoteOperationPlanId,
+) -> Result<bool, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.discard_service_reset_failed(host_id, host_session_id, plan_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn execute_service_reset_failed(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    plan_id: RemoteOperationPlanId,
+) -> Result<ServiceResetFailedResult, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.execute_service_reset_failed(host_id, host_session_id, plan_id)
+        .await
 }
 
 #[tauri::command]

@@ -7,6 +7,7 @@ impl Application {
         let (stored, slot, generation, cancel) = {
             let _host_operation = self.remote_operations.lifecycle_guard(id).await?;
             self.remote_operations.revoke_host(id)?;
+            self.service_observations.revoke_host(id)?;
             let _mutation = self.mutation.lock().await;
             let stored = self.repository.get(id)?;
             self.rotation_plans.lock().await.remove(&id);

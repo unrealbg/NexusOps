@@ -1,8 +1,15 @@
 //! Opt-in interoperability tests against the disposable OpenSSH fixture in
 //! `tools/openssh-fixture`. These tests use NexusOps' production SSH provider.
 
-use nexus_model::{AuthenticationMethod, ErrorCode, Host, HostConnectionConfig, HostId};
+use nexus_model::{
+    AppError, AuthenticationMethod, ErrorCode, Host, HostConnectionConfig, HostId, HostSessionId,
+};
 use nexus_operations::{ReadOnlyCommand, RemoteSession};
+use nexus_remote_operations::{
+    AuthorityBinding, AuthorityRevalidator, ConsumedAuthority, ExecutionTerminal,
+    MutationTransportOutcome, PlanDraft, RemoteOperationFoundation, SystemdResetFailed,
+    SystemdResetFailedPreconditions, SystemdServiceUnitName,
+};
 use nexus_secrets::Credential;
 use nexus_ssh::{KnownHosts, SshProvider};
 use std::{
@@ -91,6 +98,17 @@ async fn hostname(session: &dyn RemoteSession) -> String {
         .execute(ReadOnlyCommand::Hostname, CancellationToken::new())
         .await
         .expect("hostname")
+}
+
+struct AllowResetFailed;
+
+#[async_trait::async_trait]
+impl AuthorityRevalidator<SystemdResetFailed> for AllowResetFailed {
+    type DispatchGuard = ();
+
+    async fn revalidate(&self, _: &ConsumedAuthority<SystemdResetFailed>) -> Result<(), AppError> {
+        Ok(())
+    }
 }
 
 #[tokio::test]
@@ -259,6 +277,60 @@ async fn openssh_phase_a() {
     assert_eq!(timeout_error.code, ErrorCode::Timeout);
     assert!(started.elapsed() < Duration::from_secs(17));
     stall.abort();
+}
+
+#[tokio::test]
+#[ignore = "requires systemctl-absence gate from tools/openssh-fixture/Run-OpenSshInterop.ps1"]
+async fn openssh_systemd_reset_failed_non_mutating_completion() {
+    assert_eq!(
+        env::var("NEXUS_OPENSSH_SYSTEMCTL_ABSENT").as_deref(),
+        Ok("1"),
+        "fixture orchestration must independently prove systemctl is absent"
+    );
+    let fixture = Fixture::from_env();
+    let store = Arc::new(KnownHosts::open(&fixture.pin_db).expect("known hosts"));
+    let provider = SshProvider::new(store);
+    let host = fixture.host(AuthenticationMethod::PrivateKey);
+    let session = provider
+        .connect(&host, fixture.key(false, None), CancellationToken::new())
+        .await
+        .expect("production SSH connection");
+    let binding = AuthorityBinding {
+        host_id: host.id,
+        host_session_id: HostSessionId::new(),
+        generation: 1,
+    };
+    let foundation = RemoteOperationFoundation::default();
+    let receipt = foundation
+        .plan::<SystemdResetFailed>(
+            PlanDraft::new(
+                binding,
+                SystemdServiceUnitName::parse("nexusops-diagnostic.service").unwrap(),
+                SystemdResetFailedPreconditions,
+                (),
+            ),
+            binding,
+        )
+        .expect("plan");
+    let execution = foundation
+        .execute::<SystemdResetFailed, _, _>(
+            receipt.id,
+            binding,
+            &AllowResetFailed,
+            session.as_ref(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("execute non-mutating diagnostic operation");
+    assert_eq!(
+        execution.terminal,
+        ExecutionTerminal::Transport(MutationTransportOutcome::CompletionConfirmed {
+            success: false,
+        })
+    );
+    assert!(!session.is_closed());
+    assert!(!hostname(session.as_ref()).await.trim().is_empty());
+    session.disconnect().await.expect("disconnect");
 }
 
 #[tokio::test]

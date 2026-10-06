@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use nexus_model::{AppError, Host};
 use nexus_operations::RemoteSession;
+use nexus_remote_operations::{MutationTransport, SystemdResetFailed};
 use nexus_secrets::Credential;
 use nexus_sftp::SftpConnector;
 use nexus_terminal::TerminalConnector;
@@ -9,8 +10,18 @@ use tokio_util::sync::CancellationToken;
 
 /// The application orchestration boundary for future Local, Serial or other providers.
 /// Only SSH is registered in Goal 01; domain/UI code never references russh.
-pub trait ConnectedTransport: RemoteSession + TerminalConnector + SftpConnector {}
-impl<T: RemoteSession + TerminalConnector + SftpConnector + ?Sized> ConnectedTransport for T {}
+pub trait ConnectedTransport:
+    RemoteSession + TerminalConnector + SftpConnector + MutationTransport<SystemdResetFailed>
+{
+}
+impl<T> ConnectedTransport for T where
+    T: RemoteSession
+        + TerminalConnector
+        + SftpConnector
+        + MutationTransport<SystemdResetFailed>
+        + ?Sized
+{
+}
 
 #[async_trait]
 pub trait ConnectionProvider: Send + Sync {

@@ -74,6 +74,7 @@ impl Application {
             return Err(error);
         }
         self.remote_operations.revoke_host(host.id)?;
+        self.service_observations.revoke_host(host.id)?;
         self.rotation_plans.lock().await.remove(&host.id);
         // Invalidate pending trust immediately after the metadata commit, even if cleanup fails.
         {

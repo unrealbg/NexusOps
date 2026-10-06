@@ -1,18 +1,6 @@
-use nexus_model::{HostId, HostSessionId, OperationRisk};
+use nexus_model::{HostId, HostSessionId, OperationRisk, RemoteOperationPlanId};
 use std::{any::Any, marker::PhantomData};
 use tokio::time::Instant;
-use uuid::Uuid;
-
-/// Opaque, unpredictable identity for one memory-only approval authority.
-/// This native type deliberately has no serde or TypeScript representation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct RemoteOperationPlanId(Uuid);
-
-impl RemoteOperationPlanId {
-    pub(crate) fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
 
 /// Smallest connection binding that identifies the authenticated backend session.
 /// Host configuration and credentials cannot change while this identity remains current.

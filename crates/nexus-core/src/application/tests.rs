@@ -2,6 +2,9 @@ use super::*;
 use crate::ConnectedTransport;
 use async_trait::async_trait;
 use nexus_operations::{ReadOnlyCommand, RemoteSession};
+use nexus_remote_operations::{
+    ConsumedAuthority, MutationTransport, MutationTransportOutcome, SystemdResetFailed,
+};
 use nexus_secrets::{Credential, KeyProvider};
 use nexus_terminal::{TerminalChannel, TerminalConnector, TerminalRead};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -30,6 +33,8 @@ struct TestProvider {
     network: Arc<ServiceControl>,
     logs: Arc<ServiceControl>,
     containers: Arc<ServiceControl>,
+    service_mutations: Arc<AtomicUsize>,
+    service_outcome: Arc<std::sync::Mutex<MutationTransportOutcome>>,
 }
 struct MonitorControl {
     stall: AtomicBool,
@@ -60,6 +65,8 @@ impl ConnectionProvider for TestProvider {
             network: self.network.clone(),
             logs: self.logs.clone(),
             containers: self.containers.clone(),
+            service_mutations: self.service_mutations.clone(),
+            service_outcome: self.service_outcome.clone(),
             monitor_counter: AtomicUsize::new(0),
         }))
     }
@@ -72,6 +79,8 @@ struct TestSession {
     logs: Arc<ServiceControl>,
     containers: Arc<ServiceControl>,
     monitor_counter: AtomicUsize,
+    service_mutations: Arc<AtomicUsize>,
+    service_outcome: Arc<std::sync::Mutex<MutationTransportOutcome>>,
 }
 #[async_trait]
 impl RemoteSession for TestSession {
@@ -123,7 +132,7 @@ impl RemoteSession for TestSession {
                     let permit = self.services.release.acquire().await.expect("release");
                     permit.forget();
                 }
-                "Id=sshd.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=OpenSSH daemon\n"
+                "Id=sshd.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=OpenSSH daemon\n\nId=broken.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\nDescription=Broken fixture\n"
             },
             ReadOnlyCommand::NetworkAddresses => {
                 if self.network.stall.load(Ordering::SeqCst) {
@@ -141,6 +150,17 @@ impl RemoteSession for TestSession {
     }
     fn is_closed(&self) -> bool {
         self.cancel.is_cancelled()
+    }
+}
+#[async_trait]
+impl MutationTransport<SystemdResetFailed> for TestSession {
+    async fn dispatch(
+        &self,
+        _: &ConsumedAuthority<SystemdResetFailed>,
+        _: CancellationToken,
+    ) -> MutationTransportOutcome {
+        self.service_mutations.fetch_add(1, Ordering::SeqCst);
+        *self.service_outcome.lock().unwrap()
     }
 }
 #[async_trait]
@@ -232,6 +252,10 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
         }),
+        service_mutations: Arc::new(AtomicUsize::new(0)),
+        service_outcome: Arc::new(std::sync::Mutex::new(
+            MutationTransportOutcome::CompletionConfirmed { success: true },
+        )),
     });
     let application = Application {
         repository: Arc::new(HostRepository::open(dir.path().join("hosts.db")).expect("hosts")),
@@ -251,6 +275,7 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         monitor_gates: Mutex::new(HashMap::new()),
         service_gates: Mutex::new(HashMap::new()),
         service_limit: Semaphore::new(4),
+        service_observations: crate::service_observations::ServiceObservationStore::default(),
         network_gates: Mutex::new(HashMap::new()),
         network_limit: Semaphore::new(4),
         log_gates: Mutex::new(HashMap::new()),
@@ -734,6 +759,269 @@ async fn services_remote_closure_and_host_edit_cannot_restore_old_inventory() {
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn reset_failed_plans_only_backend_observed_failed_units_and_executes_once() {
+    let (dir, app, provider) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let snapshot = app.list_host_services(host.id, session).await.unwrap();
+    assert!(snapshot.entries[0].reset_failed_observation_id.is_none());
+    let failed = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "broken.service")
+        .unwrap();
+    let observation = failed.reset_failed_observation_id.unwrap();
+    let plan = app
+        .plan_service_reset_failed(host.id, session, observation)
+        .await
+        .unwrap();
+    assert_eq!(plan.unit, "broken.service");
+    assert_eq!(plan.risk, OperationRisk::Moderate);
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+    let result = app
+        .execute_service_reset_failed(host.id, session, plan.plan_id)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, ServiceResetFailedOutcome::Success);
+    assert_eq!(
+        result.audit_status,
+        ServiceResetFailedAuditStatus::Persisted
+    );
+    assert_eq!(
+        result.post_observation_status,
+        ServiceResetFailedPostObservationStatus::Refreshed
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        app.execute_service_reset_failed(host.id, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+    let events = audit_events(dir.path());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.operation.kind == "service.reset_failed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .find(|event| event.operation.kind == "service.reset_failed")
+            .unwrap()
+            .operation
+            .risk,
+        OperationRisk::Moderate
+    );
+    let event = events
+        .iter()
+        .find(|event| event.operation.kind == "service.reset_failed")
+        .unwrap();
+    assert_eq!(event.actor, AuditActor::User);
+    assert_eq!(event.outcome, AuditOutcome::Success);
+    let persisted = std::fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
+    for forbidden in [
+        "broken.service",
+        &plan.plan_id.0.to_string(),
+        &observation.0.to_string(),
+        "systemctl",
+        "reset-failed --",
+    ] {
+        assert!(!persisted.contains(forbidden), "audit leaked {forbidden}");
+    }
+}
+
+#[tokio::test]
+async fn reset_failed_discard_and_session_turnover_revoke_one_shot_authority() {
+    let (_dir, app, provider) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let snapshot = app.list_host_services(host.id, session).await.unwrap();
+    let observation = snapshot.entries[1].reset_failed_observation_id.unwrap();
+    let discarded = app
+        .plan_service_reset_failed(host.id, session, observation)
+        .await
+        .unwrap();
+    assert!(
+        app.discard_service_reset_failed(host.id, session, discarded.plan_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !app.discard_service_reset_failed(host.id, session, discarded.plan_id)
+            .await
+            .unwrap()
+    );
+    let live = app
+        .plan_service_reset_failed(host.id, session, observation)
+        .await
+        .unwrap();
+    app.disconnect_host(host.id).await.unwrap();
+    assert_eq!(
+        app.execute_service_reset_failed(host.id, session, live.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn reset_failed_cancellation_during_revalidation_is_cancelled_audited_and_never_dispatched() {
+    let (dir, app, provider) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let snapshot = app.list_host_services(host.id, session).await.unwrap();
+    let observation = snapshot.entries[1].reset_failed_observation_id.unwrap();
+    let plan = app
+        .plan_service_reset_failed(host.id, session, observation)
+        .await
+        .unwrap();
+    provider.services.stall.store(true, Ordering::SeqCst);
+    let executing = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.execute_service_reset_failed(host.id, session, plan.plan_id)
+                .await
+        })
+    };
+    let permit = provider.services.entered.acquire().await.unwrap();
+    permit.forget();
+    let slot = app.slot(host.id).await;
+    slot.data.lock().await.cancel.cancel();
+    provider.services.release.add_permits(1);
+
+    let result = executing.await.unwrap().unwrap();
+    assert_eq!(result.outcome, ServiceResetFailedOutcome::Cancelled);
+    assert_eq!(
+        result.audit_status,
+        ServiceResetFailedAuditStatus::Persisted
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+    let mutation_events = audit_events(dir.path())
+        .into_iter()
+        .filter(|event| event.operation.kind == "service.reset_failed")
+        .collect::<Vec<_>>();
+    assert_eq!(mutation_events.len(), 1);
+    assert_eq!(mutation_events[0].outcome, AuditOutcome::Cancelled);
+    assert_eq!(
+        app.execute_service_reset_failed(host.id, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+}
+
+#[tokio::test]
+async fn reset_failed_audit_failure_does_not_change_confirmed_remote_truth_or_retry() {
+    let (dir, app, provider) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let snapshot = app.list_host_services(host.id, session).await.unwrap();
+    let observation = snapshot.entries[1].reset_failed_observation_id.unwrap();
+    let plan = app
+        .plan_service_reset_failed(host.id, session, observation)
+        .await
+        .unwrap();
+    let audit_path = dir.path().join("audit.jsonl");
+    std::fs::remove_file(&audit_path).unwrap();
+    std::fs::create_dir(&audit_path).unwrap();
+    let result = app
+        .execute_service_reset_failed(host.id, session, plan.plan_id)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, ServiceResetFailedOutcome::Success);
+    assert_eq!(result.audit_status, ServiceResetFailedAuditStatus::Failed);
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn reset_failed_audits_failed_cancelled_and_unknown_without_sensitive_metadata() {
+    let (dir, app, provider) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let cases = [
+        (
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+            ServiceResetFailedOutcome::Failed,
+            AuditOutcome::Failed,
+        ),
+        (
+            MutationTransportOutcome::NotDispatched(
+                nexus_remote_operations::NotDispatchedReason::Cancelled,
+            ),
+            ServiceResetFailedOutcome::Cancelled,
+            AuditOutcome::Cancelled,
+        ),
+        (
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::Timeout,
+            ),
+            ServiceResetFailedOutcome::OutcomeUnknown,
+            AuditOutcome::OutcomeUnknown,
+        ),
+    ];
+    for (transport_outcome, expected, audit_outcome) in cases {
+        *provider.service_outcome.lock().unwrap() = transport_outcome;
+        let snapshot = app.list_host_services(host.id, session).await.unwrap();
+        let observation = snapshot.entries[1].reset_failed_observation_id.unwrap();
+        let plan = app
+            .plan_service_reset_failed(host.id, session, observation)
+            .await
+            .unwrap();
+        let result = app
+            .execute_service_reset_failed(host.id, session, plan.plan_id)
+            .await
+            .unwrap();
+        assert_eq!(result.outcome, expected);
+        assert_eq!(
+            audit_events(dir.path()).last().unwrap().outcome,
+            audit_outcome
+        );
+    }
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 3);
+    let persisted = std::fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
+    assert!(!persisted.contains("broken.service"));
+    assert!(!persisted.contains("systemctl"));
 }
 
 #[tokio::test]
@@ -1284,6 +1572,16 @@ impl nexus_sftp::SftpConnector for SlowRefreshSession {
             ErrorCode::SftpUnavailable,
             "SFTP is unavailable in this test provider.",
         ))
+    }
+}
+#[async_trait]
+impl MutationTransport<SystemdResetFailed> for SlowRefreshSession {
+    async fn dispatch(
+        &self,
+        _: &ConsumedAuthority<SystemdResetFailed>,
+        _: CancellationToken,
+    ) -> MutationTransportOutcome {
+        MutationTransportOutcome::CompletionConfirmed { success: true }
     }
 }
 
@@ -2200,6 +2498,16 @@ impl nexus_sftp::SftpConnector for LifecycleTransport {
         let client = LifecycleSftpClient::new(host_id, host_session_id);
         self.clients.lock().unwrap().push(client.clone());
         Ok(client)
+    }
+}
+#[async_trait]
+impl MutationTransport<SystemdResetFailed> for LifecycleTransport {
+    async fn dispatch(
+        &self,
+        _: &ConsumedAuthority<SystemdResetFailed>,
+        _: CancellationToken,
+    ) -> MutationTransportOutcome {
+        MutationTransportOutcome::CompletionConfirmed { success: true }
     }
 }
 

@@ -308,6 +308,8 @@ impl FakeRevalidator {
 
 #[async_trait]
 impl AuthorityRevalidator<FakeOperation> for FakeRevalidator {
+    type DispatchGuard = ();
+
     async fn revalidate(&self, _: &ConsumedAuthority<FakeOperation>) -> Result<(), AppError> {
         self.entered.notify_one();
         if self.stall.load(Ordering::SeqCst) {
@@ -333,6 +335,8 @@ struct RejectingRevalidator(&'static str);
 
 #[async_trait]
 impl AuthorityRevalidator<FakeOperation> for RejectingRevalidator {
+    type DispatchGuard = ();
+
     async fn revalidate(&self, _: &ConsumedAuthority<FakeOperation>) -> Result<(), AppError> {
         Err(AppError::new(ErrorCode::Conflict, self.0))
     }
@@ -395,18 +399,61 @@ async fn failed_revalidation_dispatches_nothing_and_consumed_authority_never_ret
     let revalidator = FakeRevalidator::allowed();
     revalidator.allow.store(false, Ordering::SeqCst);
     let transport = transport(MutationTransportOutcome::CompletionConfirmed { success: true });
-    assert!(
-        foundation
-            .execute::<FakeOperation, _, _>(
-                id,
-                owner,
-                &revalidator,
-                &transport,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await
-            .is_err()
-    );
+    let result = foundation
+        .execute::<FakeOperation, _, _>(
+            id,
+            owner,
+            &revalidator,
+            &transport,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, RemoteOperationOutcome::Failed);
+    assert_eq!(result.terminal, ExecutionTerminal::RevalidationFailed);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+    assert!(!foundation.authorities.contains(id).unwrap());
+}
+
+#[tokio::test]
+async fn cancellation_during_revalidation_stays_cancelled_and_dispatches_nothing() {
+    let foundation = Arc::new(RemoteOperationFoundation::default());
+    let owner = binding(HostId::new());
+    let id = foundation
+        .authorities
+        .insert(draft(owner, 1), owner)
+        .unwrap()
+        .id;
+    let revalidator = Arc::new(FakeRevalidator::allowed());
+    revalidator.stall.store(true, Ordering::SeqCst);
+    let transport = Arc::new(transport(MutationTransportOutcome::CompletionConfirmed {
+        success: true,
+    }));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let execution = {
+        let foundation = Arc::clone(&foundation);
+        let revalidator = Arc::clone(&revalidator);
+        let transport = Arc::clone(&transport);
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            foundation
+                .execute::<FakeOperation, _, _>(
+                    id,
+                    owner,
+                    revalidator.as_ref(),
+                    transport.as_ref(),
+                    cancellation,
+                )
+                .await
+                .unwrap()
+        })
+    };
+    revalidator.entered.notified().await;
+    cancellation.cancel();
+    revalidator.release.notify_one();
+    let result = execution.await.unwrap();
+    assert_eq!(result.outcome, RemoteOperationOutcome::Cancelled);
+    assert_eq!(result.terminal, ExecutionTerminal::CancelledBeforeDispatch);
     assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
     assert!(!foundation.authorities.contains(id).unwrap());
 }
@@ -425,7 +472,7 @@ async fn every_backend_revalidation_failure_dispatches_nothing() {
         let owner = binding(HostId::new());
         let id = foundation.plan(draft(owner, 1), owner).unwrap().id;
         let transport = transport(MutationTransportOutcome::CompletionConfirmed { success: true });
-        let error = foundation
+        let result = foundation
             .execute::<FakeOperation, _, _>(
                 id,
                 owner,
@@ -434,8 +481,13 @@ async fn every_backend_revalidation_failure_dispatches_nothing() {
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
-            .unwrap_err();
-        assert_eq!(error.code, ErrorCode::Conflict, "{reason}");
+            .unwrap();
+        assert_eq!(result.outcome, RemoteOperationOutcome::Failed, "{reason}");
+        assert_eq!(
+            result.terminal,
+            ExecutionTerminal::RevalidationFailed,
+            "{reason}"
+        );
         assert_eq!(transport.calls.load(Ordering::SeqCst), 0, "{reason}");
         assert!(!foundation.authorities.contains(id).unwrap(), "{reason}");
     }
@@ -503,6 +555,10 @@ async fn fake_transport_covers_all_dispatch_certainty_outcomes_without_retry() {
             MutationTransportOutcome::CompletionUnknown(CompletionUnknownReason::Cancelled),
             RemoteOperationOutcome::OutcomeUnknown,
         ),
+        (
+            MutationTransportOutcome::CompletionUnknown(CompletionUnknownReason::OutputLimit),
+            RemoteOperationOutcome::OutcomeUnknown,
+        ),
     ];
     for (transport_outcome, expected) in cases {
         let foundation = RemoteOperationFoundation::default();
@@ -524,6 +580,10 @@ async fn fake_transport_covers_all_dispatch_certainty_outcomes_without_retry() {
             .await
             .unwrap();
         assert_eq!(result.outcome, expected);
+        assert_eq!(
+            result.terminal,
+            ExecutionTerminal::Transport(transport_outcome)
+        );
         assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
         assert!(!foundation.authorities.contains(id).unwrap());
     }
@@ -554,6 +614,7 @@ async fn cancellation_before_dispatch_is_cancelled_and_never_calls_transport() {
         .await
         .unwrap();
     assert_eq!(result.outcome, RemoteOperationOutcome::Cancelled);
+    assert_eq!(result.terminal, ExecutionTerminal::CancelledBeforeDispatch);
     assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
     assert!(!foundation.authorities.contains(id).unwrap());
 }

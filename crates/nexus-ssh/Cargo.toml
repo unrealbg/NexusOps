@@ -9,6 +9,7 @@ license.workspace = true
 async-trait.workspace = true
 nexus-model = { path = "../nexus-model" }
 nexus-operations = { path = "../nexus-operations" }
+nexus-remote-operations = { path = "../nexus-remote-operations" }
 nexus-secrets = { path = "../nexus-secrets" }
 nexus-terminal.workspace = true
 nexus-sftp.workspace = true
