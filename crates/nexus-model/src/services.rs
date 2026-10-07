@@ -44,10 +44,13 @@ pub struct ServiceEntry {
     pub active_state: String,
     pub sub_state: String,
     pub description: String,
+    pub can_reload: bool,
     #[serde(default)]
     pub reset_failed_observation_id: Option<ServiceObservationId>,
     #[serde(default)]
     pub try_restart_observation_id: Option<ServiceObservationId>,
+    #[serde(default)]
+    pub reload_observation_id: Option<ServiceObservationId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -150,5 +153,53 @@ pub struct ServiceTryRestartResult {
     pub outcome: ServiceTryRestartOutcome,
     pub audit_status: ServiceTryRestartAuditStatus,
     pub post_observation_status: ServiceTryRestartPostObservationStatus,
+    pub snapshot: Option<ServiceSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceReloadPlan {
+    pub plan_id: RemoteOperationPlanId,
+    pub host_id: HostId,
+    pub host_session_id: HostSessionId,
+    pub unit: String,
+    pub load_state: String,
+    pub active_state: String,
+    pub sub_state: String,
+    pub can_reload: bool,
+    pub risk: crate::OperationRisk,
+    pub expires_in_seconds: u64,
+    pub effect: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceReloadOutcome {
+    Success,
+    Failed,
+    Cancelled,
+    OutcomeUnknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceReloadAuditStatus {
+    Persisted,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ServiceReloadPostObservationStatus {
+    Refreshed,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceReloadResult {
+    pub outcome: ServiceReloadOutcome,
+    pub audit_status: ServiceReloadAuditStatus,
+    pub post_observation_status: ServiceReloadPostObservationStatus,
     pub snapshot: Option<ServiceSnapshot>,
 }

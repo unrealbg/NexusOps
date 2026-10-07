@@ -1,10 +1,10 @@
 # Remote operation authority foundation
 
-Goal 05A added the native, memory-only foundation. Goal 05B introduced `SystemdResetFailed`; Goal 05D adds the second and only other production semantic operation, `SystemdTryRestart`. `nexus-operations` and `RemoteSession::execute` remain permanently read-only. `nexus-remote-operations` stays transport-independent; each reviewed SSH adapter implements one typed mutation transport in its own focused module.
+Goal 05A added the native, memory-only foundation. Goal 05B introduced `SystemdResetFailed`; Goal 05D added `SystemdTryRestart`; Goal 05E is the source-review candidate for the third operation-specific semantic, `SystemdReload`. `nexus-operations` and `RemoteSession::execute` remain permanently read-only. `nexus-remote-operations` stays transport-independent; each reviewed SSH adapter implements one typed mutation transport in its own focused module.
 
 ## Authority ownership
 
-An authority is minted from one of two sealed native operation types: `SystemdResetFailed` or `SystemdTryRestart`. The stored record binds an unpredictable UUID plan ID to `HostId`, exact `HostSessionId`, session generation, native operation type, native `OperationRisk`, backend-owned target and preconditions, issue/expiry instants and a private native payload. It stores no credential, username or authentication method. Private targets, preconditions and payloads have no Serde or TypeScript representation. Consuming or discarding a plan through the wrong operation type fails closed.
+An authority is minted from one of three sealed native operation types: `SystemdResetFailed`, `SystemdTryRestart` or `SystemdReload`. The stored record binds an unpredictable UUID plan ID to `HostId`, exact `HostSessionId`, session generation, native operation type, native `OperationRisk`, backend-owned target and preconditions, issue/expiry instants and a private native payload. It stores no credential, username or authentication method. Private targets, preconditions and payloads have no Serde or TypeScript representation. Consuming or discarding a plan through the wrong operation type fails closed.
 
 The store permits one pending authority per host. Publishing a replacement atomically removes the previous authority. The fixed TTL is 120 seconds using Tokio's monotonic clock. Expiry is enforced both by a best-effort timer and synchronously whenever authority is observed or consumed. Authorities are not persisted and cannot survive process restart.
 
@@ -30,7 +30,7 @@ Routine remote mutations will use ordinary process command admission. They must 
 
 ## Revalidation and outcomes
 
-After one-shot consume and before dispatch, the concrete service revalidator establishes that the host still exists; the exact host session, generation and transport remain current and open; shutdown has not started; and operation identity, native risk and exact preconditions remain unchanged. Reset-failed requires `loaded / failed / failed` at Moderate risk. Try-restart requires `loaded / active / running` at High risk. Renderer state and TTL alone are never sufficient. The final try-restart semantic narrows, but cannot eliminate, the race after revalidation.
+After one-shot consume and before dispatch, the concrete service revalidator establishes that the host still exists; the exact host session, generation and transport remain current and open; shutdown has not started; and operation identity, native risk and exact preconditions remain unchanged. Reset-failed requires `loaded / failed / failed` at Moderate risk. Try-restart requires `loaded / active / running` at High risk. Reload independently requires `loaded / active / running / CanReload=yes` at High risk. Renderer state and TTL alone are never sufficient. The final try-restart semantic narrows, but cannot eliminate, the race after revalidation.
 
 The mutation transport contract has explicit dispatch certainty:
 
@@ -48,6 +48,9 @@ Audit remains metadata-only. It contains no command, executable, argv, environme
 
 ## Goal boundary
 
-Goals 05B and 05D permit exactly six operation-specific IPC commands and two operation-specific display DTO families. Source policy fixes the two native operation modules and their two SSH adapters while rejecting a third operation, generic command strings, argv/environment payloads, generic service verbs, ordinary restart and generic renderer mutation APIs. The current `ServiceEntry.unit` display string is never accepted back as operational input. Goal 05B real-systemd and Goal 05C native-desktop acceptance passed. Goal 05D also passed both native acceptance gates: disposable real-systemd mutation acceptance and Native Windows desktop end-to-end acceptance.
+Goals 05B, 05D and the Goal 05E candidate permit exactly nine operation-specific IPC commands and three operation-specific display DTO families. Source policy fixes the three native operation modules and their three SSH adapters while rejecting a fourth operation, generic command strings, argv/environment payloads, generic service verbs, ordinary restart and generic renderer mutation APIs. The current `ServiceEntry.unit` display string is never accepted back as operational input. Goal 05B real-systemd and Goal 05C native-desktop acceptance passed. Goal 05D also passed both native acceptance gates: disposable real-systemd mutation acceptance and Native Windows desktop end-to-end acceptance.
 
-These completed gates do not authorize future remote operations. The production boundary remains exactly two native operations and six operation-specific IPC commands, with no generic service verb or remote mutation command API. Authority remains one-shot and memory-only, bound to the backend-owned target and exact session generation, subject to fresh revalidation, never retried after `OutcomeUnknown`, and recorded only through metadata-only audit.
+These completed gates do not authorize future remote operations. The Goal 05E candidate boundary is exactly three native operations and nine operation-specific IPC commands, with no generic service verb or remote mutation command API. Authority remains one-shot and memory-only, bound to the backend-owned target and exact session generation, subject to fresh revalidation, never retried after `OutcomeUnknown`, and recorded only through metadata-only audit.
+
+
+Goal 05E has not passed real-systemd or Native Windows acceptance and is not merged. Those gates remain separate from this candidate documentation.

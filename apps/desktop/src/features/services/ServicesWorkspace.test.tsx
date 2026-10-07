@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
   planTryRestart: vi.fn(),
   discardTryRestart: vi.fn(),
   executeTryRestart: vi.fn(),
+  planReload: vi.fn(),
+  discardReload: vi.fn(),
+  executeReload: vi.fn(),
 }));
 vi.mock('../../api/queries', () => ({
   useHostSession: () => ({ data: { state: mocks.state, hostSessionId: mocks.sessionId } }),
@@ -25,6 +28,9 @@ vi.mock('../../api/client', () => ({ servicesApi: {
   planTryRestart: mocks.planTryRestart,
   discardTryRestart: mocks.discardTryRestart,
   executeTryRestart: mocks.executeTryRestart,
+  planReload: mocks.planReload,
+  discardReload: mocks.discardReload,
+  executeReload: mocks.executeReload,
 } }));
 
 import { ServicesWorkspace } from './ServicesWorkspace';
@@ -37,8 +43,8 @@ function snapshot(hostId = host.id, hostSessionId = A): ServiceSnapshot {
   return {
     hostId, hostSessionId, observedAt: '2026-09-26T12:00:00Z',
     entries: [
-      { unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running', description: 'OpenSSH server', resetFailedObservationId: null , tryRestartObservationId: null},
-      { unit: 'future.service', loadState: 'loaded', activeState: 'repairing', subState: 'unknown', description: '<script>bad</script> text', resetFailedObservationId: null , tryRestartObservationId: null},
+      { unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running', description: 'OpenSSH server', canReload: false, resetFailedObservationId: null , tryRestartObservationId: null, reloadObservationId: null},
+      { unit: 'future.service', loadState: 'loaded', activeState: 'repairing', subState: 'unknown', description: '<script>bad</script> text', canReload: false, resetFailedObservationId: null , tryRestartObservationId: null, reloadObservationId: null},
     ],
   };
 }
@@ -58,6 +64,9 @@ beforeEach(() => {
   mocks.planTryRestart.mockReset();
   mocks.discardTryRestart.mockReset().mockResolvedValue(true);
   mocks.executeTryRestart.mockReset();
+  mocks.planReload.mockReset();
+  mocks.discardReload.mockReset().mockResolvedValue(true);
+  mocks.executeReload.mockReset();
 });
 
 describe('session-bound Services workspace', () => {
@@ -143,10 +152,10 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', resetFailedObservationId: 'observation-a', tryRestartObservationId: null,
+        description: 'Broken fixture', canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null,
       }, {
         unit: 'text-only.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'No backend authority', resetFailedObservationId: null, tryRestartObservationId: null,
+        description: 'No backend authority', canReload: false, resetFailedObservationId: null, tryRestartObservationId: null, reloadObservationId: null,
       }],
     };
     mocks.list.mockResolvedValueOnce(observed);
@@ -197,7 +206,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', resetFailedObservationId: 'observation-a', tryRestartObservationId: null,
+        description: 'Broken fixture', canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null,
       }],
     });
     mocks.planResetFailed.mockResolvedValueOnce({
@@ -230,7 +239,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running',
-        description: 'OpenSSH server', resetFailedObservationId: null, tryRestartObservationId: 'restart-observation',
+        description: 'OpenSSH server', canReload: false, resetFailedObservationId: null, tryRestartObservationId: 'restart-observation', reloadObservationId: null,
       }],
     });
     mocks.planTryRestart.mockResolvedValueOnce({
@@ -265,7 +274,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running',
-        description: 'OpenSSH server', resetFailedObservationId: null, tryRestartObservationId: 'restart-observation',
+        description: 'OpenSSH server', canReload: false, resetFailedObservationId: null, tryRestartObservationId: 'restart-observation', reloadObservationId: null,
       }],
     });
     mocks.planTryRestart.mockResolvedValueOnce({
@@ -281,13 +290,73 @@ describe('session-bound Services workspace', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('keeps reload separate from try-restart and executes the exact approved reload once', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    mocks.list.mockResolvedValueOnce({
+      ...snapshot(),
+      entries: [{
+        unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running',
+        description: 'OpenSSH server', canReload: true, resetFailedObservationId: null,
+        tryRestartObservationId: 'restart-observation', reloadObservationId: 'reload-observation',
+      }],
+    });
+    mocks.planReload.mockResolvedValueOnce({
+      planId: 'reload-plan', hostId: host.id, hostSessionId: A, unit: 'ssh.service',
+      loadState: 'loaded', activeState: 'active', subState: 'running', canReload: true,
+      risk: 'high', expiresInSeconds: 120n, effect: 'Reload the running service configuration.',
+    });
+    mocks.executeReload.mockResolvedValueOnce({
+      outcome: 'success', auditStatus: 'persisted', postObservationStatus: 'refreshed', snapshot: snapshot(),
+    });
+    render(<ServicesWorkspace host={host} />);
+    expect(await screen.findByRole('button', { name: 'Restart active service' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Reload service' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('High')).toBeInTheDocument();
+    expect(within(dialog).getByText('Reload support')).toBeInTheDocument();
+    expect(within(dialog).getByText('yes')).toBeInTheDocument();
+    expect(within(dialog).getByText(/Reload the running service configuration/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('checkbox'));
+    const execute = within(dialog).getByRole('button', { name: 'Reload service' });
+    await userEvent.click(execute);
+    await userEvent.click(execute);
+    expect(mocks.planReload).toHaveBeenCalledExactlyOnceWith(host.id, A, 'reload-observation');
+    expect(mocks.executeReload).toHaveBeenCalledExactlyOnceWith(host.id, A, 'reload-plan');
+    expect(mocks.executeTryRestart).not.toHaveBeenCalled();
+    expect(await screen.findByText(/systemd reload operation completed/)).toBeInTheDocument();
+  });
+
+  it('discards the exact reload plan on Cancel without executing it', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    mocks.list.mockResolvedValueOnce({
+      ...snapshot(),
+      entries: [{
+        unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running',
+        description: 'OpenSSH server', canReload: true, resetFailedObservationId: null,
+        tryRestartObservationId: 'restart-observation', reloadObservationId: 'reload-observation',
+      }],
+    });
+    mocks.planReload.mockResolvedValueOnce({
+      planId: 'reload-plan', hostId: host.id, hostSessionId: A, unit: 'ssh.service',
+      loadState: 'loaded', activeState: 'active', subState: 'running', canReload: true,
+      risk: 'high', expiresInSeconds: 120n, effect: 'Reload the running service configuration.',
+    });
+    render(<ServicesWorkspace host={host} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Reload service' }));
+    await userEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(mocks.discardReload).toHaveBeenCalledExactlyOnceWith(host.id, A, 'reload-plan'));
+    expect(mocks.executeReload).not.toHaveBeenCalled();
+    expect(mocks.discardTryRestart).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   it('discards a delayed plan with its old session identity and never renders it after reconnect', async () => {
     mocks.state = 'connected'; mocks.sessionId = A;
     mocks.list.mockResolvedValueOnce({
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', resetFailedObservationId: 'observation-a', tryRestartObservationId: null,
+        description: 'Broken fixture', canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null,
       }],
     }).mockResolvedValueOnce(snapshot(host.id, B));
     const delayed = deferred<{
@@ -315,7 +384,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', resetFailedObservationId: 'observation-a', tryRestartObservationId: null,
+        description: 'Broken fixture', canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null,
       }],
     };
     mocks.list.mockResolvedValueOnce(observed)
@@ -348,7 +417,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', resetFailedObservationId: 'observation-a', tryRestartObservationId: null,
+        description: 'Broken fixture', canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null,
       }],
     });
     mocks.planResetFailed.mockResolvedValueOnce({
@@ -375,7 +444,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', resetFailedObservationId: 'observation-a', tryRestartObservationId: null,
+        description: 'Broken fixture', canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null,
       }],
     };
     mocks.state = 'connected'; mocks.sessionId = A;

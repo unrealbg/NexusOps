@@ -32,7 +32,7 @@ async function fixture() {
 
 test('all custom commands retain one native admission permit and no renderer lifecycle control exists', async () => {
   const result = await verifyLifecycleSource(REPOSITORY_ROOT);
-  assert.equal(result.commandCount, 53);
+  assert.equal(result.commandCount, 56);
 });
 
 test('source policy fails closed when command admission is removed or released early', async () => {

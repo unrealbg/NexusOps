@@ -81,6 +81,19 @@ impl nexus_remote_operations::MutationTransport<nexus_remote_operations::Systemd
     }
 }
 
+#[async_trait]
+impl nexus_remote_operations::MutationTransport<nexus_remote_operations::SystemdReload>
+    for Forbidden
+{
+    async fn dispatch(
+        &self,
+        _: &nexus_remote_operations::ConsumedAuthority<nexus_remote_operations::SystemdReload>,
+        _: CancellationToken,
+    ) -> nexus_remote_operations::MutationTransportOutcome {
+        panic!("trust read dispatched mutation")
+    }
+}
+
 fn pin(hostname: &str, port: u16) -> HostKeyChallenge {
     HostKeyChallenge {
         hostname: hostname.into(),

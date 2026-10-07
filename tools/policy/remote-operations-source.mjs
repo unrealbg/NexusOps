@@ -241,6 +241,9 @@ export function verifyRemoteOperationsSourceText({
     'plan_service_try_restart',
     'discard_service_try_restart',
     'execute_service_try_restart',
+    'plan_service_reload',
+    'discard_service_reload',
+    'execute_service_reload',
   ]);
   const forbiddenCommands = new Set([
     'plan_remote_operation',
@@ -277,12 +280,20 @@ export function verifyRemoteOperationsSourceText({
     'ServiceTryRestartOutcome',
     'ServiceTryRestartAuditStatus',
     'ServiceTryRestartPostObservationStatus',
+    'ServiceReloadPlan',
+    'ServiceReloadResult',
+    'ServiceReloadOutcome',
+    'ServiceReloadAuditStatus',
+    'ServiceReloadPostObservationStatus',
     '.plan_service_reset_failed(',
     '.discard_service_reset_failed(',
     '.execute_service_reset_failed(',
     '.plan_service_try_restart(',
     '.discard_service_try_restart(',
     '.execute_service_try_restart(',
+    '.plan_service_reload(',
+    '.discard_service_reload(',
+    '.execute_service_reload(',
   ];
   const reviewedCommandPath = 'apps/desktop/src-tauri/src/commands.rs';
   const applicationMutationOperations = [
@@ -292,6 +303,9 @@ export function verifyRemoteOperationsSourceText({
     { name: 'plan_service_try_restart', method: 'plan_service_try_restart' },
     { name: 'discard_service_try_restart', method: 'discard_service_try_restart' },
     { name: 'execute_service_try_restart', method: 'execute_service_try_restart' },
+    { name: 'plan_service_reload', method: 'plan_service_reload' },
+    { name: 'discard_service_reload', method: 'discard_service_reload' },
+    { name: 'execute_service_reload', method: 'execute_service_reload' },
   ];
   const reviewedDeclarations = applicationMutationOperations.map(({ name, method }) => {
     const command = commandSections.find(({ path, name: commandName }) =>
@@ -309,9 +323,9 @@ export function verifyRemoteOperationsSourceText({
         .filter((index) => !reviewedRegistrations.some((registration) =>
           registration.path === path && registration.method === method && registration.index === index))
         .map((index) => ({ path, method, index }))));
-  const applicationReferencesAreReviewed = reviewedDeclarations.length === 6
-    && reviewedRegistrations.length === 6
-    && applicationMutationReferences.length === 6
+  const applicationReferencesAreReviewed = reviewedDeclarations.length === 9
+    && reviewedRegistrations.length === 9
+    && applicationMutationReferences.length === 9
     && applicationMutationOperations.every(({ name, method }) => {
       const command = commandSections.find(({ path, name: commandName }) =>
         path === reviewedCommandPath && commandName === name);
@@ -327,17 +341,17 @@ export function verifyRemoteOperationsSourceText({
         && references[0].index < command.end;
     });
   if (!applicationReferencesAreReviewed) {
-    fail('Goal 05B/05D application mutation references must remain inside the six reviewed Tauri commands');
+    fail('Goal 05B/05D/05E application mutation references must remain inside the nine reviewed Tauri commands');
   }
   const mutationSurfaceCommands = commandSections.filter(({ source }) =>
     mutationSurfaceFragments.some((fragment) => source.includes(fragment)));
-  if (mutationSurfaceCommands.length !== 6
+  if (mutationSurfaceCommands.length !== 9
       || mutationSurfaceCommands.some(({ path, name }) =>
         path !== reviewedCommandPath || !allowedMutationCommands.has(name))
       || [...allowedMutationCommands].some((allowed) =>
         mutationSurfaceCommands.filter(({ path, name }) =>
           path === reviewedCommandPath && name === allowed).length !== 1)) {
-    fail('only the six reviewed service mutation commands may expose mutation authority');
+    fail('only the nine reviewed service mutation commands may expose mutation authority');
   }
 
   const reviewedCorePath = 'crates/nexus-core/src/application/services.rs';
@@ -388,6 +402,29 @@ export function verifyRemoteOperationsSourceText({
         'ServiceTryRestartPostObservationStatus',
       ],
     },
+    {
+      name: 'plan_service_reload',
+      foundationOperation: 'plan',
+      nativeType: 'SystemdReload',
+      dtoNames: ['ServiceReloadPlan'],
+    },
+    {
+      name: 'discard_service_reload',
+      foundationOperation: 'discard',
+      nativeType: 'SystemdReload',
+      dtoNames: [],
+    },
+    {
+      name: 'execute_service_reload',
+      foundationOperation: 'execute',
+      nativeType: 'SystemdReload',
+      dtoNames: [
+        'ServiceReloadResult',
+        'ServiceReloadOutcome',
+        'ServiceReloadAuditStatus',
+        'ServiceReloadPostObservationStatus',
+      ],
+    },
   ];
   const reviewedCoreDefinitions = reviewedCoreOperations.map((operation) => {
     const definitions = coreProductionSources.flatMap(({ path, source }) => {
@@ -402,7 +439,7 @@ export function verifyRemoteOperationsSourceText({
       }));
     });
     if (definitions.length !== 1 || definitions[0].path !== reviewedCorePath) {
-      fail('Goal 05B/05D nexus-core application boundary must remain the six reviewed methods');
+      fail('Goal 05B/05D/05E nexus-core application boundary must remain the nine reviewed methods');
     }
     return { ...operation, ...definitions[0] };
   });
@@ -458,6 +495,9 @@ export function verifyRemoteOperationsSourceText({
     { path: reviewedCorePath, name: 'plan_service_try_restart', count: 2 },
     { path: reviewedCorePath, name: 'discard_service_try_restart', count: 2 },
     { path: reviewedCorePath, name: 'execute_service_try_restart', count: 1 },
+    { path: reviewedCorePath, name: 'plan_service_reload', count: 2 },
+    { path: reviewedCorePath, name: 'discard_service_reload', count: 2 },
+    { path: reviewedCorePath, name: 'execute_service_reload', count: 1 },
     { path: 'crates/nexus-core/src/application/lifecycle.rs', name: 'get_session', count: 2 },
     { path: 'crates/nexus-core/src/application/lifecycle.rs', name: 'disconnect_host', count: 1 },
     { path: 'crates/nexus-core/src/application/lifecycle.rs', name: 'prepare_disconnect', count: 1 },
@@ -582,6 +622,9 @@ export function verifyRemoteOperationsSourceText({
     'allow-plan-service-try-restart',
     'allow-discard-service-try-restart',
     'allow-execute-service-try-restart',
+    'allow-plan-service-reload',
+    'allow-discard-service-reload',
+    'allow-execute-service-reload',
   ]) {
     if (!capabilitySource.includes(`"${permission}"`)) {
       fail(`reviewed service mutation capability is missing ${permission}`);
@@ -593,10 +636,15 @@ export function verifyRemoteOperationsSourceText({
     path === 'crates/nexus-remote-operations/src/systemd_try_restart.rs');
   if (!tryRestartOperation) fail('reviewed SystemdTryRestart operation module is missing');
   const tryRestartOperationProduction = tryRestartOperation.source.split('#[cfg(test)]')[0];
-  if (nativeImplementations.length !== 2
+  const reloadOperation = remoteProductionSources.find(({ path }) =>
+    path === 'crates/nexus-remote-operations/src/systemd_reload.rs');
+  if (!reloadOperation) fail('reviewed SystemdReload operation module is missing');
+  const reloadOperationProduction = reloadOperation.source.split('#[cfg(test)]')[0];
+  if (nativeImplementations.length !== 3
       || !systemdOperationProduction.includes('impl NativeOperation for SystemdResetFailed')
-      || !tryRestartOperationProduction.includes('impl NativeOperation for SystemdTryRestart')) {
-    fail('private remote-operation production source must contain exactly SystemdResetFailed and SystemdTryRestart');
+      || !tryRestartOperationProduction.includes('impl NativeOperation for SystemdTryRestart')
+      || !reloadOperationProduction.includes('impl NativeOperation for SystemdReload')) {
+    fail('private remote-operation production source must contain exactly SystemdResetFailed, SystemdTryRestart and SystemdReload');
   }
   for (const required of [
     'SystemdResetFailedPreconditions',
@@ -612,6 +660,13 @@ export function verifyRemoteOperationsSourceText({
   ]) {
     if (!tryRestartOperationProduction.includes(required)) fail(`try-restart operation policy is missing ${required}`);
   }
+  for (const required of [
+    'SystemdReloadPreconditions',
+    'const RISK: OperationRisk = OperationRisk::High;',
+    'load == "loaded" && active == "active" && sub == "running" && can_reload',
+  ]) {
+    if (!reloadOperationProduction.includes(required)) fail(`reload operation policy is missing ${required}`);
+  }
 
   if (!sshCargoSource.includes('nexus-remote-operations = { path = "../nexus-remote-operations" }')) {
     fail('SSH production source is missing the reviewed remote-operation dependency');
@@ -622,10 +677,15 @@ export function verifyRemoteOperationsSourceText({
   const tryRestartTransport = sshProductionSources.find(({ path }) =>
     path === 'crates/nexus-ssh/src/systemd_try_restart.rs');
   if (!tryRestartTransport) fail('reviewed SystemdTryRestart SSH adapter is missing');
+  const reloadTransport = sshProductionSources.find(({ path }) =>
+    path === 'crates/nexus-ssh/src/systemd_reload.rs');
+  if (!reloadTransport) fail('reviewed SystemdReload SSH adapter is missing');
   const systemdTransportSource = systemdTransport.source;
   const systemdTransportProduction = systemdTransportSource.split('#[cfg(test)]')[0];
   const otherSshSources = sshProductionSources
-    .filter(({ path }) => path !== systemdTransport.path && path !== tryRestartTransport.path)
+    .filter(({ path }) => path !== systemdTransport.path
+      && path !== tryRestartTransport.path
+      && path !== reloadTransport.path)
     .map(({ source }) => source)
     .join('\n');
   requireAbsent(
@@ -725,6 +785,52 @@ export function verifyRemoteOperationsSourceText({
     tryRestartTransportProduction,
     'reviewed try-restart SSH transport',
   );
+  const reloadTransportProduction = reloadTransport.source.split('#[cfg(test)]')[0];
+  for (const required of [
+    'impl MutationTransport<SystemdReload> for SshSession',
+    'const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);',
+    'const REQUEST_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);',
+    'const CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);',
+    'const OUTPUT_LIMIT: usize = 8 * 1024;',
+    'LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password reload -- ',
+    'Some(message) => match handle_message(',
+    'ChannelMsg::Success if !*accepted =>',
+    'ChannelMsg::Failure if !*accepted && !*execution_evidence =>',
+    'ChannelMsg::Failure => MessageHandling::Complete(',
+    'ChannelMsg::Data { data }',
+    'ChannelMsg::ExtendedData { data, .. } =>',
+    '*execution_evidence = true;',
+    '*output_bytes = output_bytes.saturating_add(data.len());',
+    'if *output_bytes > OUTPUT_LIMIT',
+    'CompletionUnknownReason::OutputLimit',
+    'ChannelMsg::ExitStatus { exit_status } =>',
+    'ChannelMsg::ExitSignal { .. } =>',
+    'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+    'ChannelMsg::Close => MessageHandling::Complete(',
+    '_ if !*accepted => MessageHandling::Complete(',
+    'None => {',
+    'CompletionUnknownReason::Cancelled',
+    'CompletionUnknownReason::Timeout',
+    'authority.target().as_str()',
+  ]) {
+    if (!reloadTransportProduction.includes(required)) {
+      fail(`reload SSH transport policy is missing ${required}`);
+    }
+  }
+  requireAbsent(
+    reloadTransportProduction,
+    [
+      'sudo', 'pkexec', 'Vec<SystemdServiceUnitName>', 'command: String', 'command: &str',
+      'verb: String', 'verb: &str', 'systemctl restart', 'systemctl try-restart',
+      'reload-or-restart', 'try-reload-or-restart', 'systemctl start', 'systemctl stop',
+      'daemon-reload', '--no-block',
+      'ChannelMsg::ExitStatus { exit_status } if *accepted =>',
+      'ChannelMsg::ExitSignal { .. } if *accepted =>',
+      'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } | ChannelMsg::Close',
+    ],
+    'reviewed reload SSH transport',
+  );
+  requireSingleReviewedExecPath(reloadTransportProduction, 'reviewed reload SSH transport');
   for (const required of [
     'plan_service_reset_failed',
     'discard_service_reset_failed',
@@ -736,6 +842,11 @@ export function verifyRemoteOperationsSourceText({
     'execute_service_try_restart',
     'ServiceTryRestartPlan',
     'ServiceTryRestartResult',
+    'plan_service_reload',
+    'discard_service_reload',
+    'execute_service_reload',
+    'ServiceReloadPlan',
+    'ServiceReloadResult',
   ]) {
     if (!rendererSurface.includes(required)
         && !tauriProductionSources.some(({ source }) => source.includes(required))) {
@@ -746,6 +857,13 @@ export function verifyRemoteOperationsSourceText({
   const readOnlyDeclaration = /#\[derive\(([^)]*)\)\]\s*pub enum ReadOnlyCommand/.exec(
     readOnlyCommandSource,
   );
+  const serviceInventoryCommand = 'LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=CanReload --property=Description show';
+  const readOnlyProduction = readOnlyCommandSource.split('#[cfg(test)]')[0];
+  if (!readOnlyProduction.includes(serviceInventoryCommand)
+      || readOnlyProduction.indexOf(serviceInventoryCommand)
+        !== readOnlyProduction.lastIndexOf(serviceInventoryCommand)) {
+    fail('service inventory command must remain fixed with strict CanReload observation');
+  }
   if (!readOnlyDeclaration) fail('ReadOnlyCommand declaration is missing');
   if (/\b(?:Serialize|Deserialize|TS)\b/.test(readOnlyDeclaration[1])) {
     fail('ReadOnlyCommand must remain native and non-serializable');

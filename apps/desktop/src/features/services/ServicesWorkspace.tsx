@@ -7,6 +7,8 @@ import type {
   ServiceSnapshot,
   ServiceTryRestartPlan,
   ServiceTryRestartResult,
+  ServiceReloadPlan,
+  ServiceReloadResult,
 } from '@nexusops/protocol';
 import { Button, Modal, Notice, Spinner } from '@nexusops/ui';
 import { servicesApi } from '../../api/client';
@@ -14,10 +16,24 @@ import { useHostSession } from '../../api/queries';
 
 type OwnedPlan =
   | { owner: string; kind: 'resetFailed'; plan: ServiceResetFailedPlan }
-  | { owner: string; kind: 'tryRestart'; plan: ServiceTryRestartPlan };
+  | { owner: string; kind: 'tryRestart'; plan: ServiceTryRestartPlan }
+  | { owner: string; kind: 'reload'; plan: ServiceReloadPlan };
 type OwnedResult =
   | { owner: string; kind: 'resetFailed'; value: ServiceResetFailedResult }
-  | { owner: string; kind: 'tryRestart'; value: ServiceTryRestartResult };
+  | { owner: string; kind: 'tryRestart'; value: ServiceTryRestartResult }
+  | { owner: string; kind: 'reload'; value: ServiceReloadResult };
+
+function discardFor(kind: OwnedPlan['kind']) {
+  if (kind === 'resetFailed') return servicesApi.discardResetFailed;
+  if (kind === 'tryRestart') return servicesApi.discardTryRestart;
+  return servicesApi.discardReload;
+}
+
+function executeFor(kind: OwnedPlan['kind']) {
+  if (kind === 'resetFailed') return servicesApi.executeResetFailed;
+  if (kind === 'tryRestart') return servicesApi.executeTryRestart;
+  return servicesApi.executeReload;
+}
 
 export function ServicesWorkspace({ host }: { host: Host }) {
   const sessionQuery = useHostSession(host.id);
@@ -56,9 +72,7 @@ export function ServicesWorkspace({ host }: { host: Host }) {
         planRef.current = null;
         setOwnedPlan(null);
         setIndependentlyVerified(false);
-        const discard = currentPlan.kind === 'resetFailed'
-          ? servicesApi.discardResetFailed
-          : servicesApi.discardTryRestart;
+        const discard = discardFor(currentPlan.kind);
         void discard(
           currentPlan.plan.hostId,
           currentPlan.plan.hostSessionId,
@@ -201,15 +215,40 @@ export function ServicesWorkspace({ host }: { host: Host }) {
     });
   }
 
+  function planReload(observationId: ServiceObservationId) {
+    if (!connected || !sessionId || actionInFlight.current || planRef.current) return;
+    actionInFlight.current = true;
+    setPlanningObservation({ owner, id: observationId, kind: 'reload' });
+    setError(null);
+    setResult(null);
+    const requestOwner = owner;
+    const requestGeneration = generation.current;
+    void servicesApi.planReload(host.id, sessionId, observationId).then(
+      (plan) => {
+        if (generation.current !== requestGeneration || plan.hostId !== host.id || plan.hostSessionId !== sessionId) {
+          void servicesApi.discardReload(plan.hostId, plan.hostSessionId, plan.planId).catch(() => undefined);
+          return;
+        }
+        publishPlan({ owner: requestOwner, kind: 'reload', plan });
+      },
+      () => {
+        if (generation.current === requestGeneration) setError({ owner: requestOwner, failedRefresh: true, operation: true });
+      },
+    ).finally(() => {
+      if (generation.current === requestGeneration) {
+        actionInFlight.current = false;
+        setPlanningObservation(null);
+      }
+    });
+  }
+
   function cancelPlan() {
     if (actionInFlight.current) return;
     const current = planRef.current;
     if (!current) return;
     actionInFlight.current = true;
     publishPlan(null);
-    const discard = current.kind === 'resetFailed'
-      ? servicesApi.discardResetFailed
-      : servicesApi.discardTryRestart;
+    const discard = discardFor(current.kind);
     void discard(
       current.plan.hostId,
       current.plan.hostSessionId,
@@ -226,9 +265,7 @@ export function ServicesWorkspace({ host }: { host: Host }) {
     setExecutingOwner(current.owner);
     publishPlan(null);
     const requestGeneration = generation.current;
-    const execute = current.kind === 'resetFailed'
-      ? servicesApi.executeResetFailed
-      : servicesApi.executeTryRestart;
+    const execute = executeFor(current.kind);
     void execute(
       current.plan.hostId,
       current.plan.hostSessionId,
@@ -276,6 +313,7 @@ export function ServicesWorkspace({ host }: { host: Host }) {
           {visibleResult && <Notice tone={visibleResult.value.outcome === 'success' ? 'neutral' : 'warning'}>
             {visibleResult.value.outcome === 'success' && visibleResult.kind === 'resetFailed' && 'The failed-state marker was cleared.'}
             {visibleResult.value.outcome === 'success' && visibleResult.kind === 'tryRestart' && 'The systemd try-restart operation completed. The refreshed service state is shown below.'}
+            {visibleResult.value.outcome === 'success' && visibleResult.kind === 'reload' && 'The systemd reload operation completed. The refreshed service state is shown below.'}
             {visibleResult.value.outcome === 'failed' && 'The service operation failed.'}
             {visibleResult.value.outcome === 'cancelled' && 'The service operation was cancelled before dispatch.'}
             {visibleResult.value.outcome === 'outcomeUnknown' && 'The connection ended before the remote outcome could be confirmed. Refresh before taking another action.'}
@@ -290,20 +328,21 @@ export function ServicesWorkspace({ host }: { host: Host }) {
               {validSnapshot.entries.length === 0 ? <p>No loaded system services were returned.</p>
                 : rows.length === 0 ? <p>No services match this filter.</p>
                 : <div className="files-table-wrap"><table className="files-table"><thead><tr><th scope="col">Service</th><th scope="col">Load</th><th scope="col">Active</th><th scope="col">Sub</th><th scope="col">Description</th><th scope="col">Action</th></tr></thead><tbody>
-                    {rows.map((entry) => <tr key={entry.unit}><td>{entry.unit}</td><td>{entry.loadState}</td><td>{entry.activeState}</td><td>{entry.subState}</td><td>{entry.description}</td><td>{entry.resetFailedObservationId
-                      ? <Button disabled={visiblePlanningObservation !== null || executing || livePlan !== null} onClick={() => planResetFailed(entry.resetFailedObservationId!)}>{visiblePlanningObservation?.kind === 'resetFailed' && visiblePlanningObservation.id === entry.resetFailedObservationId ? 'Preparing…' : 'Reset failed state'}</Button>
-                      : entry.tryRestartObservationId
-                      ? <Button variant="danger" disabled={visiblePlanningObservation !== null || executing || livePlan !== null} onClick={() => planTryRestart(entry.tryRestartObservationId!)}>{visiblePlanningObservation?.kind === 'tryRestart' && visiblePlanningObservation.id === entry.tryRestartObservationId ? 'Preparing…' : 'Restart active service'}</Button>
-                      : '—'}</td></tr>)}
+                    {rows.map((entry) => <tr key={entry.unit}><td>{entry.unit}</td><td>{entry.loadState}</td><td>{entry.activeState}</td><td>{entry.subState}</td><td>{entry.description}</td><td><div className="service-actions">
+                      {entry.resetFailedObservationId && <Button disabled={visiblePlanningObservation !== null || executing || livePlan !== null} onClick={() => planResetFailed(entry.resetFailedObservationId!)}>{visiblePlanningObservation?.kind === 'resetFailed' && visiblePlanningObservation.id === entry.resetFailedObservationId ? 'Preparing…' : 'Reset failed state'}</Button>}
+                      {entry.tryRestartObservationId && <Button variant="danger" disabled={visiblePlanningObservation !== null || executing || livePlan !== null} onClick={() => planTryRestart(entry.tryRestartObservationId!)}>{visiblePlanningObservation?.kind === 'tryRestart' && visiblePlanningObservation.id === entry.tryRestartObservationId ? 'Preparing…' : 'Restart active service'}</Button>}
+                      {entry.reloadObservationId && <Button variant="danger" disabled={visiblePlanningObservation !== null || executing || livePlan !== null} onClick={() => planReload(entry.reloadObservationId!)}>{visiblePlanningObservation?.kind === 'reload' && visiblePlanningObservation.id === entry.reloadObservationId ? 'Preparing…' : 'Reload service'}</Button>}
+                      {!entry.resetFailedObservationId && !entry.tryRestartObservationId && !entry.reloadObservationId && '—'}
+                    </div></td></tr>)}
                   </tbody></table></div>}
             </>
           )}
           {livePlan && <Modal title="Approve systemd operation" onClose={cancelPlan}>
             <p className="dialog-description">Host: <strong>{host.displayName}</strong></p>
-            <dl className="properties"><dt>Service</dt><dd><code>{livePlan.unit}</code></dd><dt>Observed state</dt><dd>{livePlan.loadState} / {livePlan.activeState} / {livePlan.subState}</dd><dt>Risk</dt><dd>{livePlan.risk === 'moderate' ? 'Moderate' : livePlan.risk === 'high' ? 'High' : livePlan.risk}</dd><dt>Effect</dt><dd>{livePlan.effect}</dd></dl>
-            <Notice tone="warning">This one-time approval expires in {livePlan.expiresInSeconds.toString()} seconds. {ownedPlan?.kind === 'tryRestart' ? 'The running service and dependent traffic may be temporarily interrupted. There is no rollback.' : 'It clears failed, rate-limit, and restart counters and may affect later service behavior. It does not intentionally start or stop the service.'}</Notice>
-            <label><input data-initial-focus type="checkbox" checked={independentlyVerified} onChange={(event) => setIndependentlyVerified(event.target.checked)} /> {ownedPlan?.kind === 'tryRestart' ? 'I verified this exact running service and understand that restarting it may temporarily interrupt the service and dependent traffic.' : 'I independently verified this exact service target and want to clear only its failed-state marker.'}</label>
-            <div className="modal-actions"><Button onClick={cancelPlan}>Cancel</Button><Button variant={ownedPlan?.kind === 'tryRestart' ? 'danger' : 'primary'} disabled={!independentlyVerified} onClick={executePlan}>{ownedPlan?.kind === 'tryRestart' ? 'Restart active service' : 'Reset failed state'}</Button></div>
+            <dl className="properties"><dt>Service</dt><dd><code>{livePlan.unit}</code></dd><dt>Observed state</dt><dd>{livePlan.loadState} / {livePlan.activeState} / {livePlan.subState}</dd>{ownedPlan?.kind === 'reload' && <><dt>Reload support</dt><dd>yes</dd></>}<dt>Risk</dt><dd>{livePlan.risk === 'moderate' ? 'Moderate' : livePlan.risk === 'high' ? 'High' : livePlan.risk}</dd><dt>Effect</dt><dd>{livePlan.effect}</dd></dl>
+            <Notice tone="warning">This one-time approval expires in {livePlan.expiresInSeconds.toString()} seconds. {ownedPlan?.kind === 'tryRestart' ? 'The running service and dependent traffic may be temporarily interrupted. There is no rollback.' : ownedPlan?.kind === 'reload' ? 'The running service configuration will be reloaded and systemd may affect dependency-related jobs. There is no rollback.' : 'It clears failed, rate-limit, and restart counters and may affect later service behavior. It does not intentionally start or stop the service.'}</Notice>
+            <label><input data-initial-focus type="checkbox" checked={independentlyVerified} onChange={(event) => setIndependentlyVerified(event.target.checked)} /> {ownedPlan?.kind === 'tryRestart' ? 'I verified this exact running service and understand that restarting it may temporarily interrupt the service and dependent traffic.' : ownedPlan?.kind === 'reload' ? 'I verified this exact running, reloadable service and want to reload its configuration.' : 'I independently verified this exact service target and want to clear only its failed-state marker.'}</label>
+            <div className="modal-actions"><Button onClick={cancelPlan}>Cancel</Button><Button variant={ownedPlan?.kind === 'resetFailed' ? 'primary' : 'danger'} disabled={!independentlyVerified} onClick={executePlan}>{ownedPlan?.kind === 'tryRestart' ? 'Restart active service' : ownedPlan?.kind === 'reload' ? 'Reload service' : 'Reset failed state'}</Button></div>
           </Modal>}
         </>
       )}

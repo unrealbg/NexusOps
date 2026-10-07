@@ -41,6 +41,7 @@ struct ServiceProperties<'a> {
     active_state: Option<&'a str>,
     sub_state: Option<&'a str>,
     description: Option<&'a str>,
+    can_reload: Option<&'a str>,
 }
 
 impl<'a> ServiceProperties<'a> {
@@ -50,6 +51,7 @@ impl<'a> ServiceProperties<'a> {
             && self.active_state.is_none()
             && self.sub_state.is_none()
             && self.description.is_none()
+            && self.can_reload.is_none()
     }
 
     fn insert(&mut self, key: &str, value: &'a str) -> Result<(), AppError> {
@@ -59,6 +61,7 @@ impl<'a> ServiceProperties<'a> {
             "ActiveState" => &mut self.active_state,
             "SubState" => &mut self.sub_state,
             "Description" => &mut self.description,
+            "CanReload" => &mut self.can_reload,
             _ => return Err(invalid()),
         };
         if field.replace(value).is_some() {
@@ -73,6 +76,11 @@ impl<'a> ServiceProperties<'a> {
         let active_state = self.active_state.ok_or_else(invalid)?;
         let sub_state = self.sub_state.ok_or_else(invalid)?;
         let description = self.description.ok_or_else(invalid)?;
+        let can_reload = match self.can_reload.ok_or_else(invalid)? {
+            "yes" => true,
+            "no" => false,
+            _ => return Err(invalid()),
+        };
 
         token(id, MAX_UNIT_BYTES)?;
         if !id.ends_with(".service") {
@@ -93,8 +101,10 @@ impl<'a> ServiceProperties<'a> {
             active_state: active_state.to_owned(),
             sub_state: sub_state.to_owned(),
             description: description.to_owned(),
+            can_reload,
             reset_failed_observation_id: None,
             try_restart_observation_id: None,
+            reload_observation_id: None,
         })
     }
 }
@@ -154,7 +164,7 @@ mod tests {
 
     fn block(id: &str, load: &str, active: &str, sub: &str, description: &str) -> String {
         format!(
-            "Id={id}\nLoadState={load}\nActiveState={active}\nSubState={sub}\nDescription={description}\n"
+            "Id={id}\nLoadState={load}\nActiveState={active}\nSubState={sub}\nDescription={description}\nCanReload=yes\n"
         )
     }
 
@@ -206,10 +216,27 @@ mod tests {
 
     #[test]
     fn properties_may_be_reordered_and_description_may_contain_equals() {
-        let output = "Description=OpenSSH = server\nSubState=running\nId=sshd.service\nActiveState=active\nLoadState=loaded\n";
+        let output = "Description=OpenSSH = server\nCanReload=no\nSubState=running\nId=sshd.service\nActiveState=active\nLoadState=loaded\n";
         let rows = parse_services(output).unwrap();
         assert_eq!(rows[0].description, "OpenSSH = server");
         assert_eq!(rows[0].sub_state, "running");
+    }
+
+    #[test]
+    fn can_reload_is_strict_and_required() {
+        let yes = parse_services(&block("a.service", "loaded", "active", "running", "A")).unwrap();
+        assert!(yes[0].can_reload);
+        let no = "Id=a.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=A\nCanReload=no\n";
+        assert!(!parse_services(no).unwrap()[0].can_reload);
+        assert_invalid(
+            "Id=a.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=A\n",
+        );
+        assert_invalid(
+            "Id=a.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=A\nCanReload=true\n",
+        );
+        assert_invalid(
+            "Id=a.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=A\nCanReload=yes\nCanReload=no\n",
+        );
     }
 
     #[test]

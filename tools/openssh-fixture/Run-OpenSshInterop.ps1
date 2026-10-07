@@ -20,6 +20,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "OpenSSH Goal 05B non-mutating completion interoperability failed" }
     cargo test -p nexus-ssh --test openssh_interop openssh_systemd_try_restart_non_mutating_completion --locked -- --ignored --exact --nocapture
     if ($LASTEXITCODE -ne 0) { throw "OpenSSH Goal 05D non-mutating completion interoperability failed" }
+    cargo test -p nexus-ssh --test openssh_interop openssh_systemd_reload_non_mutating_completion --locked -- --ignored --exact --nocapture
+    if ($LASTEXITCODE -ne 0) { throw "OpenSSH Goal 05E non-mutating completion interoperability failed" }
     cargo test -p nexus-ssh --test openssh_monitoring openssh_monitoring_interoperability --locked -- --ignored --exact --nocapture
     if ($LASTEXITCODE -ne 0) { throw "OpenSSH monitoring interoperability failed" }
     cargo test -p nexus-ssh --test openssh_terminal openssh_terminal_pty_interoperability --locked -- --ignored --exact --nocapture
