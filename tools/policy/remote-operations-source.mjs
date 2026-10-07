@@ -11,6 +11,14 @@ function requireAbsent(text, fragments, context) {
   }
 }
 
+function requireSingleReviewedExecPath(text, context) {
+  const execCalls = [...text.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*\s*\.\s*exec\s*\(/g)];
+  if (execCalls.length !== 1
+      || !text.includes('channel.exec(true, command(authority)).await.is_err()')) {
+    fail(`${context} must contain exactly the reviewed typed-authority exec path`);
+  }
+}
+
 function rustFunctionEnd(source, start, limit, context) {
   let bodyStart = -1;
   let depth = 0;
@@ -637,8 +645,13 @@ export function verifyRemoteOperationsSourceText({
     'ChannelMsg::ExitSignal { .. } =>',
     'ChannelMsg::Success if !*accepted =>',
     'ChannelMsg::Failure if !*accepted && !*execution_evidence =>',
+    'ChannelMsg::Failure => MessageHandling::Complete(',
     'ChannelMsg::Data { data }',
     'ChannelMsg::ExtendedData { data, .. } =>',
+    '*execution_evidence = true;',
+    '*output_bytes = output_bytes.saturating_add(data.len());',
+    'if *output_bytes > OUTPUT_LIMIT',
+    'CompletionUnknownReason::OutputLimit',
     'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
     'ChannelMsg::Close => MessageHandling::Complete(',
     '_ if !*accepted => MessageHandling::Complete(',
@@ -666,6 +679,7 @@ export function verifyRemoteOperationsSourceText({
   if (!systemdTransportProduction.includes('authority.target().as_str()')) {
     fail('systemd SSH transport must append exactly one typed authority target');
   }
+  requireSingleReviewedExecPath(systemdTransportProduction, 'reviewed systemd SSH transport');
   const tryRestartTransportProduction = tryRestartTransport.source.split('#[cfg(test)]')[0];
   for (const required of [
     'impl MutationTransport<SystemdTryRestart> for SshSession',
@@ -674,10 +688,22 @@ export function verifyRemoteOperationsSourceText({
     'const CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);',
     'const OUTPUT_LIMIT: usize = 8 * 1024;',
     'LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password try-restart -- ',
+    'Some(message) => match handle_message(',
+    'ChannelMsg::Success if !*accepted =>',
+    'ChannelMsg::Failure if !*accepted && !*execution_evidence =>',
+    'ChannelMsg::Failure => MessageHandling::Complete(',
+    'ChannelMsg::Data { data }',
+    'ChannelMsg::ExtendedData { data, .. } =>',
+    '*execution_evidence = true;',
+    '*output_bytes = output_bytes.saturating_add(data.len());',
+    'if *output_bytes > OUTPUT_LIMIT',
+    'CompletionUnknownReason::OutputLimit',
     'ChannelMsg::ExitStatus { exit_status } =>',
     'ChannelMsg::ExitSignal { .. } =>',
     'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
     'ChannelMsg::Close => MessageHandling::Complete(',
+    '_ if !*accepted => MessageHandling::Complete(',
+    'None => {',
     'CompletionUnknownReason::Cancelled',
     'CompletionUnknownReason::Timeout',
     'authority.target().as_str()',
@@ -693,6 +719,10 @@ export function verifyRemoteOperationsSourceText({
       'ChannelMsg::ExitSignal { .. } if *accepted =>',
       'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } | ChannelMsg::Close',
     ],
+    'reviewed try-restart SSH transport',
+  );
+  requireSingleReviewedExecPath(
+    tryRestartTransportProduction,
     'reviewed try-restart SSH transport',
   );
   for (const required of [

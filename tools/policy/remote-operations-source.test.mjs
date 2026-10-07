@@ -556,3 +556,101 @@ test('policy rejects changes to the exact try-restart semantic and transport bou
     /native operation binding for plan_service_try_restart must remain fixed/,
   );
 });
+
+test('policy pins complete try-restart dispatch certainty and message classification', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const mutations = [
+    [
+      'ChannelMsg::ExitStatus { exit_status } =>',
+      'ChannelMsg::ExitStatus { exit_status } if *accepted =>',
+    ],
+    [
+      'ChannelMsg::ExitSignal { .. } =>',
+      'ChannelMsg::ExitSignal { .. } if *accepted =>',
+    ],
+    [
+      'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+      'ChannelMsg::Eof => MessageHandling::Continue,',
+    ],
+    [
+      'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+      'ChannelMsg::Eof => MessageHandling::Continue,\n        ChannelMsg::WindowAdjusted { .. } => MessageHandling::Complete(MutationTransportOutcome::CompletionUnknown(CompletionUnknownReason::ConnectionLost)),',
+    ],
+    [
+      'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+      'ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,\n        ChannelMsg::Eof => MessageHandling::Complete(MutationTransportOutcome::CompletionUnknown(CompletionUnknownReason::ConnectionLost)),',
+    ],
+    [
+      'ChannelMsg::Failure if !*accepted && !*execution_evidence =>',
+      'ChannelMsg::Failure =>',
+    ],
+    [
+      'ChannelMsg::Failure => MessageHandling::Complete(',
+      'ChannelMsg::Failure => MessageHandling::Continue /*',
+    ],
+    [
+      'ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } =>',
+      'ChannelMsg::ExtendedData { data, .. } =>',
+    ],
+    [
+      'ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } =>',
+      'ChannelMsg::Data { data } =>',
+    ],
+    ['*execution_evidence = true;', 'let _ = execution_evidence;'],
+    [
+      '*output_bytes = output_bytes.saturating_add(data.len());',
+      'let _ = data;',
+    ],
+    ['if *output_bytes > OUTPUT_LIMIT', 'if false'],
+    [
+      `_ if !*accepted => MessageHandling::Complete(MutationTransportOutcome::CompletionUnknown(
+            CompletionUnknownReason::ConnectionLost,
+        )),
+        _ => MessageHandling::Continue,`,
+      '_ => MessageHandling::Continue,',
+    ],
+  ];
+
+  for (const [from, to] of mutations) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_try_restart.rs')
+          ? { ...file, source: file.source.replace(from, to) }
+          : file),
+      }),
+      /try-restart SSH transport policy is missing|reviewed try-restart SSH transport contains forbidden text/,
+    );
+  }
+});
+
+test('policy rejects generic arbitrary-command helpers inside reviewed SSH adapters', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const genericHelper = `
+async fn dispatch_arbitrary<C>(
+    channel: &mut C,
+    remote_command: &str,
+) {
+    let _ = channel.exec(true, remote_command).await;
+}
+
+`;
+
+  for (const adapter of ['systemd_reset_failed.rs', 'systemd_try_restart.rs']) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith(adapter)
+          ? {
+            ...file,
+            source: file.source.replace(
+              '#[cfg(test)]',
+              `${genericHelper}#[cfg(test)]`,
+            ),
+          }
+          : file),
+      }),
+      /must contain exactly the reviewed typed-authority exec path/,
+    );
+  }
+});
