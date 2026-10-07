@@ -34,4 +34,17 @@ Planning and post-consume execution each revalidate through a fresh full invento
 
 ## Validation and native acceptance
 
-Goal 05B real-systemd acceptance and Goal 05C Native Windows desktop acceptance passed on the merged implementation. Goal 05D deterministic parser, policy, cross-operation lifecycle, loopback SSH, component and systemctl-absent real-OpenSSH tests cover this source candidate. They do not authorize or claim a real Goal 05D systemd mutation; that remains a separate owner-authorized post-review gate.
+Goal 05B real-systemd acceptance and Goal 05C Native Windows desktop acceptance passed on the merged implementation. Goal 05D passed deterministic, unit and source-policy validation; real OpenSSH systemctl-absent interoperability; disposable Ubuntu 24.04 real-systemd acceptance; and Native Windows desktop acceptance. The accepted production path was:
+
+```text
+Windows desktop UI
+→ operation-specific Tauri IPC
+→ Application
+→ one-shot native authority
+→ SshSession
+→ SystemdTryRestart transport
+→ real OpenSSH
+→ real systemd
+```
+
+Acceptance used an exact `loaded / active / running` target and one High-risk confirmation. It produced exactly one try-restart dispatch; the service remained `loaded / active / running`; MainPID and InvocationID changed while `NRestarts=0`; SSH remained usable; exactly one metadata-only success audit was recorded; and no automatic retry occurred.
