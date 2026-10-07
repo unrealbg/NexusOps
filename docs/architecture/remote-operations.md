@@ -1,10 +1,10 @@
 # Remote operation authority foundation
 
-Goal 05A added the native, memory-only foundation. Goal 05B uses it for exactly one production semantic operation, `SystemdResetFailed`, while `nexus-operations` and `RemoteSession::execute` remain permanently read-only. `nexus-remote-operations` stays transport-independent; the reviewed SSH adapter implements its typed mutation transport in one focused module.
+Goal 05A added the native, memory-only foundation. Goal 05B introduced `SystemdResetFailed`; Goal 05D adds the second and only other production semantic operation, `SystemdTryRestart`. `nexus-operations` and `RemoteSession::execute` remain permanently read-only. `nexus-remote-operations` stays transport-independent; each reviewed SSH adapter implements one typed mutation transport in its own focused module.
 
 ## Authority ownership
 
-An authority is minted from a sealed native operation type. `SystemdResetFailed` is the only production implementation. The stored record binds an unpredictable UUID plan ID to `HostId`, exact `HostSessionId`, session generation, native operation type, native `OperationRisk`, backend-owned target and preconditions, issue/expiry instants and a private native payload. It stores no credential, username or authentication method. Private targets, preconditions and payloads have no Serde or TypeScript representation.
+An authority is minted from one of two sealed native operation types: `SystemdResetFailed` or `SystemdTryRestart`. The stored record binds an unpredictable UUID plan ID to `HostId`, exact `HostSessionId`, session generation, native operation type, native `OperationRisk`, backend-owned target and preconditions, issue/expiry instants and a private native payload. It stores no credential, username or authentication method. Private targets, preconditions and payloads have no Serde or TypeScript representation. Consuming or discarding a plan through the wrong operation type fails closed.
 
 The store permits one pending authority per host. Publishing a replacement atomically removes the previous authority. The fixed TTL is 120 seconds using Tokio's monotonic clock. Expiry is enforced both by a best-effort timer and synchronously whenever authority is observed or consumed. Authorities are not persisted and cannot survive process restart.
 
@@ -30,7 +30,7 @@ Routine remote mutations will use ordinary process command admission. They must 
 
 ## Revalidation and outcomes
 
-After one-shot consume and before dispatch, the concrete service revalidator establishes that the host still exists; the exact host session, generation and transport remain current and open; shutdown has not started; operation identity and Moderate risk are unchanged; and a fresh fixed inventory still reports the private target as `loaded / failed / failed`. Renderer state and TTL alone are never sufficient. No remote compare-and-swap guarantee is implied.
+After one-shot consume and before dispatch, the concrete service revalidator establishes that the host still exists; the exact host session, generation and transport remain current and open; shutdown has not started; and operation identity, native risk and exact preconditions remain unchanged. Reset-failed requires `loaded / failed / failed` at Moderate risk. Try-restart requires `loaded / active / running` at High risk. Renderer state and TTL alone are never sufficient. The final try-restart semantic narrows, but cannot eliminate, the race after revalidation.
 
 The mutation transport contract has explicit dispatch certainty:
 
@@ -48,4 +48,4 @@ Audit remains metadata-only. It contains no command, executable, argv, environme
 
 ## Goal boundary
 
-Goal 05B permits exactly three operation-specific IPC commands and display DTOs. Source policy retains each Rust source path and allows one native operation module plus one SSH adapter module while rejecting additional operations, adapters, generic command strings, argv/environment payloads and generic renderer mutation APIs elsewhere. The current `ServiceEntry.unit` display string is never accepted back as operational input. Real systemd mutation acceptance remains a separate owner-authorized gate.
+Goals 05B and 05D permit exactly six operation-specific IPC commands and two operation-specific display DTO families. Source policy fixes the two native operation modules and their two SSH adapters while rejecting a third operation, generic command strings, argv/environment payloads, generic service verbs, ordinary restart and generic renderer mutation APIs. The current `ServiceEntry.unit` display string is never accepted back as operational input. Goal 05B real-systemd and Goal 05C native-desktop acceptance passed; Goal 05D real systemd mutation remains a separate owner-authorized gate after source review.

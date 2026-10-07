@@ -167,12 +167,12 @@ fn discard_is_exact_idempotent_and_scoped_to_the_authority_owner() {
         ..owner
     };
     assert_eq!(
-        store.discard(id, wrong).unwrap_err().code,
+        store.discard::<FakeOperation>(id, wrong).unwrap_err().code,
         ErrorCode::Conflict
     );
     assert!(store.contains(id).unwrap());
-    assert!(store.discard(id, owner).unwrap());
-    assert!(!store.discard(id, owner).unwrap());
+    assert!(store.discard::<FakeOperation>(id, owner).unwrap());
+    assert!(!store.discard::<FakeOperation>(id, owner).unwrap());
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn consume_and_discard_share_one_race_owner() {
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 barrier.wait();
-                store.discard(id, owner).unwrap_or(false)
+                store.discard::<FakeOperation>(id, owner).unwrap_or(false)
             })
         };
         barrier.wait();

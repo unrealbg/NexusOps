@@ -52,7 +52,7 @@ test('policy rejects mutation authority exposed by a fourth command in another p
         },
       ],
     }),
-    /three reviewed .* commands/,
+    /six reviewed .* commands/,
   );
 });
 
@@ -72,7 +72,7 @@ test('policy rejects a renamed reviewed mutation command', async () => {
           }
           : file),
     }),
-    /three reviewed .* commands/,
+    /six reviewed .* commands/,
   );
 });
 
@@ -92,7 +92,7 @@ test('policy discovers noncanonical and imported Tauri command attributes', asyn
           { path: 'apps/desktop/src-tauri/src/alternate.rs', source },
         ],
       }),
-      /three reviewed .* commands/,
+      /six reviewed .* commands/,
     );
   }
 });
@@ -123,7 +123,7 @@ pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest
         { path: 'apps/desktop/src-tauri/src/local_bridge.rs', source: bridgeSource },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -144,7 +144,7 @@ test('policy rejects a Tauri command delegating to a facade in another productio
         },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -174,7 +174,7 @@ pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest
         { path: 'apps/desktop/src-tauri/src/dto_bridge.rs', source: bridgeSource },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -200,7 +200,7 @@ pub async fn perform_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(),
         },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -224,7 +224,7 @@ pub async fn perform_bridge(app: &Application, request: BridgeRequest) -> Result
         },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -249,7 +249,7 @@ pub async fn perform_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(),
         },
       ],
     }),
-    /Goal 05B application mutation references must remain inside the three reviewed Tauri commands/,
+    /Goal 05B\/05D application mutation references must remain inside the six reviewed Tauri commands/,
   );
 });
 
@@ -517,4 +517,140 @@ test('policy rejects changes to the exact reset-failed command and its bounds', 
     }),
     /systemd SSH transport policy is missing/,
   );
+});
+
+test('policy rejects changes to the exact try-restart semantic and transport bounds', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  for (const [from, to] of [
+    ['--no-ask-password try-restart -- ', '--no-ask-password restart -- '],
+    ['const REQUEST_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);', 'const REQUEST_COMPLETION_TIMEOUT: Duration = Duration::from_secs(60);'],
+    ['const OUTPUT_LIMIT: usize = 8 * 1024;', 'const OUTPUT_LIMIT: usize = 16 * 1024;'],
+    ['ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,', 'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } | ChannelMsg::Close => MessageHandling::Continue,'],
+  ]) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_try_restart.rs')
+          ? { ...file, source: file.source.replace(from, to) }
+          : file),
+      }),
+      /try-restart SSH transport policy is missing|reviewed try-restart SSH transport contains forbidden text/,
+    );
+  }
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      remoteProductionSources: fixture.remoteProductionSources.map((file) => file.path.endsWith('systemd_try_restart.rs')
+        ? { ...file, source: file.source.replace('active == "active" && sub == "running"', 'active == "active"') }
+        : file),
+    }),
+    /try-restart operation policy is missing/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: fixture.coreProductionSources.map((file) => file.path.endsWith('application/services.rs')
+        ? { ...file, source: file.source.replace('.plan::<SystemdTryRestart>(', '.plan::<SystemdResetFailed>(') }
+        : file),
+    }),
+    /native operation binding for plan_service_try_restart must remain fixed/,
+  );
+});
+
+test('policy pins complete try-restart dispatch certainty and message classification', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const mutations = [
+    [
+      'ChannelMsg::ExitStatus { exit_status } =>',
+      'ChannelMsg::ExitStatus { exit_status } if *accepted =>',
+    ],
+    [
+      'ChannelMsg::ExitSignal { .. } =>',
+      'ChannelMsg::ExitSignal { .. } if *accepted =>',
+    ],
+    [
+      'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+      'ChannelMsg::Eof => MessageHandling::Continue,',
+    ],
+    [
+      'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+      'ChannelMsg::Eof => MessageHandling::Continue,\n        ChannelMsg::WindowAdjusted { .. } => MessageHandling::Complete(MutationTransportOutcome::CompletionUnknown(CompletionUnknownReason::ConnectionLost)),',
+    ],
+    [
+      'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+      'ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,\n        ChannelMsg::Eof => MessageHandling::Complete(MutationTransportOutcome::CompletionUnknown(CompletionUnknownReason::ConnectionLost)),',
+    ],
+    [
+      'ChannelMsg::Failure if !*accepted && !*execution_evidence =>',
+      'ChannelMsg::Failure =>',
+    ],
+    [
+      'ChannelMsg::Failure => MessageHandling::Complete(',
+      'ChannelMsg::Failure => MessageHandling::Continue /*',
+    ],
+    [
+      'ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } =>',
+      'ChannelMsg::ExtendedData { data, .. } =>',
+    ],
+    [
+      'ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } =>',
+      'ChannelMsg::Data { data } =>',
+    ],
+    ['*execution_evidence = true;', 'let _ = execution_evidence;'],
+    [
+      '*output_bytes = output_bytes.saturating_add(data.len());',
+      'let _ = data;',
+    ],
+    ['if *output_bytes > OUTPUT_LIMIT', 'if false'],
+    [
+      `_ if !*accepted => MessageHandling::Complete(MutationTransportOutcome::CompletionUnknown(
+            CompletionUnknownReason::ConnectionLost,
+        )),
+        _ => MessageHandling::Continue,`,
+      '_ => MessageHandling::Continue,',
+    ],
+  ];
+
+  for (const [from, to] of mutations) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_try_restart.rs')
+          ? { ...file, source: file.source.replace(from, to) }
+          : file),
+      }),
+      /try-restart SSH transport policy is missing|reviewed try-restart SSH transport contains forbidden text/,
+    );
+  }
+});
+
+test('policy rejects generic arbitrary-command helpers inside reviewed SSH adapters', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const genericHelper = `
+async fn dispatch_arbitrary<C>(
+    channel: &mut C,
+    remote_command: &str,
+) {
+    let _ = channel.exec(true, remote_command).await;
+}
+
+`;
+
+  for (const adapter of ['systemd_reset_failed.rs', 'systemd_try_restart.rs']) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith(adapter)
+          ? {
+            ...file,
+            source: file.source.replace(
+              '#[cfg(test)]',
+              `${genericHelper}#[cfg(test)]`,
+            ),
+          }
+          : file),
+      }),
+      /must contain exactly the reviewed typed-authority exec path/,
+    );
+  }
 });

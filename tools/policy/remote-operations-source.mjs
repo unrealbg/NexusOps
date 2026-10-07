@@ -11,6 +11,14 @@ function requireAbsent(text, fragments, context) {
   }
 }
 
+function requireSingleReviewedExecPath(text, context) {
+  const execCalls = [...text.matchAll(/\b[A-Za-z_][A-Za-z0-9_]*\s*\.\s*exec\s*\(/g)];
+  if (execCalls.length !== 1
+      || !text.includes('channel.exec(true, command(authority)).await.is_err()')) {
+    fail(`${context} must contain exactly the reviewed typed-authority exec path`);
+  }
+}
+
 function rustFunctionEnd(source, start, limit, context) {
   let bodyStart = -1;
   let depth = 0;
@@ -230,6 +238,9 @@ export function verifyRemoteOperationsSourceText({
     'plan_service_reset_failed',
     'discard_service_reset_failed',
     'execute_service_reset_failed',
+    'plan_service_try_restart',
+    'discard_service_try_restart',
+    'execute_service_try_restart',
   ]);
   const forbiddenCommands = new Set([
     'plan_remote_operation',
@@ -261,15 +272,26 @@ export function verifyRemoteOperationsSourceText({
     'ServiceResetFailedOutcome',
     'ServiceResetFailedAuditStatus',
     'ServiceResetFailedPostObservationStatus',
+    'ServiceTryRestartPlan',
+    'ServiceTryRestartResult',
+    'ServiceTryRestartOutcome',
+    'ServiceTryRestartAuditStatus',
+    'ServiceTryRestartPostObservationStatus',
     '.plan_service_reset_failed(',
     '.discard_service_reset_failed(',
     '.execute_service_reset_failed(',
+    '.plan_service_try_restart(',
+    '.discard_service_try_restart(',
+    '.execute_service_try_restart(',
   ];
   const reviewedCommandPath = 'apps/desktop/src-tauri/src/commands.rs';
   const applicationMutationOperations = [
     { name: 'plan_service_reset_failed', method: 'plan_service_reset_failed' },
     { name: 'discard_service_reset_failed', method: 'discard_service_reset_failed' },
     { name: 'execute_service_reset_failed', method: 'execute_service_reset_failed' },
+    { name: 'plan_service_try_restart', method: 'plan_service_try_restart' },
+    { name: 'discard_service_try_restart', method: 'discard_service_try_restart' },
+    { name: 'execute_service_try_restart', method: 'execute_service_try_restart' },
   ];
   const reviewedDeclarations = applicationMutationOperations.map(({ name, method }) => {
     const command = commandSections.find(({ path, name: commandName }) =>
@@ -287,9 +309,9 @@ export function verifyRemoteOperationsSourceText({
         .filter((index) => !reviewedRegistrations.some((registration) =>
           registration.path === path && registration.method === method && registration.index === index))
         .map((index) => ({ path, method, index }))));
-  const applicationReferencesAreReviewed = reviewedDeclarations.length === 3
-    && reviewedRegistrations.length === 3
-    && applicationMutationReferences.length === 3
+  const applicationReferencesAreReviewed = reviewedDeclarations.length === 6
+    && reviewedRegistrations.length === 6
+    && applicationMutationReferences.length === 6
     && applicationMutationOperations.every(({ name, method }) => {
       const command = commandSections.find(({ path, name: commandName }) =>
         path === reviewedCommandPath && commandName === name);
@@ -305,17 +327,17 @@ export function verifyRemoteOperationsSourceText({
         && references[0].index < command.end;
     });
   if (!applicationReferencesAreReviewed) {
-    fail('Goal 05B application mutation references must remain inside the three reviewed Tauri commands');
+    fail('Goal 05B/05D application mutation references must remain inside the six reviewed Tauri commands');
   }
   const mutationSurfaceCommands = commandSections.filter(({ source }) =>
     mutationSurfaceFragments.some((fragment) => source.includes(fragment)));
-  if (mutationSurfaceCommands.length !== 3
+  if (mutationSurfaceCommands.length !== 6
       || mutationSurfaceCommands.some(({ path, name }) =>
         path !== reviewedCommandPath || !allowedMutationCommands.has(name))
       || [...allowedMutationCommands].some((allowed) =>
         mutationSurfaceCommands.filter(({ path, name }) =>
           path === reviewedCommandPath && name === allowed).length !== 1)) {
-    fail('only the three reviewed service reset-failed commands may expose mutation authority');
+    fail('only the six reviewed service mutation commands may expose mutation authority');
   }
 
   const reviewedCorePath = 'crates/nexus-core/src/application/services.rs';
@@ -323,21 +345,47 @@ export function verifyRemoteOperationsSourceText({
     {
       name: 'plan_service_reset_failed',
       foundationOperation: 'plan',
+      nativeType: 'SystemdResetFailed',
       dtoNames: ['ServiceResetFailedPlan'],
     },
     {
       name: 'discard_service_reset_failed',
       foundationOperation: 'discard',
+      nativeType: 'SystemdResetFailed',
       dtoNames: [],
     },
     {
       name: 'execute_service_reset_failed',
       foundationOperation: 'execute',
+      nativeType: 'SystemdResetFailed',
       dtoNames: [
         'ServiceResetFailedResult',
         'ServiceResetFailedOutcome',
         'ServiceResetFailedAuditStatus',
         'ServiceResetFailedPostObservationStatus',
+      ],
+    },
+    {
+      name: 'plan_service_try_restart',
+      foundationOperation: 'plan',
+      nativeType: 'SystemdTryRestart',
+      dtoNames: ['ServiceTryRestartPlan'],
+    },
+    {
+      name: 'discard_service_try_restart',
+      foundationOperation: 'discard',
+      nativeType: 'SystemdTryRestart',
+      dtoNames: [],
+    },
+    {
+      name: 'execute_service_try_restart',
+      foundationOperation: 'execute',
+      nativeType: 'SystemdTryRestart',
+      dtoNames: [
+        'ServiceTryRestartResult',
+        'ServiceTryRestartOutcome',
+        'ServiceTryRestartAuditStatus',
+        'ServiceTryRestartPostObservationStatus',
       ],
     },
   ];
@@ -354,7 +402,7 @@ export function verifyRemoteOperationsSourceText({
       }));
     });
     if (definitions.length !== 1 || definitions[0].path !== reviewedCorePath) {
-      fail('Goal 05B nexus-core application boundary must remain the three reviewed methods');
+      fail('Goal 05B/05D nexus-core application boundary must remain the six reviewed methods');
     }
     return { ...operation, ...definitions[0] };
   });
@@ -407,6 +455,9 @@ export function verifyRemoteOperationsSourceText({
     { path: reviewedCorePath, name: 'plan_service_reset_failed', count: 2 },
     { path: reviewedCorePath, name: 'discard_service_reset_failed', count: 2 },
     { path: reviewedCorePath, name: 'execute_service_reset_failed', count: 1 },
+    { path: reviewedCorePath, name: 'plan_service_try_restart', count: 2 },
+    { path: reviewedCorePath, name: 'discard_service_try_restart', count: 2 },
+    { path: reviewedCorePath, name: 'execute_service_try_restart', count: 1 },
     { path: 'crates/nexus-core/src/application/lifecycle.rs', name: 'get_session', count: 2 },
     { path: 'crates/nexus-core/src/application/lifecycle.rs', name: 'disconnect_host', count: 1 },
     { path: 'crates/nexus-core/src/application/lifecycle.rs', name: 'prepare_disconnect', count: 1 },
@@ -457,6 +508,14 @@ export function verifyRemoteOperationsSourceText({
     ).filter((index) => index >= definition.start && index < definition.end);
     if (operationReferences.length !== 1) {
       fail(`Goal 05B nexus-core application boundary for ${definition.name} must remain fixed`);
+    }
+    const nativeTypeReferences = rustIdentifierIndices(
+      definition.source,
+      definition.nativeType,
+      definition.path,
+    ).filter((index) => index >= definition.start && index < definition.end);
+    if (nativeTypeReferences.length !== 1) {
+      fail(`Goal 05B/05D native operation binding for ${definition.name} must remain fixed`);
     }
 
     for (const dtoName of definition.dtoNames) {
@@ -520,16 +579,24 @@ export function verifyRemoteOperationsSourceText({
     'allow-plan-service-reset-failed',
     'allow-discard-service-reset-failed',
     'allow-execute-service-reset-failed',
+    'allow-plan-service-try-restart',
+    'allow-discard-service-try-restart',
+    'allow-execute-service-try-restart',
   ]) {
     if (!capabilitySource.includes(`"${permission}"`)) {
-      fail(`reviewed reset-failed capability is missing ${permission}`);
+      fail(`reviewed service mutation capability is missing ${permission}`);
     }
   }
 
   const nativeImplementations = remoteProduction.match(/impl NativeOperation for/g) ?? [];
-  if (nativeImplementations.length !== 1
-      || !systemdOperationProduction.includes('impl NativeOperation for SystemdResetFailed')) {
-    fail('private remote-operation production source must contain exactly SystemdResetFailed');
+  const tryRestartOperation = remoteProductionSources.find(({ path }) =>
+    path === 'crates/nexus-remote-operations/src/systemd_try_restart.rs');
+  if (!tryRestartOperation) fail('reviewed SystemdTryRestart operation module is missing');
+  const tryRestartOperationProduction = tryRestartOperation.source.split('#[cfg(test)]')[0];
+  if (nativeImplementations.length !== 2
+      || !systemdOperationProduction.includes('impl NativeOperation for SystemdResetFailed')
+      || !tryRestartOperationProduction.includes('impl NativeOperation for SystemdTryRestart')) {
+    fail('private remote-operation production source must contain exactly SystemdResetFailed and SystemdTryRestart');
   }
   for (const required of [
     'SystemdResetFailedPreconditions',
@@ -538,6 +605,13 @@ export function verifyRemoteOperationsSourceText({
   ]) {
     if (!systemdOperationProduction.includes(required)) fail(`systemd operation policy is missing ${required}`);
   }
+  for (const required of [
+    'SystemdTryRestartPreconditions',
+    'const RISK: OperationRisk = OperationRisk::High;',
+    'load == "loaded" && active == "active" && sub == "running"',
+  ]) {
+    if (!tryRestartOperationProduction.includes(required)) fail(`try-restart operation policy is missing ${required}`);
+  }
 
   if (!sshCargoSource.includes('nexus-remote-operations = { path = "../nexus-remote-operations" }')) {
     fail('SSH production source is missing the reviewed remote-operation dependency');
@@ -545,10 +619,13 @@ export function verifyRemoteOperationsSourceText({
   const systemdTransport = sshProductionSources.find(({ path }) =>
     path === 'crates/nexus-ssh/src/systemd_reset_failed.rs');
   if (!systemdTransport) fail('reviewed SystemdResetFailed SSH adapter is missing');
+  const tryRestartTransport = sshProductionSources.find(({ path }) =>
+    path === 'crates/nexus-ssh/src/systemd_try_restart.rs');
+  if (!tryRestartTransport) fail('reviewed SystemdTryRestart SSH adapter is missing');
   const systemdTransportSource = systemdTransport.source;
   const systemdTransportProduction = systemdTransportSource.split('#[cfg(test)]')[0];
   const otherSshSources = sshProductionSources
-    .filter(({ path }) => path !== systemdTransport.path)
+    .filter(({ path }) => path !== systemdTransport.path && path !== tryRestartTransport.path)
     .map(({ source }) => source)
     .join('\n');
   requireAbsent(
@@ -568,8 +645,13 @@ export function verifyRemoteOperationsSourceText({
     'ChannelMsg::ExitSignal { .. } =>',
     'ChannelMsg::Success if !*accepted =>',
     'ChannelMsg::Failure if !*accepted && !*execution_evidence =>',
+    'ChannelMsg::Failure => MessageHandling::Complete(',
     'ChannelMsg::Data { data }',
     'ChannelMsg::ExtendedData { data, .. } =>',
+    '*execution_evidence = true;',
+    '*output_bytes = output_bytes.saturating_add(data.len());',
+    'if *output_bytes > OUTPUT_LIMIT',
+    'CompletionUnknownReason::OutputLimit',
     'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
     'ChannelMsg::Close => MessageHandling::Complete(',
     '_ if !*accepted => MessageHandling::Complete(',
@@ -597,16 +679,67 @@ export function verifyRemoteOperationsSourceText({
   if (!systemdTransportProduction.includes('authority.target().as_str()')) {
     fail('systemd SSH transport must append exactly one typed authority target');
   }
+  requireSingleReviewedExecPath(systemdTransportProduction, 'reviewed systemd SSH transport');
+  const tryRestartTransportProduction = tryRestartTransport.source.split('#[cfg(test)]')[0];
+  for (const required of [
+    'impl MutationTransport<SystemdTryRestart> for SshSession',
+    'const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);',
+    'const REQUEST_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);',
+    'const CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);',
+    'const OUTPUT_LIMIT: usize = 8 * 1024;',
+    'LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password try-restart -- ',
+    'Some(message) => match handle_message(',
+    'ChannelMsg::Success if !*accepted =>',
+    'ChannelMsg::Failure if !*accepted && !*execution_evidence =>',
+    'ChannelMsg::Failure => MessageHandling::Complete(',
+    'ChannelMsg::Data { data }',
+    'ChannelMsg::ExtendedData { data, .. } =>',
+    '*execution_evidence = true;',
+    '*output_bytes = output_bytes.saturating_add(data.len());',
+    'if *output_bytes > OUTPUT_LIMIT',
+    'CompletionUnknownReason::OutputLimit',
+    'ChannelMsg::ExitStatus { exit_status } =>',
+    'ChannelMsg::ExitSignal { .. } =>',
+    'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,',
+    'ChannelMsg::Close => MessageHandling::Complete(',
+    '_ if !*accepted => MessageHandling::Complete(',
+    'None => {',
+    'CompletionUnknownReason::Cancelled',
+    'CompletionUnknownReason::Timeout',
+    'authority.target().as_str()',
+  ]) {
+    if (!tryRestartTransportProduction.includes(required)) fail(`try-restart SSH transport policy is missing ${required}`);
+  }
+  requireAbsent(
+    tryRestartTransportProduction,
+    [
+      'sudo', 'pkexec', 'Vec<SystemdServiceUnitName>', 'command: String', 'verb: String',
+      'systemctl restart', 'systemctl start', 'systemctl stop', 'systemctl reload',
+      'ChannelMsg::ExitStatus { exit_status } if *accepted =>',
+      'ChannelMsg::ExitSignal { .. } if *accepted =>',
+      'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } | ChannelMsg::Close',
+    ],
+    'reviewed try-restart SSH transport',
+  );
+  requireSingleReviewedExecPath(
+    tryRestartTransportProduction,
+    'reviewed try-restart SSH transport',
+  );
   for (const required of [
     'plan_service_reset_failed',
     'discard_service_reset_failed',
     'execute_service_reset_failed',
     'ServiceResetFailedPlan',
     'ServiceResetFailedResult',
+    'plan_service_try_restart',
+    'discard_service_try_restart',
+    'execute_service_try_restart',
+    'ServiceTryRestartPlan',
+    'ServiceTryRestartResult',
   ]) {
     if (!rendererSurface.includes(required)
         && !tauriProductionSources.some(({ source }) => source.includes(required))) {
-      fail(`reviewed reset-failed surface is missing ${required}`);
+      fail(`reviewed service mutation surface is missing ${required}`);
     }
   }
 

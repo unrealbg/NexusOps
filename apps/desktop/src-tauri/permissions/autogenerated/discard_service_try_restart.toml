@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discard-service-try-restart"
+description = "Enables the discard_service_try_restart command without any pre-configured scope."
+commands.allow = ["discard_service_try_restart"]
+
+[[permission]]
+identifier = "deny-discard-service-try-restart"
+description = "Denies the discard_service_try_restart command without any pre-configured scope."
+commands.deny = ["discard_service_try_restart"]

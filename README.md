@@ -2,9 +2,9 @@
 
 A native, agentless infrastructure control plane. The current milestone provides host management, verified SSH connections, read-only live Linux monitoring, independent interactive SSH PTY workspaces, and a safe SFTP file workspace with streamed transfers and a bounded remote text editor. Windows is the primary development target; the Tauri shell and Rust services support Windows, macOS and Linux.
 
-No NexusOps software is installed on the remote machine. A working SSH server with an SFTP subsystem, a Linux user account and standard read-only utilities are sufficient. NexusOps requests no sudo, package installation, or service changes. Remote file writes, including text saves, occur only after an exact one-time file plan is shown and approved.
+No NexusOps software is installed on the remote machine. A working SSH server with an SFTP subsystem, a Linux user account and standard utilities are sufficient. NexusOps requests no sudo or package installation. Remote file writes and the two bounded service operations occur only after an exact one-time backend-owned plan is shown and approved.
 
-Services provides an on-demand snapshot of loaded systemd system services and one explicitly approved, bounded reset-failed operation for backend-observed failed units. It supports manual Refresh and local filtering with no background polling or generic service control. See [services architecture](docs/architecture/services.md).
+Services provides an on-demand snapshot of loaded systemd system services plus two explicitly approved, bounded operations: reset-failed for backend-observed failed units and try-restart for backend-observed running units. Each action uses separate one-shot authority, fresh revalidation and a fixed native SSH mapping; there is no generic service control, sudo or background polling. See [services architecture](docs/architecture/services.md).
 
 Network provides an on-demand, read-only snapshot of Linux interface names, operational states, MTUs and IPv4/IPv6 addresses for a connected host. It uses one fixed `ip -j address show` command, manual Refresh and local filtering, with no network controls or background polling. See [network architecture](docs/architecture/network.md).
 
