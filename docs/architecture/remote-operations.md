@@ -1,6 +1,6 @@
 # Remote operation authority foundation
 
-Goal 05A added the native, memory-only foundation. Goal 05B introduced `SystemdResetFailed`; Goal 05D added `SystemdTryRestart`; Goal 05E is the source-review candidate for the third operation-specific semantic, `SystemdReload`. `nexus-operations` and `RemoteSession::execute` remain permanently read-only. `nexus-remote-operations` stays transport-independent; each reviewed SSH adapter implements one typed mutation transport in its own focused module.
+Goal 05A added the native, memory-only foundation. Goal 05B introduced `SystemdResetFailed`; Goal 05D added `SystemdTryRestart`; Goal 05E completed the third operation-specific semantic, `SystemdReload`. `nexus-operations` and `RemoteSession::execute` remain permanently read-only. `nexus-remote-operations` stays transport-independent; each reviewed SSH adapter implements one typed mutation transport in its own focused module.
 
 ## Authority ownership
 
@@ -48,9 +48,6 @@ Audit remains metadata-only. It contains no command, executable, argv, environme
 
 ## Goal boundary
 
-Goals 05B, 05D and the Goal 05E candidate permit exactly nine operation-specific IPC commands and three operation-specific display DTO families. Source policy fixes the three native operation modules and their three SSH adapters while rejecting a fourth operation, generic command strings, argv/environment payloads, generic service verbs, ordinary restart and generic renderer mutation APIs. The current `ServiceEntry.unit` display string is never accepted back as operational input. Goal 05B real-systemd and Goal 05C native-desktop acceptance passed. Goal 05D also passed both native acceptance gates: disposable real-systemd mutation acceptance and Native Windows desktop end-to-end acceptance.
+Goals 05B, 05D and 05E permit exactly nine operation-specific IPC commands and three operation-specific display DTO families. Source policy fixes the three native operation modules and their three SSH adapters while rejecting a fourth operation, generic command strings, argv/environment payloads, generic service verbs, ordinary restart and generic renderer mutation APIs. The current `ServiceEntry.unit` display string is never accepted back as operational input. Goal 05B real-systemd and Goal 05C native-desktop acceptance passed. Goal 05D also passed both native acceptance gates: disposable real-systemd mutation acceptance and Native Windows desktop end-to-end acceptance. Goal 05E passed disposable real-systemd reload acceptance and Native Windows desktop end-to-end acceptance, was merged, and passed post-merge CI.
 
-These completed gates do not authorize future remote operations. The Goal 05E candidate boundary is exactly three native operations and nine operation-specific IPC commands, with no generic service verb or remote mutation command API. Authority remains one-shot and memory-only, bound to the backend-owned target and exact session generation, subject to fresh revalidation, never retried after `OutcomeUnknown`, and recorded only through metadata-only audit.
-
-
-Goal 05E has not passed real-systemd or Native Windows acceptance and is not merged. Those gates remain separate from this candidate documentation.
+These completed gates do not authorize future remote operations. The production boundary is exactly three sealed native operations—`SystemdResetFailed`, `SystemdTryRestart` and `SystemdReload`—and nine operation-specific IPC commands, with no fourth operation, generic service verb, renderer-selected runtime verb, renderer-provided operational target or generic remote mutation API. Authority remains one-shot and memory-only, bound to the backend-owned target and exact host, session and generation, subject to fresh revalidation and the process-wide mutation limit, never retried after `OutcomeUnknown`, and recorded only through metadata-only audit. Completion of Goal 05E does not authorize another native operation or any generic mutation capability.
