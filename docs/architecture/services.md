@@ -32,7 +32,7 @@ LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-as
 
 Planning and post-consume execution each revalidate through a fresh full inventory. The 5-second channel-open, 30-second completion, 2-second cleanup and 8 KiB aggregate-output limits are fixed. `WindowAdjusted` and EOF are non-terminal; exit status or exit signal supplies terminal evidence. Close, timeout, cancellation, session loss or output overflow after possible dispatch yields terminal `OutcomeUnknown`, with no retry. `try-restart` does not start a unit that has become inactive, but a concurrent remote actor can still race observation and dispatch. Every consumed authority attempts one `service.try_restart` / High / User metadata-only audit and one separate best-effort observation. Successful systemctl completion is not an application-health claim.
 
-Goal 05E is a source-review candidate for one further operation-specific High-risk flow. A reload capability exists only for an exact `loaded / active / running / CanReload=yes` row. Planning and execution each repeat the complete inventory and exact capability check. The renderer supplies only the opaque reload observation ID; it never supplies the unit, state, verb, command, risk or timeout. The fixed mapping is:
+Goal 05E adds the completed third operation-specific High-risk flow. A reload capability exists only for an exact `loaded / active / running / CanReload=yes` row. Planning and execution each repeat the complete inventory and exact capability check. The renderer supplies only the opaque reload observation ID; it never supplies the unit, state, verb, command, risk or timeout. The fixed mapping is:
 
 ```sh
 LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password reload -- <STRICT_UNIT>
@@ -58,4 +58,17 @@ Windows desktop UI
 Acceptance used an exact `loaded / active / running` target and one High-risk confirmation. It produced exactly one try-restart dispatch; the service remained `loaded / active / running`; MainPID and InvocationID changed while `NRestarts=0`; SSH remained usable; exactly one metadata-only success audit was recorded; and no automatic retry occurred.
 
 
-Goal 05E real-systemd reload and Native Windows desktop acceptance remain pending and require separate owner authorization after exact-head source review. Implementation validation may use only the established systemctl-absent, non-mutating OpenSSH interoperability path.
+Goal 05E passed deterministic, unit and source-policy validation; real OpenSSH systemctl-absent interoperability; disposable Ubuntu 24.04 real-systemd reload acceptance; Native Windows desktop end-to-end acceptance; merge; and post-merge CI. The accepted production path was:
+
+```text
+Windows desktop UI
+→ operation-specific Tauri IPC
+→ Application
+→ one-shot SystemdReload authority
+→ SshSession
+→ typed SystemdReload transport
+→ real OpenSSH
+→ real systemd
+```
+
+Acceptance used an exact `loaded / active / running / CanReload=yes` target, while a running non-reloadable control received no reload capability and Reload remained distinct from Try-Restart. It produced exactly one reload dispatch and changed the fixture `ExecReload` counter from `0 → 1`; MainPID, InvocationID and the process start timestamp remained unchanged with `NRestarts=0`, and the service and SSH session remained usable. Exactly one metadata-only success audit was recorded, with no automatic retry or restart fallback.
