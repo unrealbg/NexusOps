@@ -8,6 +8,7 @@ use nexus_remote_operations::{
 };
 use nexus_secrets::{Credential, KeyProvider};
 use nexus_terminal::{TerminalChannel, TerminalConnector, TerminalRead};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -45,7 +46,39 @@ struct ServiceControl {
     stall: AtomicBool,
     entered: Semaphore,
     release: Semaphore,
+    replies: std::sync::Mutex<VecDeque<ServiceReply>>,
+    calls: AtomicUsize,
 }
+
+enum ServiceReply {
+    Snapshot(String),
+    Failure,
+}
+
+const DEFAULT_SERVICE_SNAPSHOT: &str = "Id=sshd.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=OpenSSH daemon\nCanStart=no\nCanReload=yes\n\nId=broken.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\nDescription=Broken fixture\nCanStart=yes\nCanReload=no\n\nId=inactive-startable.service\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nDescription=Inactive startable fixture\nCanStart=yes\nCanReload=no\n";
+
+fn start_service_snapshot(active_state: &str, sub_state: &str, can_start: &str) -> String {
+    format!(
+        "Id=inactive-startable.service\nLoadState=loaded\nActiveState={active_state}\nSubState={sub_state}\nDescription=Inactive startable fixture\nCanStart={can_start}\nCanReload=no\n"
+    )
+}
+
+impl TestProvider {
+    fn session(&self, cancel: CancellationToken) -> Arc<TestSession> {
+        Arc::new(TestSession {
+            cancel,
+            monitor: self.monitor.clone(),
+            services: self.services.clone(),
+            network: self.network.clone(),
+            logs: self.logs.clone(),
+            containers: self.containers.clone(),
+            service_mutations: self.service_mutations.clone(),
+            service_outcome: self.service_outcome.clone(),
+            monitor_counter: AtomicUsize::new(0),
+        })
+    }
+}
+
 #[async_trait]
 impl ConnectionProvider for TestProvider {
     async fn connect(
@@ -59,17 +92,7 @@ impl ConnectionProvider for TestProvider {
             // Intentionally ignore cancellation to exercise the application generation guard.
             self.release.notified().await;
         }
-        Ok(Arc::new(TestSession {
-            cancel,
-            monitor: self.monitor.clone(),
-            services: self.services.clone(),
-            network: self.network.clone(),
-            logs: self.logs.clone(),
-            containers: self.containers.clone(),
-            service_mutations: self.service_mutations.clone(),
-            service_outcome: self.service_outcome.clone(),
-            monitor_counter: AtomicUsize::new(0),
-        }))
+        Ok(self.session(cancel))
     }
 }
 struct TestSession {
@@ -128,12 +151,22 @@ impl RemoteSession for TestSession {
                 r#"{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","image":"example:1","name":"synthetic-container","state":"running","status":"Up 1 minute","ports":"","networks":"bridge"}"#
             },
             ReadOnlyCommand::SystemServices => {
+                self.services.calls.fetch_add(1, Ordering::SeqCst);
                 if self.services.stall.load(Ordering::SeqCst) {
                     self.services.entered.add_permits(1);
                     let permit = self.services.release.acquire().await.expect("release");
                     permit.forget();
                 }
-                "Id=sshd.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=OpenSSH daemon\nCanStart=no\nCanReload=yes\n\nId=broken.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\nDescription=Broken fixture\nCanStart=yes\nCanReload=no\n\nId=inactive-startable.service\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nDescription=Inactive startable fixture\nCanStart=yes\nCanReload=no\n"
+                match self.services.replies.lock().unwrap().pop_front() {
+                    Some(ServiceReply::Snapshot(snapshot)) => return Ok(snapshot),
+                    Some(ServiceReply::Failure) => {
+                        return Err(AppError::new(
+                            ErrorCode::Discovery,
+                            "Controlled service inventory failure.",
+                        ));
+                    }
+                    None => DEFAULT_SERVICE_SNAPSHOT,
+                }
             },
             ReadOnlyCommand::NetworkAddresses => {
                 if self.network.stall.load(Ordering::SeqCst) {
@@ -271,21 +304,29 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
             stall: AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
+            replies: std::sync::Mutex::new(VecDeque::new()),
+            calls: AtomicUsize::new(0),
         }),
         logs: Arc::new(ServiceControl {
             stall: AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
+            replies: std::sync::Mutex::new(VecDeque::new()),
+            calls: AtomicUsize::new(0),
         }),
         containers: Arc::new(ServiceControl {
             stall: AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
+            replies: std::sync::Mutex::new(VecDeque::new()),
+            calls: AtomicUsize::new(0),
         }),
         network: Arc::new(ServiceControl {
             stall: AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
+            replies: std::sync::Mutex::new(VecDeque::new()),
+            calls: AtomicUsize::new(0),
         }),
         service_mutations: Arc::new(AtomicUsize::new(0)),
         service_outcome: Arc::new(std::sync::Mutex::new(
@@ -343,6 +384,41 @@ fn credential() -> CredentialInput {
         private_key: None,
         passphrase: None,
     }
+}
+
+fn queue_service_replies(provider: &TestProvider, replies: impl IntoIterator<Item = ServiceReply>) {
+    provider.services.replies.lock().unwrap().extend(replies);
+}
+
+async fn add_connected_host(app: &Application) -> (HostId, HostSessionId) {
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    (host.id, session)
+}
+
+async fn mint_start_plan(
+    app: &Application,
+    host_id: HostId,
+    session: HostSessionId,
+) -> (ServiceObservationId, ServiceStartPlan) {
+    let snapshot = app.list_host_services(host_id, session).await.unwrap();
+    let observation = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "inactive-startable.service")
+        .and_then(|entry| entry.start_observation_id)
+        .expect("Start observation");
+    let plan = app
+        .plan_service_start(host_id, session, observation)
+        .await
+        .unwrap();
+    (observation, plan)
 }
 
 fn terminal_size() -> TerminalSize {
@@ -1263,6 +1339,444 @@ async fn four_operation_matrices_fail_closed_and_start_is_one_shot() {
     ] {
         assert!(!persisted.contains(forbidden), "audit leaked {forbidden}");
     }
+}
+
+#[tokio::test]
+async fn start_revalidation_state_changes_fail_without_dispatch_and_consume_authority() {
+    for (active_state, sub_state, can_start) in [
+        ("active", "running", "yes"),
+        ("inactive", "dead", "no"),
+        ("failed", "failed", "yes"),
+    ] {
+        let (directory, app, provider) = setup(false);
+        let (host, session) = add_connected_host(app.as_ref()).await;
+        let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+        let calls_before_execution = provider.services.calls.load(Ordering::SeqCst);
+        queue_service_replies(
+            provider.as_ref(),
+            [ServiceReply::Snapshot(start_service_snapshot(
+                active_state,
+                sub_state,
+                can_start,
+            ))],
+        );
+
+        let result = app
+            .execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap();
+        assert_eq!(result.outcome, ServiceStartOutcome::Failed);
+        assert_eq!(result.audit_status, ServiceStartAuditStatus::Persisted);
+        assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            provider.services.calls.load(Ordering::SeqCst),
+            calls_before_execution + 2,
+            "execution revalidation and one post-observation must both be fresh"
+        );
+        let events = audit_events(directory.path())
+            .into_iter()
+            .filter(|event| event.operation.kind == "service.start")
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].operation.risk, OperationRisk::High);
+        assert_eq!(events[0].actor, AuditActor::User);
+        assert_eq!(events[0].outcome, AuditOutcome::Failed);
+        assert_eq!(
+            app.execute_service_start(host, session, plan.plan_id)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+    }
+}
+
+#[tokio::test]
+async fn start_maps_transport_certainty_to_public_and_audit_outcomes_without_retry() {
+    let cases = [
+        (
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+            ServiceStartOutcome::Failed,
+            AuditOutcome::Failed,
+        ),
+        (
+            MutationTransportOutcome::NotDispatched(
+                nexus_remote_operations::NotDispatchedReason::Cancelled,
+            ),
+            ServiceStartOutcome::Cancelled,
+            AuditOutcome::Cancelled,
+        ),
+        (
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::Timeout,
+            ),
+            ServiceStartOutcome::OutcomeUnknown,
+            AuditOutcome::OutcomeUnknown,
+        ),
+    ];
+    for (transport_outcome, expected_outcome, expected_audit) in cases {
+        let (directory, app, provider) = setup(false);
+        let (host, session) = add_connected_host(app.as_ref()).await;
+        let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+        *provider.service_outcome.lock().unwrap() = transport_outcome;
+
+        let result = app
+            .execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap();
+        assert_eq!(result.outcome, expected_outcome);
+        assert_eq!(result.audit_status, ServiceStartAuditStatus::Persisted);
+        assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+        let events = audit_events(directory.path())
+            .into_iter()
+            .filter(|event| event.operation.kind == "service.start")
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].outcome, expected_audit);
+        assert_eq!(
+            app.execute_service_start(host, session, plan.plan_id)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn start_audit_failure_preserves_success_and_consumed_authority() {
+    let (directory, app, provider) = setup(false);
+    let (host, session) = add_connected_host(app.as_ref()).await;
+    let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+    let audit_path = directory.path().join("audit.jsonl");
+    std::fs::remove_file(&audit_path).unwrap();
+    std::fs::create_dir(&audit_path).unwrap();
+
+    let result = app
+        .execute_service_start(host, session, plan.plan_id)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, ServiceStartOutcome::Success);
+    assert_eq!(result.audit_status, ServiceStartAuditStatus::Failed);
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        app.execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn start_post_observation_failure_does_not_rewrite_success_or_retry() {
+    let (_directory, app, provider) = setup(false);
+    let (host, session) = add_connected_host(app.as_ref()).await;
+    let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+    queue_service_replies(
+        provider.as_ref(),
+        [
+            ServiceReply::Snapshot(DEFAULT_SERVICE_SNAPSHOT.to_owned()),
+            ServiceReply::Failure,
+        ],
+    );
+
+    let result = app
+        .execute_service_start(host, session, plan.plan_id)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, ServiceStartOutcome::Success);
+    assert_eq!(result.audit_status, ServiceStartAuditStatus::Persisted);
+    assert_eq!(
+        result.post_observation_status,
+        ServiceStartPostObservationStatus::Unavailable
+    );
+    assert!(result.snapshot.is_none());
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        app.execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn start_cancellation_during_revalidation_is_cancelled_audited_and_not_dispatched() {
+    let (directory, app, provider) = setup(false);
+    let (host, session) = add_connected_host(app.as_ref()).await;
+    let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+    provider.services.stall.store(true, Ordering::SeqCst);
+    let execution = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { app.execute_service_start(host, session, plan.plan_id).await })
+    };
+    provider.services.entered.acquire().await.unwrap().forget();
+    app.slot(host).await.data.lock().await.cancel.cancel();
+    provider.services.stall.store(false, Ordering::SeqCst);
+    provider.services.release.add_permits(1);
+
+    let result = execution.await.unwrap().unwrap();
+    assert_eq!(result.outcome, ServiceStartOutcome::Cancelled);
+    assert_eq!(result.audit_status, ServiceStartAuditStatus::Persisted);
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+    let events = audit_events(directory.path())
+        .into_iter()
+        .filter(|event| event.operation.kind == "service.start")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].outcome, AuditOutcome::Cancelled);
+    assert_eq!(
+        app.execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+}
+
+#[tokio::test]
+async fn start_rejects_stale_observation_and_stale_session_without_dispatch() {
+    let (_directory, app, provider) = setup(false);
+    let (host, session) = add_connected_host(app.as_ref()).await;
+    let first = app.list_host_services(host, session).await.unwrap();
+    let stale_observation = first
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "inactive-startable.service")
+        .unwrap()
+        .start_observation_id
+        .unwrap();
+    let current = app.list_host_services(host, session).await.unwrap();
+    assert_eq!(
+        app.plan_service_start(host, session, stale_observation)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    let current_observation = current
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "inactive-startable.service")
+        .unwrap()
+        .start_observation_id
+        .unwrap();
+    let plan = app
+        .plan_service_start(host, session, current_observation)
+        .await
+        .unwrap();
+    app.disconnect_host(host).await.unwrap();
+    assert_eq!(
+        app.execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn start_rejects_wrong_generation_and_disconnected_state_without_dispatch() {
+    for disconnected in [false, true] {
+        let (_directory, app, provider) = setup(false);
+        let (host, session) = add_connected_host(app.as_ref()).await;
+        let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+        let slot = app.slot(host).await;
+        let mut data = slot.data.lock().await;
+        if disconnected {
+            data.view.state = ConnectionState::Disconnected;
+        } else {
+            data.generation = data.generation.wrapping_add(1);
+        }
+        drop(data);
+
+        assert_eq!(
+            app.execute_service_start(host, session, plan.plan_id)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn start_transport_replacement_during_revalidation_fails_without_dispatch() {
+    let (directory, app, provider) = setup(false);
+    let (host, session) = add_connected_host(app.as_ref()).await;
+    let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+    provider.services.stall.store(true, Ordering::SeqCst);
+    let execution = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move { app.execute_service_start(host, session, plan.plan_id).await })
+    };
+    provider.services.entered.acquire().await.unwrap().forget();
+    let slot = app.slot(host).await;
+    let mut data = slot.data.lock().await;
+    let replacement: Arc<dyn ConnectedTransport> = provider.session(data.cancel.clone());
+    data.transport = Some(replacement);
+    drop(data);
+    provider.services.stall.store(false, Ordering::SeqCst);
+    provider.services.release.add_permits(1);
+
+    let result = execution.await.unwrap().unwrap();
+    assert_eq!(result.outcome, ServiceStartOutcome::Failed);
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+    let events = audit_events(directory.path())
+        .into_iter()
+        .filter(|event| event.operation.kind == "service.start")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].outcome, AuditOutcome::Failed);
+    assert_eq!(
+        app.execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+}
+
+#[tokio::test]
+async fn start_shutdown_sealing_revokes_plan_and_prevents_dispatch() {
+    let (_directory, app, provider) = setup(false);
+    let (host, session) = add_connected_host(app.as_ref()).await;
+    let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+    app.remote_operations.begin_shutdown().unwrap();
+    assert_eq!(
+        app.execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn start_per_host_busy_preserves_plan_for_discard() {
+    let (_directory, app, provider) = setup(false);
+    let (host, session) = add_connected_host(app.as_ref()).await;
+    let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+    let held = app.remote_operations.lifecycle_guard(host).await.unwrap();
+    assert_eq!(
+        app.execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+    drop(held);
+    assert!(
+        app.discard_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn start_global_busy_is_non_queuing_and_preserves_other_host_plan() {
+    let (_directory, app, provider) = setup(false);
+    let (first_host, first_session) = add_connected_host(app.as_ref()).await;
+    let (second_host, second_session) = add_connected_host(app.as_ref()).await;
+    let (_, first_plan) = mint_start_plan(app.as_ref(), first_host, first_session).await;
+    let (_, second_plan) = mint_start_plan(app.as_ref(), second_host, second_session).await;
+    provider.services.stall.store(true, Ordering::SeqCst);
+    let first_execution = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            app.execute_service_start(first_host, first_session, first_plan.plan_id)
+                .await
+        })
+    };
+    provider.services.entered.acquire().await.unwrap().forget();
+    assert_eq!(
+        app.execute_service_start(second_host, second_session, second_plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+    provider.services.stall.store(false, Ordering::SeqCst);
+    provider.services.release.add_permits(1);
+    assert_eq!(
+        first_execution.await.unwrap().unwrap().outcome,
+        ServiceStartOutcome::Success
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 1);
+    assert!(
+        app.discard_service_start(second_host, second_session, second_plan.plan_id)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn start_expired_plan_fails_closed_without_dispatch() {
+    let (_directory, app, provider) = setup(false);
+    let (host, session) = add_connected_host(app.as_ref()).await;
+    let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+    tokio::time::advance(nexus_remote_operations::PLAN_TTL).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        app.execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn start_discard_and_execute_race_has_exactly_one_authority_owner() {
+    let (_directory, app, provider) = setup(false);
+    let (host, session) = add_connected_host(app.as_ref()).await;
+    let (_, plan) = mint_start_plan(app.as_ref(), host, session).await;
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let execution = {
+        let app = Arc::clone(&app);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            app.execute_service_start(host, session, plan.plan_id).await
+        })
+    };
+    let discard = {
+        let app = Arc::clone(&app);
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            app.discard_service_start(host, session, plan.plan_id).await
+        })
+    };
+    barrier.wait().await;
+    let execution = execution.await.unwrap();
+    let discard = discard.await.unwrap();
+    let dispatched = provider.service_mutations.load(Ordering::SeqCst);
+    assert!(dispatched <= 1);
+    assert!(execution.is_ok() || discard == Ok(true));
+    assert_eq!(
+        app.execute_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Conflict
+    );
+    assert!(
+        !app.discard_service_start(host, session, plan.plan_id)
+            .await
+            .unwrap()
+    );
 }
 
 #[tokio::test]
