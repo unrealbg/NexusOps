@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use nexus_operations::{ReadOnlyCommand, RemoteSession};
 use nexus_remote_operations::{
     ConsumedAuthority, MutationTransport, MutationTransportOutcome, SystemdReload,
-    SystemdResetFailed, SystemdTryRestart,
+    SystemdResetFailed, SystemdStart, SystemdTryRestart,
 };
 use nexus_secrets::{Credential, KeyProvider};
 use nexus_terminal::{TerminalChannel, TerminalConnector, TerminalRead};
@@ -133,7 +133,7 @@ impl RemoteSession for TestSession {
                     let permit = self.services.release.acquire().await.expect("release");
                     permit.forget();
                 }
-                "Id=sshd.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=OpenSSH daemon\nCanReload=yes\n\nId=broken.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\nDescription=Broken fixture\nCanReload=no\n"
+                "Id=sshd.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=OpenSSH daemon\nCanStart=no\nCanReload=yes\n\nId=broken.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\nDescription=Broken fixture\nCanStart=yes\nCanReload=no\n\nId=inactive-startable.service\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nDescription=Inactive startable fixture\nCanStart=yes\nCanReload=no\n"
             },
             ReadOnlyCommand::NetworkAddresses => {
                 if self.network.stall.load(Ordering::SeqCst) {
@@ -181,6 +181,17 @@ impl MutationTransport<SystemdReload> for TestSession {
     async fn dispatch(
         &self,
         _: &ConsumedAuthority<SystemdReload>,
+        _: CancellationToken,
+    ) -> MutationTransportOutcome {
+        self.service_mutations.fetch_add(1, Ordering::SeqCst);
+        *self.service_outcome.lock().unwrap()
+    }
+}
+#[async_trait]
+impl MutationTransport<SystemdStart> for TestSession {
+    async fn dispatch(
+        &self,
+        _: &ConsumedAuthority<SystemdStart>,
         _: CancellationToken,
     ) -> MutationTransportOutcome {
         self.service_mutations.fetch_add(1, Ordering::SeqCst);
@@ -1050,6 +1061,211 @@ async fn reload_capability_coexists_with_try_restart_and_remains_operation_speci
 }
 
 #[tokio::test]
+async fn four_operation_matrices_fail_closed_and_start_is_one_shot() {
+    let (directory, app, session_transport) = setup(false);
+    let host = app.save_host(input(), Some(credential())).await.unwrap();
+    app.connect_host(host.id).await.unwrap();
+    let session = app
+        .get_session(host.id)
+        .await
+        .unwrap()
+        .host_session_id
+        .unwrap();
+    let snapshot = app.list_host_services(host.id, session).await.unwrap();
+    let failed = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "broken.service")
+        .unwrap();
+    let running = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "sshd.service")
+        .unwrap();
+    let inactive = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "inactive-startable.service")
+        .unwrap();
+    let reset = failed.reset_failed_observation_id.unwrap();
+    let restart = running.try_restart_observation_id.unwrap();
+    let reload = running.reload_observation_id.unwrap();
+    let start = inactive.start_observation_id.unwrap();
+    assert!(failed.start_observation_id.is_none());
+    assert!(running.start_observation_id.is_none());
+    assert!(inactive.reset_failed_observation_id.is_none());
+    assert!(inactive.try_restart_observation_id.is_none());
+    assert!(inactive.reload_observation_id.is_none());
+
+    for observation in [restart, reload, start] {
+        assert!(
+            app.plan_service_reset_failed(host.id, session, observation)
+                .await
+                .is_err()
+        );
+    }
+    for observation in [reset, reload, start] {
+        assert!(
+            app.plan_service_try_restart(host.id, session, observation)
+                .await
+                .is_err()
+        );
+    }
+    for observation in [reset, restart, start] {
+        assert!(
+            app.plan_service_reload(host.id, session, observation)
+                .await
+                .is_err()
+        );
+    }
+    for observation in [reset, restart, reload] {
+        assert!(
+            app.plan_service_start(host.id, session, observation)
+                .await
+                .is_err()
+        );
+    }
+
+    let reset_plan = app
+        .plan_service_reset_failed(host.id, session, reset)
+        .await
+        .unwrap();
+    assert!(
+        app.execute_service_try_restart(host.id, session, reset_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_service_reload(host.id, session, reset_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_service_start(host.id, session, reset_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.discard_service_reset_failed(host.id, session, reset_plan.plan_id)
+            .await
+            .unwrap()
+    );
+
+    let restart_plan = app
+        .plan_service_try_restart(host.id, session, restart)
+        .await
+        .unwrap();
+    assert!(
+        app.execute_service_reset_failed(host.id, session, restart_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_service_reload(host.id, session, restart_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_service_start(host.id, session, restart_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.discard_service_try_restart(host.id, session, restart_plan.plan_id)
+            .await
+            .unwrap()
+    );
+
+    let reload_plan = app
+        .plan_service_reload(host.id, session, reload)
+        .await
+        .unwrap();
+    assert!(
+        app.execute_service_reset_failed(host.id, session, reload_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_service_try_restart(host.id, session, reload_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_service_start(host.id, session, reload_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.discard_service_reload(host.id, session, reload_plan.plan_id)
+            .await
+            .unwrap()
+    );
+
+    let start_plan = app
+        .plan_service_start(host.id, session, start)
+        .await
+        .unwrap();
+    assert_eq!(start_plan.unit, "inactive-startable.service");
+    assert_eq!(start_plan.risk, OperationRisk::High);
+    assert!(start_plan.can_start);
+    assert!(
+        app.execute_service_reset_failed(host.id, session, start_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_service_try_restart(host.id, session, start_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert!(
+        app.execute_service_reload(host.id, session, start_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        session_transport.service_mutations.load(Ordering::SeqCst),
+        0
+    );
+    let result = app
+        .execute_service_start(host.id, session, start_plan.plan_id)
+        .await
+        .unwrap();
+    assert_eq!(result.outcome, ServiceStartOutcome::Success);
+    assert_eq!(result.audit_status, ServiceStartAuditStatus::Persisted);
+    assert_eq!(
+        result.post_observation_status,
+        ServiceStartPostObservationStatus::Refreshed
+    );
+    assert!(
+        app.execute_service_start(host.id, session, start_plan.plan_id)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        session_transport.service_mutations.load(Ordering::SeqCst),
+        1
+    );
+    let event = audit_events(directory.path())
+        .into_iter()
+        .find(|event| event.operation.kind == "service.start")
+        .expect("start audit");
+    assert_eq!(event.operation.risk, OperationRisk::High);
+    assert_eq!(event.actor, AuditActor::User);
+    assert_eq!(event.outcome, AuditOutcome::Success);
+    let persisted = std::fs::read_to_string(directory.path().join("audit.jsonl")).unwrap();
+    for forbidden in [
+        "inactive-startable.service",
+        &start_plan.plan_id.0.to_string(),
+        &start.0.to_string(),
+        "systemctl",
+        "start --",
+    ] {
+        assert!(!persisted.contains(forbidden), "audit leaked {forbidden}");
+    }
+}
+
+#[tokio::test]
 async fn reset_failed_discard_and_session_turnover_revoke_one_shot_authority() {
     let (_dir, app, provider) = setup(false);
     let host = app.save_host(input(), Some(credential())).await.unwrap();
@@ -1817,6 +2033,16 @@ impl MutationTransport<SystemdReload> for SlowRefreshSession {
     async fn dispatch(
         &self,
         _: &ConsumedAuthority<SystemdReload>,
+        _: CancellationToken,
+    ) -> MutationTransportOutcome {
+        MutationTransportOutcome::CompletionConfirmed { success: true }
+    }
+}
+#[async_trait]
+impl MutationTransport<SystemdStart> for SlowRefreshSession {
+    async fn dispatch(
+        &self,
+        _: &ConsumedAuthority<SystemdStart>,
         _: CancellationToken,
     ) -> MutationTransportOutcome {
         MutationTransportOutcome::CompletionConfirmed { success: true }
@@ -2764,6 +2990,16 @@ impl MutationTransport<SystemdReload> for LifecycleTransport {
     async fn dispatch(
         &self,
         _: &ConsumedAuthority<SystemdReload>,
+        _: CancellationToken,
+    ) -> MutationTransportOutcome {
+        MutationTransportOutcome::CompletionConfirmed { success: true }
+    }
+}
+#[async_trait]
+impl MutationTransport<SystemdStart> for LifecycleTransport {
+    async fn dispatch(
+        &self,
+        _: &ConsumedAuthority<SystemdStart>,
         _: CancellationToken,
     ) -> MutationTransportOutcome {
         MutationTransportOutcome::CompletionConfirmed { success: true }

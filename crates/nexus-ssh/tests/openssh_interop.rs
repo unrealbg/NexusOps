@@ -9,7 +9,8 @@ use nexus_remote_operations::{
     AuthorityBinding, AuthorityRevalidator, ConsumedAuthority, ExecutionTerminal,
     MutationTransportOutcome, PlanDraft, RemoteOperationFoundation, SystemdReload,
     SystemdReloadPreconditions, SystemdResetFailed, SystemdResetFailedPreconditions,
-    SystemdServiceUnitName, SystemdTryRestart, SystemdTryRestartPreconditions,
+    SystemdServiceUnitName, SystemdStart, SystemdStartPreconditions, SystemdTryRestart,
+    SystemdTryRestartPreconditions,
 };
 use nexus_secrets::Credential;
 use nexus_ssh::{KnownHosts, SshProvider};
@@ -104,6 +105,7 @@ async fn hostname(session: &dyn RemoteSession) -> String {
 struct AllowResetFailed;
 struct AllowTryRestart;
 struct AllowReload;
+struct AllowStart;
 
 #[async_trait::async_trait]
 impl AuthorityRevalidator<SystemdResetFailed> for AllowResetFailed {
@@ -127,6 +129,14 @@ impl AuthorityRevalidator<SystemdTryRestart> for AllowTryRestart {
 impl AuthorityRevalidator<SystemdReload> for AllowReload {
     type DispatchGuard = ();
     async fn revalidate(&self, _: &ConsumedAuthority<SystemdReload>) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl AuthorityRevalidator<SystemdStart> for AllowStart {
+    type DispatchGuard = ();
+    async fn revalidate(&self, _: &ConsumedAuthority<SystemdStart>) -> Result<(), AppError> {
         Ok(())
     }
 }
@@ -445,6 +455,60 @@ async fn openssh_systemd_reload_non_mutating_completion() {
             receipt.id,
             binding,
             &AllowReload,
+            session.as_ref(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("execute non-mutating diagnostic operation");
+    assert_eq!(
+        execution.terminal,
+        ExecutionTerminal::Transport(MutationTransportOutcome::CompletionConfirmed {
+            success: false,
+        })
+    );
+    assert!(!session.is_closed());
+    assert!(!hostname(session.as_ref()).await.trim().is_empty());
+    session.disconnect().await.expect("disconnect");
+}
+
+#[tokio::test]
+#[ignore = "requires systemctl-absence gate from tools/openssh-fixture/Run-OpenSshInterop.ps1"]
+async fn openssh_systemd_start_non_mutating_completion() {
+    assert_eq!(
+        env::var("NEXUS_OPENSSH_SYSTEMCTL_ABSENT").as_deref(),
+        Ok("1"),
+        "fixture orchestration must independently prove systemctl is absent"
+    );
+    let fixture = Fixture::from_env();
+    let store = Arc::new(KnownHosts::open(&fixture.pin_db).expect("known hosts"));
+    let provider = SshProvider::new(store);
+    let host = fixture.host(AuthenticationMethod::PrivateKey);
+    let session = provider
+        .connect(&host, fixture.key(false, None), CancellationToken::new())
+        .await
+        .expect("production SSH connection");
+    let binding = AuthorityBinding {
+        host_id: host.id,
+        host_session_id: HostSessionId::new(),
+        generation: 1,
+    };
+    let foundation = RemoteOperationFoundation::default();
+    let receipt = foundation
+        .plan::<SystemdStart>(
+            PlanDraft::new(
+                binding,
+                SystemdServiceUnitName::parse("nexusops-diagnostic.service").unwrap(),
+                SystemdStartPreconditions,
+                (),
+            ),
+            binding,
+        )
+        .expect("plan");
+    let execution = foundation
+        .execute::<SystemdStart, _, _>(
+            receipt.id,
+            binding,
+            &AllowStart,
             session.as_ref(),
             CancellationToken::new(),
         )

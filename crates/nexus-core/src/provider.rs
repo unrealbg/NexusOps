@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use nexus_model::{AppError, Host};
 use nexus_operations::RemoteSession;
 use nexus_remote_operations::{
-    MutationTransport, SystemdReload, SystemdResetFailed, SystemdTryRestart,
+    MutationTransport, SystemdReload, SystemdResetFailed, SystemdStart, SystemdTryRestart,
 };
 use nexus_secrets::Credential;
 use nexus_sftp::SftpConnector;
@@ -19,6 +19,7 @@ pub trait ConnectedTransport:
     + MutationTransport<SystemdResetFailed>
     + MutationTransport<SystemdTryRestart>
     + MutationTransport<SystemdReload>
+    + MutationTransport<SystemdStart>
 {
 }
 impl<T> ConnectedTransport for T where
@@ -28,6 +29,7 @@ impl<T> ConnectedTransport for T where
         + MutationTransport<SystemdResetFailed>
         + MutationTransport<SystemdTryRestart>
         + MutationTransport<SystemdReload>
+        + MutationTransport<SystemdStart>
         + ?Sized
 {
 }

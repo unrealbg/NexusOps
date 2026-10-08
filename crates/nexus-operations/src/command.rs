@@ -41,7 +41,7 @@ impl ReadOnlyCommand {
                 r#"LC_ALL=C docker --host unix:///var/run/docker.sock container ls --last 64 --no-trunc --format '{"id":{{json .ID}},"image":{{json .Image}},"name":{{json .Names}},"state":{{json .State}},"status":{{json .Status}},"ports":{{json .Ports}},"networks":{{json .Networks}}}'"#
             }
             Self::SystemServices => {
-                "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=CanReload --property=Description show"
+                "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=CanStart --property=CanReload --property=Description show"
             }
         }
     }
@@ -121,7 +121,7 @@ mod tests {
         let command = ReadOnlyCommand::SystemServices;
         assert_eq!(
             command.command(),
-            "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=CanReload --property=Description show"
+            "LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --all --type=service --property=Id --property=LoadState --property=ActiveState --property=SubState --property=CanStart --property=CanReload --property=Description show"
         );
         assert_eq!(command.kind(), "services.list");
         assert_eq!(command.operation().risk, OperationRisk::ReadOnly);
