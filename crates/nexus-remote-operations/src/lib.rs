@@ -7,6 +7,7 @@ mod admission;
 mod authority;
 mod outcome;
 mod store;
+mod systemd_reload;
 mod systemd_reset_failed;
 mod systemd_try_restart;
 
@@ -18,6 +19,7 @@ pub use outcome::{
     MutationTransport, MutationTransportOutcome, NotDispatchedReason, RemoteOperationOutcome,
 };
 pub use store::{AuthorityStore, PLAN_TTL};
+pub use systemd_reload::{SystemdReload, SystemdReloadPreconditions};
 pub use systemd_reset_failed::{
     SystemdResetFailed, SystemdResetFailedPreconditions, SystemdServiceUnitName,
 };

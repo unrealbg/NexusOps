@@ -17,6 +17,8 @@ import type {
   ServiceResetFailedResult,
   ServiceTryRestartPlan,
   ServiceTryRestartResult,
+  ServiceReloadPlan,
+  ServiceReloadResult,
   SshEndpointTrust,
   HostSession,
   TerminalOutputBatch,
@@ -140,6 +142,25 @@ export const servicesApi = {
     hostSessionId: string,
     planId: RemoteOperationPlanId,
   ) => request<ServiceTryRestartResult>('execute_service_try_restart', {
+    hostId, hostSessionId, planId,
+  }),
+  planReload: (
+    hostId: string,
+    hostSessionId: string,
+    serviceObservationId: ServiceObservationId,
+  ) => request<ServiceReloadPlan>('plan_service_reload', {
+    hostId, hostSessionId, serviceObservationId,
+  }),
+  discardReload: (
+    hostId: string,
+    hostSessionId: string,
+    planId: RemoteOperationPlanId,
+  ) => request<boolean>('discard_service_reload', { hostId, hostSessionId, planId }),
+  executeReload: (
+    hostId: string,
+    hostSessionId: string,
+    planId: RemoteOperationPlanId,
+  ) => request<ServiceReloadResult>('execute_service_reload', {
     hostId, hostSessionId, planId,
   }),
 };

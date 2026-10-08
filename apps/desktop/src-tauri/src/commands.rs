@@ -6,10 +6,11 @@ use nexus_core::Application;
 use nexus_model::{
     AppError, ContainerSnapshot, Host, HostId, HostInput, HostKeyChallenge, HostKeyRotationPlan,
     HostKeyRotationPlanId, HostMonitorSample, HostSession, HostSessionId, NetworkSnapshot,
-    RemoteOperationPlanId, ServiceObservationId, ServiceResetFailedPlan, ServiceResetFailedResult,
-    ServiceSnapshot, ServiceTryRestartPlan, ServiceTryRestartResult, SshEndpointTrust,
-    SystemJournalSnapshot, TerminalOutputBatch, TerminalSession, TerminalSessionId, TerminalSize,
-    UpdateAnnouncementId, UpdateOperationSnapshot, VerifiedArtifactId,
+    RemoteOperationPlanId, ServiceObservationId, ServiceReloadPlan, ServiceReloadResult,
+    ServiceResetFailedPlan, ServiceResetFailedResult, ServiceSnapshot, ServiceTryRestartPlan,
+    ServiceTryRestartResult, SshEndpointTrust, SystemJournalSnapshot, TerminalOutputBatch,
+    TerminalSession, TerminalSessionId, TerminalSize, UpdateAnnouncementId,
+    UpdateOperationSnapshot, VerifiedArtifactId,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -300,6 +301,45 @@ pub async fn execute_service_try_restart(
 ) -> Result<ServiceTryRestartResult, AppError> {
     let _permit = lifecycle.admit()?;
     app.execute_service_try_restart(host_id, host_session_id, plan_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn plan_service_reload(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    service_observation_id: ServiceObservationId,
+) -> Result<ServiceReloadPlan, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.plan_service_reload(host_id, host_session_id, service_observation_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn discard_service_reload(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    plan_id: RemoteOperationPlanId,
+) -> Result<bool, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.discard_service_reload(host_id, host_session_id, plan_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn execute_service_reload(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    plan_id: RemoteOperationPlanId,
+) -> Result<ServiceReloadResult, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.execute_service_reload(host_id, host_session_id, plan_id)
         .await
 }
 

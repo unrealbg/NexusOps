@@ -2,8 +2,8 @@ use nexus_model::{
     AppError, ErrorCode, HostId, HostSessionId, ServiceObservationId, ServiceSnapshot,
 };
 use nexus_remote_operations::{
-    AuthorityBinding, SystemdResetFailedPreconditions, SystemdServiceUnitName,
-    SystemdTryRestartPreconditions,
+    AuthorityBinding, SystemdReloadPreconditions, SystemdResetFailedPreconditions,
+    SystemdServiceUnitName, SystemdTryRestartPreconditions,
 };
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 use tokio::time::Instant;
@@ -25,9 +25,16 @@ pub(crate) struct TryRestartObservation {
 }
 
 #[derive(Clone)]
+pub(crate) struct ReloadObservation {
+    pub unit: SystemdServiceUnitName,
+    pub preconditions: SystemdReloadPreconditions,
+}
+
+#[derive(Clone)]
 enum ActionableServiceObservation {
     ResetFailed(ResetFailedObservation),
     TryRestart(TryRestartObservation),
+    Reload(ReloadObservation),
 }
 
 struct ObservationSet {
@@ -90,6 +97,7 @@ impl ServiceObservationStore {
         for entry in &mut snapshot.entries {
             entry.reset_failed_observation_id = None;
             entry.try_restart_observation_id = None;
+            entry.reload_observation_id = None;
             let Ok(unit) = SystemdServiceUnitName::parse(&entry.unit) else {
                 continue;
             };
@@ -118,8 +126,24 @@ impl ServiceObservationStore {
                 entries.insert(
                     id,
                     ActionableServiceObservation::TryRestart(TryRestartObservation {
-                        unit,
+                        unit: unit.clone(),
                         preconditions: SystemdTryRestartPreconditions,
+                    }),
+                );
+            }
+            if SystemdReloadPreconditions.matches(
+                &entry.load_state,
+                &entry.active_state,
+                &entry.sub_state,
+                entry.can_reload,
+            ) {
+                let id = ServiceObservationId::new();
+                entry.reload_observation_id = Some(id);
+                entries.insert(
+                    id,
+                    ActionableServiceObservation::Reload(ReloadObservation {
+                        unit: unit.clone(),
+                        preconditions: SystemdReloadPreconditions,
                     }),
                 );
             }
@@ -158,6 +182,7 @@ impl ServiceObservationStore {
         match self.resolve(id, expected)? {
             ActionableServiceObservation::ResetFailed(value) => Ok(value),
             ActionableServiceObservation::TryRestart(_) => Err(stale()),
+            ActionableServiceObservation::Reload(_) => Err(stale()),
         }
     }
 
@@ -169,6 +194,19 @@ impl ServiceObservationStore {
         match self.resolve(id, expected)? {
             ActionableServiceObservation::TryRestart(value) => Ok(value),
             ActionableServiceObservation::ResetFailed(_) => Err(stale()),
+            ActionableServiceObservation::Reload(_) => Err(stale()),
+        }
+    }
+
+    pub fn resolve_reload(
+        &self,
+        id: ServiceObservationId,
+        expected: AuthorityBinding,
+    ) -> Result<ReloadObservation, AppError> {
+        match self.resolve(id, expected)? {
+            ActionableServiceObservation::Reload(value) => Ok(value),
+            ActionableServiceObservation::ResetFailed(_)
+            | ActionableServiceObservation::TryRestart(_) => Err(stale()),
         }
     }
 
@@ -296,8 +334,10 @@ mod tests {
                 active_state: "failed".into(),
                 sub_state: "failed".into(),
                 description: "fixture".into(),
+                can_reload: false,
                 reset_failed_observation_id: None,
                 try_restart_observation_id: None,
+                reload_observation_id: None,
             }],
         }
     }
@@ -337,8 +377,10 @@ mod tests {
             active_state: "active".into(),
             sub_state: "running".into(),
             description: "active".into(),
+            can_reload: true,
             reset_failed_observation_id: None,
             try_restart_observation_id: None,
+            reload_observation_id: None,
         });
         value.entries.push(ServiceEntry {
             unit: "inactive.service".into(),
@@ -346,8 +388,10 @@ mod tests {
             active_state: "inactive".into(),
             sub_state: "dead".into(),
             description: "inactive".into(),
+            can_reload: false,
             reset_failed_observation_id: None,
             try_restart_observation_id: None,
+            reload_observation_id: None,
         });
         value.entries.push(ServiceEntry {
             unit: "bad;unit.service".into(),
@@ -355,18 +399,23 @@ mod tests {
             active_state: "active".into(),
             sub_state: "running".into(),
             description: "malformed".into(),
+            can_reload: true,
             reset_failed_observation_id: None,
             try_restart_observation_id: None,
+            reload_observation_id: None,
         });
         let owner = binding(host, session, 7);
         store.publish(owner, sequence, &mut value).unwrap();
+        assert_eq!(actionable_count(&store.state.lock().unwrap()), 3);
         let id = value.entries[0].reset_failed_observation_id.unwrap();
         assert!(value.entries[1].reset_failed_observation_id.is_none());
         let restart_id = value.entries[1].try_restart_observation_id.unwrap();
+        let reload_id = value.entries[1].reload_observation_id.unwrap();
         assert!(value.entries[0].try_restart_observation_id.is_none());
         for entry in &value.entries[2..] {
             assert!(entry.reset_failed_observation_id.is_none());
             assert!(entry.try_restart_observation_id.is_none());
+            assert!(entry.reload_observation_id.is_none());
         }
         assert_eq!(
             store.resolve_reset_failed(id, owner).unwrap().unit.as_str(),
@@ -382,8 +431,21 @@ mod tests {
         );
         assert!(store.resolve_try_restart(id, owner).is_err());
         assert!(store.resolve_reset_failed(restart_id, owner).is_err());
+        assert_eq!(
+            store
+                .resolve_reload(reload_id, owner)
+                .unwrap()
+                .unit
+                .as_str(),
+            "active.service"
+        );
+        assert!(store.resolve_reload(restart_id, owner).is_err());
+        assert!(store.resolve_try_restart(reload_id, owner).is_err());
+        assert!(store.resolve_reload(id, owner).is_err());
+        assert!(store.resolve_reset_failed(reload_id, owner).is_err());
         store.revoke_session(host, session).unwrap();
         assert!(store.resolve_reset_failed(id, owner).is_err());
         assert!(store.resolve_try_restart(restart_id, owner).is_err());
+        assert!(store.resolve_reload(reload_id, owner).is_err());
     }
 }

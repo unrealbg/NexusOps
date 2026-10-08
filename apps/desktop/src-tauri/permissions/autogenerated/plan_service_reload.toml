@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-service-reload"
+description = "Enables the plan_service_reload command without any pre-configured scope."
+commands.allow = ["plan_service_reload"]
+
+[[permission]]
+identifier = "deny-plan-service-reload"
+description = "Denies the plan_service_reload command without any pre-configured scope."
+commands.deny = ["plan_service_reload"]

@@ -6,6 +6,7 @@ mod handler;
 mod known_hosts;
 mod provider;
 mod session;
+mod systemd_reload;
 mod systemd_reset_failed;
 mod systemd_try_restart;
 
