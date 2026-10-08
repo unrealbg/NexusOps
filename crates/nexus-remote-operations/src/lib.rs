@@ -9,6 +9,7 @@ mod outcome;
 mod store;
 mod systemd_reload;
 mod systemd_reset_failed;
+mod systemd_start;
 mod systemd_try_restart;
 
 pub use admission::{ExecutionAdmission, ExecutionPermit};
@@ -23,6 +24,7 @@ pub use systemd_reload::{SystemdReload, SystemdReloadPreconditions};
 pub use systemd_reset_failed::{
     SystemdResetFailed, SystemdResetFailedPreconditions, SystemdServiceUnitName,
 };
+pub use systemd_start::{SystemdStart, SystemdStartPreconditions};
 pub use systemd_try_restart::{SystemdTryRestart, SystemdTryRestartPreconditions};
 
 use nexus_model::{AppError, ErrorCode, HostId, HostSessionId};

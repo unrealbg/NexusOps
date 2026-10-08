@@ -10,7 +10,7 @@ import {
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-test('Goal 05E exposes exactly the three reviewed operation-specific vertical slices', async () => {
+test('Goal 05F exposes exactly the four reviewed operation-specific vertical slices', async () => {
   const result = await verifyRemoteOperationsSource(repositoryRoot);
   assert.ok(result.commandCount > 0);
 });
@@ -37,9 +37,51 @@ test('policy rejects an unreviewed mutation Tauri command or generic TypeScript 
     }),
     /renderer\/protocol surface/,
   );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      protocolSource: `${fixture.protocolSource}\nexport type ServiceOperationPlan = { verb: string };`,
+    }),
+    /renderer\/protocol surface/,
+  );
 });
 
-test('policy rejects mutation authority exposed by a fourth command in another production module', async () => {
+test('policy rejects renderer-supplied Start authority fields and multi-target command construction', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      tauriProductionSources: fixture.tauriProductionSources.map((file) =>
+        file.path === 'apps/desktop/src-tauri/src/commands.rs'
+          ? {
+            ...file,
+            source: file.source.replace(
+              'pub async fn plan_service_start(',
+              'pub async fn plan_service_start(can_start: bool, ',
+            ),
+          }
+          : file),
+    }),
+    /reviewed service mutation Tauri commands must not contain can_start: bool/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_start.rs')
+        ? {
+          ...file,
+          source: file.source.replace(
+            'format!("{COMMAND_PREFIX}{}", authority.target().as_str())',
+            'format!("{COMMAND_PREFIX}{} {}", authority.target().as_str(), authority.target().as_str())',
+          ),
+        }
+        : file),
+    }),
+    /must contain exactly the reviewed typed-authority exec path/,
+  );
+});
+
+test('policy rejects mutation authority exposed by a thirteenth command in another production module', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(
     () => verifyRemoteOperationsSourceText({
@@ -52,7 +94,7 @@ test('policy rejects mutation authority exposed by a fourth command in another p
         },
       ],
     }),
-    /nine reviewed .* commands/,
+    /twelve reviewed .* commands/,
   );
 });
 
@@ -72,7 +114,7 @@ test('policy rejects a renamed reviewed mutation command', async () => {
           }
           : file),
     }),
-    /nine reviewed .* commands/,
+    /twelve reviewed .* commands/,
   );
 });
 
@@ -92,7 +134,7 @@ test('policy discovers noncanonical and imported Tauri command attributes', asyn
           { path: 'apps/desktop/src-tauri/src/alternate.rs', source },
         ],
       }),
-      /nine reviewed .* commands/,
+      /twelve reviewed .* commands/,
     );
   }
 });
@@ -123,7 +165,7 @@ pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest
         { path: 'apps/desktop/src-tauri/src/local_bridge.rs', source: bridgeSource },
       ],
     }),
-    /Goal 05B\/05D\/05E application mutation references must remain inside the nine reviewed Tauri commands/,
+    /Goal 05B\/05D\/05E\/05F application mutation references must remain inside the twelve reviewed Tauri commands/,
   );
 });
 
@@ -144,7 +186,7 @@ test('policy rejects a Tauri command delegating to a facade in another productio
         },
       ],
     }),
-    /Goal 05B\/05D\/05E application mutation references must remain inside the nine reviewed Tauri commands/,
+    /Goal 05B\/05D\/05E\/05F application mutation references must remain inside the twelve reviewed Tauri commands/,
   );
 });
 
@@ -174,7 +216,7 @@ pub async fn harmless_bridge(app: State<'_, Application>, request: BridgeRequest
         { path: 'apps/desktop/src-tauri/src/dto_bridge.rs', source: bridgeSource },
       ],
     }),
-    /Goal 05B\/05D\/05E application mutation references must remain inside the nine reviewed Tauri commands/,
+    /Goal 05B\/05D\/05E\/05F application mutation references must remain inside the twelve reviewed Tauri commands/,
   );
 });
 
@@ -200,7 +242,7 @@ pub async fn perform_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(),
         },
       ],
     }),
-    /Goal 05B\/05D\/05E application mutation references must remain inside the nine reviewed Tauri commands/,
+    /Goal 05B\/05D\/05E\/05F application mutation references must remain inside the twelve reviewed Tauri commands/,
   );
 });
 
@@ -224,7 +266,7 @@ pub async fn perform_bridge(app: &Application, request: BridgeRequest) -> Result
         },
       ],
     }),
-    /Goal 05B\/05D\/05E application mutation references must remain inside the nine reviewed Tauri commands/,
+    /Goal 05B\/05D\/05E\/05F application mutation references must remain inside the twelve reviewed Tauri commands/,
   );
 });
 
@@ -249,7 +291,7 @@ pub async fn perform_bridge(app: &CoreApp, request: BridgeRequest) -> Result<(),
         },
       ],
     }),
-    /Goal 05B\/05D\/05E application mutation references must remain inside the nine reviewed Tauri commands/,
+    /Goal 05B\/05D\/05E\/05F application mutation references must remain inside the twelve reviewed Tauri commands/,
   );
 });
 
@@ -636,7 +678,7 @@ async fn dispatch_arbitrary<C>(
 
 `;
 
-  for (const adapter of ['systemd_reset_failed.rs', 'systemd_try_restart.rs', 'systemd_reload.rs']) {
+  for (const adapter of ['systemd_reset_failed.rs', 'systemd_try_restart.rs', 'systemd_reload.rs', 'systemd_start.rs']) {
     assert.throws(
       () => verifyRemoteOperationsSourceText({
         ...fixture,
@@ -679,24 +721,48 @@ test('policy pins the reload operation, command, bounds and direct terminal trut
   }
 });
 
-test('policy rejects a fourth native operation, a tenth mutation command and reload outside its adapter', async () => {
+test('policy pins the start operation, command, bounds and direct terminal truth', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  const mutations = [
+    ['--no-ask-password start -- ', '--no-ask-password restart -- '],
+    ['const REQUEST_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);', 'const REQUEST_COMPLETION_TIMEOUT: Duration = Duration::from_secs(60);'],
+    ['ChannelMsg::ExitStatus { exit_status } =>', 'ChannelMsg::ExitStatus { exit_status } if *accepted =>'],
+    ['ChannelMsg::ExitSignal { .. } =>', 'ChannelMsg::ExitSignal { .. } if *accepted =>'],
+    ['ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } => MessageHandling::Continue,', 'ChannelMsg::Eof | ChannelMsg::WindowAdjusted { .. } | ChannelMsg::Close => MessageHandling::Continue,'],
+    ['ChannelMsg::Failure if !*accepted && !*execution_evidence =>', 'ChannelMsg::Failure =>'],
+    ['*output_bytes = output_bytes.saturating_add(data.len());', '*output_bytes += data.len();'],
+  ];
+  for (const [from, to] of mutations) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('systemd_start.rs')
+          ? { ...file, source: file.source.replace(from, to) }
+          : file),
+      }),
+      /start SSH transport policy is missing|reviewed start SSH transport contains forbidden text/,
+    );
+  }
+});
+
+test('policy rejects a fifth native operation, a thirteenth mutation command and operation leakage outside adapters', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,
       remoteProductionSources: [...fixture.remoteProductionSources, {
-        path: 'crates/nexus-remote-operations/src/fourth.rs',
-        source: 'pub struct Fourth; impl NativeOperation for Fourth { type Target = (); type Preconditions = (); type Payload = (); const RISK: OperationRisk = OperationRisk::High; }',
+        path: 'crates/nexus-remote-operations/src/fifth.rs',
+        source: 'pub struct Fifth; impl NativeOperation for Fifth { type Target = (); type Preconditions = (); type Payload = (); const RISK: OperationRisk = OperationRisk::High; }',
       }],
     }),
-    /exactly SystemdResetFailed, SystemdTryRestart and SystemdReload/,
+    /exactly SystemdResetFailed, SystemdTryRestart, SystemdReload and SystemdStart/,
   );
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,
       tauriProductionSources: [...fixture.tauriProductionSources, {
-        path: 'apps/desktop/src-tauri/src/tenth.rs',
-        source: '#[tauri::command]\npub async fn execute_service_fourth() {}',
+        path: 'apps/desktop/src-tauri/src/thirteenth.rs',
+        source: '#[tauri::command]\npub async fn execute_service_fifth() {}',
       }],
     }),
     /forbidden remote-mutation Tauri command/,
@@ -712,7 +778,7 @@ test('policy rejects a fourth native operation, a tenth mutation command and rel
   );
 });
 
-test('policy pins the exact CanReload inventory command and reload application binding', async () => {
+test('policy pins the exact CanStart/CanReload inventory command and operation bindings', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
   assert.throws(
     () => verifyRemoteOperationsSourceText({
@@ -732,5 +798,24 @@ test('policy pins the exact CanReload inventory command and reload application b
         : file),
     }),
     /native operation binding for plan_service_reload must remain fixed/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      readOnlyCommandSource: fixture.readOnlyCommandSource.replace(
+        ' --property=CanStart --property=CanReload',
+        ' --property=CanReload',
+      ),
+    }),
+    /service inventory command must remain fixed/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      coreProductionSources: fixture.coreProductionSources.map((file) => file.path.endsWith('application/services.rs')
+        ? { ...file, source: file.source.replace('.plan::<SystemdStart>(', '.plan::<SystemdReload>(') }
+        : file),
+    }),
+    /native operation binding for plan_service_start must remain fixed/,
   );
 });

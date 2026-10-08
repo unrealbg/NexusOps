@@ -46,3 +46,11 @@ Goal 05E adds a third, sealed native operation for exactly one backend-observed 
 The only mutation mapping is `systemctl --system --no-pager --no-ask-password reload -- <STRICT_UNIT>` with fixed locale/environment controls, High risk, one target, 5/30/2-second transport bounds and 8 KiB combined output. It has separate plan/discard/execute IPC, result DTOs and `service.reload` metadata-only audit. There is no generic service verb, restart fallback, retry, rollback, sudo or multi-target form.
 
 Source review, source policy, OpenSSH interoperability, disposable real-systemd reload acceptance and Native Windows desktop end-to-end acceptance passed for the implementation merged as `4addd8ab6bd42d4d3fc440db815a0c9e67d6c909`; post-merge CI also passed. Acceptance observed exactly one intended reload dispatch and one `ExecReload` execution. MainPID, InvocationID and the process start timestamp remained unchanged with `NRestarts=0`; SSH remained usable and no retry or restart fallback occurred.
+
+## Goal 05F bounded systemd start candidate
+
+Goal 05F adds a fourth sealed native operation for exactly one backend-observed strict service freshly revalidated as `loaded / inactive / dead / CanStart=yes`. `CanStart` is requested by the fixed service inventory and accepts only exact lowercase `yes` or `no`; it is display data and never renderer-supplied authority. Start remains distinct from Reset-Failed, Try-Restart and Reload through its own observation, plan/result DTO family, three IPC commands and dedicated SSH adapter.
+
+The only new mapping is `systemctl --system --no-pager --no-ask-password start -- <STRICT_UNIT>` with fixed locale/environment controls, High risk, one target, 5/30/2-second transport bounds and 8 KiB aggregate output. There is no Stop, retry, rollback, `--no-block`, sudo, permission escalation or generic service verb. Starting a unit may activate dependencies, bind listeners or process work; `CanStart=yes` does not establish permission, configuration validity, health or a lasting running state.
+
+This implementation remains a source-review candidate. Real disposable-systemd Start acceptance and Native Windows desktop acceptance require separate owner-authorized gates and have not been performed.

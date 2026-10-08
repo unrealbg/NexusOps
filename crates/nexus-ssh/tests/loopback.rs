@@ -20,8 +20,8 @@ use nexus_operations::{ReadOnlyCommand, RemoteSession};
 use nexus_remote_operations::{
     AuthorityBinding, AuthorityRevalidator, ConsumedAuthority, MutationTransportOutcome, PlanDraft,
     RemoteOperationFoundation, SystemdReload, SystemdReloadPreconditions, SystemdResetFailed,
-    SystemdResetFailedPreconditions, SystemdServiceUnitName, SystemdTryRestart,
-    SystemdTryRestartPreconditions,
+    SystemdResetFailedPreconditions, SystemdServiceUnitName, SystemdStart,
+    SystemdStartPreconditions, SystemdTryRestart, SystemdTryRestartPreconditions,
 };
 use nexus_secrets::Credential;
 use nexus_sftp::SftpConnector;
@@ -51,6 +51,8 @@ struct FixtureHandler {
     last_try_restart_command: Arc<std::sync::Mutex<Vec<u8>>>,
     reload_commands: Arc<AtomicUsize>,
     last_reload_command: Arc<std::sync::Mutex<Vec<u8>>>,
+    start_commands: Arc<AtomicUsize>,
+    last_start_command: Arc<std::sync::Mutex<Vec<u8>>>,
     channel_closes: Arc<AtomicUsize>,
     mode: Arc<AtomicU8>,
     approved_key: PublicKey,
@@ -141,6 +143,11 @@ impl server::Handler for FixtureHandler {
         if reload {
             self.reload_commands.fetch_add(1, Ordering::SeqCst);
             *self.last_reload_command.lock().unwrap() = command.to_vec();
+        }
+        let start = command == b"LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password start -- inactive-startable.service";
+        if start {
+            self.start_commands.fetch_add(1, Ordering::SeqCst);
+            *self.last_start_command.lock().unwrap() = command.to_vec();
         }
         let mode = self.mode.load(Ordering::SeqCst);
         if mode == 6 {
@@ -245,7 +252,7 @@ impl server::Handler for FixtureHandler {
                 return Ok(());
             }
             _ => {
-                if reset_failed || try_restart || reload {
+                if reset_failed || try_restart || reload || start {
                     session.exit_status_request(channel, 0)?;
                     session.eof(channel)?;
                     session.close(channel)?;
@@ -302,6 +309,8 @@ impl Fixture {
             last_try_restart_command: Arc::new(std::sync::Mutex::new(Vec::new())),
             reload_commands: Arc::new(AtomicUsize::new(0)),
             last_reload_command: Arc::new(std::sync::Mutex::new(Vec::new())),
+            start_commands: Arc::new(AtomicUsize::new(0)),
+            last_start_command: Arc::new(std::sync::Mutex::new(Vec::new())),
             channel_closes: Arc::new(AtomicUsize::new(0)),
             mode: Arc::new(AtomicU8::new(0)),
             approved_key: user_key.public_key().clone(),
@@ -373,6 +382,7 @@ fn password() -> Credential {
 struct AllowResetFailed;
 struct AllowTryRestart;
 struct AllowReload;
+struct AllowStart;
 
 #[async_trait::async_trait]
 impl AuthorityRevalidator<SystemdResetFailed> for AllowResetFailed {
@@ -396,6 +406,14 @@ impl AuthorityRevalidator<SystemdTryRestart> for AllowTryRestart {
 impl AuthorityRevalidator<SystemdReload> for AllowReload {
     type DispatchGuard = ();
     async fn revalidate(&self, _: &ConsumedAuthority<SystemdReload>) -> Result<(), AppError> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl AuthorityRevalidator<SystemdStart> for AllowStart {
+    type DispatchGuard = ();
+    async fn revalidate(&self, _: &ConsumedAuthority<SystemdStart>) -> Result<(), AppError> {
         Ok(())
     }
 }
@@ -492,6 +510,34 @@ async fn execute_reload(
         .unwrap();
     foundation
         .execute::<SystemdReload, _, _>(receipt.id, binding, &AllowReload, session, cancellation)
+        .await
+        .unwrap()
+}
+
+async fn execute_start(
+    session: &nexus_ssh::SshSession,
+    host_id: HostId,
+    cancellation: CancellationToken,
+) -> nexus_remote_operations::ExecutionResult {
+    let binding = AuthorityBinding {
+        host_id,
+        host_session_id: HostSessionId::new(),
+        generation: 1,
+    };
+    let foundation = RemoteOperationFoundation::default();
+    let receipt = foundation
+        .plan::<SystemdStart>(
+            PlanDraft::new(
+                binding,
+                SystemdServiceUnitName::parse("inactive-startable.service").unwrap(),
+                SystemdStartPreconditions,
+                (),
+            ),
+            binding,
+        )
+        .unwrap();
+    foundation
+        .execute::<SystemdStart, _, _>(receipt.id, binding, &AllowStart, session, cancellation)
         .await
         .unwrap()
 }
@@ -741,6 +787,163 @@ async fn reload_post_dispatch_cancellation_and_lifetime_loss_are_unknown() {
     })
     .await
     .expect("reload dispatched");
+    fixture.cancellation.cancel();
+    assert_eq!(
+        lost.await.unwrap().terminal,
+        nexus_remote_operations::ExecutionTerminal::Transport(
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost
+            )
+        )
+    );
+}
+
+#[tokio::test]
+async fn start_uses_exact_command_and_classifies_bounded_completion() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    for (mode, expected) in [
+        (
+            0,
+            MutationTransportOutcome::CompletionConfirmed { success: true },
+        ),
+        (
+            6,
+            MutationTransportOutcome::NotDispatched(
+                nexus_remote_operations::NotDispatchedReason::Rejected,
+            ),
+        ),
+        (
+            7,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
+        (
+            15,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
+        (
+            8,
+            MutationTransportOutcome::CompletionConfirmed { success: true },
+        ),
+        (
+            11,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            12,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            13,
+            MutationTransportOutcome::CompletionConfirmed { success: true },
+        ),
+        (
+            16,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
+        (
+            17,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::OutputLimit,
+            ),
+        ),
+        (
+            18,
+            MutationTransportOutcome::CompletionConfirmed { success: true },
+        ),
+        (
+            19,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            20,
+            MutationTransportOutcome::CompletionConfirmed { success: false },
+        ),
+        (
+            21,
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::ConnectionLost,
+            ),
+        ),
+    ] {
+        let before = fixture.handler.start_commands.load(Ordering::SeqCst);
+        fixture.handler.mode.store(mode, Ordering::SeqCst);
+        let result =
+            execute_start(session.as_ref(), fixture.host.id, CancellationToken::new()).await;
+        assert_eq!(
+            result.terminal,
+            nexus_remote_operations::ExecutionTerminal::Transport(expected),
+            "mode {mode}"
+        );
+        assert_eq!(
+            fixture.handler.start_commands.load(Ordering::SeqCst),
+            before + 1,
+            "mode {mode} must dispatch exactly once"
+        );
+    }
+    assert_eq!(
+        fixture.handler.last_start_command.lock().unwrap().as_slice(),
+        b"LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password start -- inactive-startable.service"
+    );
+}
+
+#[tokio::test]
+async fn start_post_dispatch_cancellation_and_lifetime_loss_are_unknown() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    fixture.handler.mode.store(22, Ordering::SeqCst);
+    let cancellation = CancellationToken::new();
+    let task = {
+        let session = session.clone();
+        let cancellation = cancellation.clone();
+        let host = fixture.host.id;
+        tokio::spawn(async move { execute_start(session.as_ref(), host, cancellation).await })
+    };
+    timeout(Duration::from_secs(2), async {
+        while fixture.handler.start_commands.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("start dispatched");
+    cancellation.cancel();
+    assert_eq!(
+        task.await.unwrap().terminal,
+        nexus_remote_operations::ExecutionTerminal::Transport(
+            MutationTransportOutcome::CompletionUnknown(
+                nexus_remote_operations::CompletionUnknownReason::Cancelled
+            )
+        )
+    );
+
+    let lost = {
+        let session = session.clone();
+        let host = fixture.host.id;
+        tokio::spawn(async move {
+            execute_start(session.as_ref(), host, CancellationToken::new()).await
+        })
+    };
+    timeout(Duration::from_secs(2), async {
+        while fixture.handler.start_commands.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("start dispatched");
     fixture.cancellation.cancel();
     assert_eq!(
         lost.await.unwrap().terminal,

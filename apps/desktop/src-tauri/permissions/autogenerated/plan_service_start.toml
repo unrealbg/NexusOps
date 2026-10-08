@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-service-start"
+description = "Enables the plan_service_start command without any pre-configured scope."
+commands.allow = ["plan_service_start"]
+
+[[permission]]
+identifier = "deny-plan-service-start"
+description = "Denies the plan_service_start command without any pre-configured scope."
+commands.deny = ["plan_service_start"]
