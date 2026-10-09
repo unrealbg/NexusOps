@@ -21,6 +21,8 @@ import type {
   ServiceReloadResult,
   ServiceStartPlan,
   ServiceStartResult,
+  SystemdStopImpactAssessment,
+  SystemdStopImpactInspectionId,
   SshEndpointTrust,
   HostSession,
   TerminalOutputBatch,
@@ -108,6 +110,13 @@ export const monitorApi = {
 export const servicesApi = {
   list: (hostId: string, hostSessionId: string) =>
     request<ServiceSnapshot>('list_host_services', { hostId, hostSessionId }),
+  assessStopImpact: (
+    hostId: string,
+    hostSessionId: string,
+    inspectionId: SystemdStopImpactInspectionId,
+  ) => request<SystemdStopImpactAssessment>('assess_service_stop_impact', {
+    hostId, hostSessionId, inspectionId,
+  }),
   planResetFailed: (
     hostId: string,
     hostSessionId: string,

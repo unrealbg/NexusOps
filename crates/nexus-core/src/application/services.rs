@@ -135,6 +135,7 @@ impl Application {
             generation,
         };
         let sequence = self.service_observations.begin_request(host_id)?;
+        let inspection_sequence = self.stop_impact_inspections.begin_request(host_id)?;
         let gate = {
             let mut gates = self.service_gates.lock().await;
             gates
@@ -178,7 +179,90 @@ impl Application {
         }
         self.service_observations
             .publish(binding, sequence, &mut snapshot)?;
+        self.stop_impact_inspections
+            .publish(binding, inspection_sequence, &mut snapshot)?;
         Ok(snapshot)
+    }
+
+    /// Resolves a renderer-held opaque inspection identity to its native-owned
+    /// service target, then performs only the bounded read-only assessment.
+    pub async fn assess_service_stop_impact(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+        inspection_id: SystemdStopImpactInspectionId,
+    ) -> Result<SystemdStopImpactAssessment, AppError> {
+        let mutation = self.mutation.try_lock().map_err(|_| busy())?;
+        self.repository.get(host_id)?;
+        let slot = self.slot(host_id).await;
+        let (transport, cancellation, generation) = {
+            let data = slot.data.lock().await;
+            if data.view.state != ConnectionState::Connected
+                || data.connection_id != Some(host_session_id)
+                || data.view.host_session_id != Some(host_session_id)
+            {
+                return Err(stale_session());
+            }
+            (
+                data.transport.clone().ok_or_else(stale_session)?,
+                data.cancel.clone(),
+                data.generation,
+            )
+        };
+        let binding = AuthorityBinding {
+            host_id,
+            host_session_id,
+            generation,
+        };
+        let root_unit = self
+            .stop_impact_inspections
+            .resolve(inspection_id, binding)?;
+        let gate = {
+            let mut gates = self.service_gates.lock().await;
+            gates
+                .entry(host_id)
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let host_permit = gate.try_lock_owned().map_err(|_| busy())?;
+        let global_permit = self.service_limit.try_acquire().map_err(|_| busy())?;
+        drop(mutation);
+
+        let assessment = nexus_discovery::assess_systemd_stop_impact(
+            transport.as_ref(),
+            cancellation.clone(),
+            host_id,
+            host_session_id,
+            root_unit,
+        )
+        .await?;
+        drop(global_permit);
+        drop(host_permit);
+
+        let _lifecycle = self
+            .remote_operations
+            .try_lifecycle_guard(host_id)
+            .map_err(|_| busy())?;
+        let data = slot.data.lock().await;
+        if cancellation.is_cancelled()
+            || transport.is_closed()
+            || data.generation != generation
+            || data.view.state != ConnectionState::Connected
+            || data.connection_id != Some(host_session_id)
+            || data.view.host_session_id != Some(host_session_id)
+            || !data
+                .transport
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &transport))
+        {
+            return Err(cancelled());
+        }
+        drop(data);
+        // Re-resolve after the asynchronous work so refresh/reconnect/edit
+        // invalidation cannot publish a stale assessment.
+        self.stop_impact_inspections
+            .resolve(inspection_id, binding)?;
+        Ok(assessment)
     }
 
     pub async fn plan_service_reset_failed(

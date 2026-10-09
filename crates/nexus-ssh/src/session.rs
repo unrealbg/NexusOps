@@ -5,7 +5,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use nexus_model::{AppError, ErrorCode};
-use nexus_operations::{ReadOnlyCommand, RemoteSession};
+use nexus_operations::{ReadOnlyCommand, RemoteSession, SystemdStopImpactQuery};
 use nexus_sftp::{RawSftpClient, SftpClient, SftpConnector};
 use nexus_terminal::{TerminalChannel, TerminalConnector, TerminalRead};
 use russh::{ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, client};
@@ -29,6 +29,66 @@ pub struct SshSession {
     pub(crate) lifetime: CancellationToken,
     pub(crate) _guard: DropGuard,
     pub(crate) closed: Arc<AtomicBool>,
+}
+
+enum ReviewedReadOnlyCommand<'a> {
+    Fixed(ReadOnlyCommand),
+    StopImpact(&'a SystemdStopImpactQuery),
+}
+
+impl ReviewedReadOnlyCommand<'_> {
+    fn command(&self) -> &str {
+        match self {
+            Self::Fixed(command) => command.command(),
+            Self::StopImpact(query) => query.command(),
+        }
+    }
+}
+
+impl SshSession {
+    async fn execute_reviewed_read_only(
+        &self,
+        command: ReviewedReadOnlyCommand<'_>,
+        cancellation: CancellationToken,
+    ) -> Result<String, AppError> {
+        if self.is_closed() {
+            return Err(AppError::new(
+                ErrorCode::Connection,
+                "This SSH session is disconnected.",
+            ));
+        }
+        let operation = cancellation.child_token();
+        let run = async {
+            let channel = {
+                let handle = self.handle.lock().await;
+                handle
+                    .channel_open_session()
+                    .await
+                    .map_err(|error| transport_error("channel_open", &error))?
+            };
+            let (mut reader, writer) = channel.split();
+            let mut guard = ChannelGuard {
+                writer: Arc::new(writer),
+                closed: false,
+            };
+            let result = bounded(&operation, COMMAND_TIMEOUT, "command", async {
+                guard
+                    .writer
+                    .exec(true, command.command())
+                    .await
+                    .map_err(|error| transport_error("command_start", &error))?;
+                collect_output(&mut reader).await
+            })
+            .await;
+            guard.close().await;
+            result
+        };
+        tokio::select! {
+            biased;
+            _ = self.lifetime.cancelled() => Err(cancelled()),
+            result = bounded(&cancellation, COMMAND_TIMEOUT + CLOSE_TIMEOUT, "channel", run) => result,
+        }
+    }
 }
 
 #[async_trait]
@@ -361,43 +421,17 @@ impl RemoteSession for SshSession {
         command: ReadOnlyCommand,
         cancellation: CancellationToken,
     ) -> Result<String, AppError> {
-        if self.is_closed() {
-            return Err(AppError::new(
-                ErrorCode::Connection,
-                "This SSH session is disconnected.",
-            ));
-        }
-        let operation = cancellation.child_token();
-        let run = async {
-            let channel = {
-                let handle = self.handle.lock().await;
-                handle
-                    .channel_open_session()
-                    .await
-                    .map_err(|error| transport_error("channel_open", &error))?
-            };
-            let (mut reader, writer) = channel.split();
-            let mut guard = ChannelGuard {
-                writer: Arc::new(writer),
-                closed: false,
-            };
-            let result = bounded(&operation, COMMAND_TIMEOUT, "command", async {
-                guard
-                    .writer
-                    .exec(true, command.command())
-                    .await
-                    .map_err(|error| transport_error("command_start", &error))?;
-                collect_output(&mut reader).await
-            })
-            .await;
-            guard.close().await;
-            result
-        };
-        tokio::select! {
-            biased;
-            _ = self.lifetime.cancelled() => Err(cancelled()),
-            result = bounded(&cancellation, COMMAND_TIMEOUT + CLOSE_TIMEOUT, "channel", run) => result,
-        }
+        self.execute_reviewed_read_only(ReviewedReadOnlyCommand::Fixed(command), cancellation)
+            .await
+    }
+
+    async fn execute_stop_impact(
+        &self,
+        query: &SystemdStopImpactQuery,
+        cancellation: CancellationToken,
+    ) -> Result<String, AppError> {
+        self.execute_reviewed_read_only(ReviewedReadOnlyCommand::StopImpact(query), cancellation)
+            .await
     }
 
     async fn disconnect(&self) -> Result<(), AppError> {

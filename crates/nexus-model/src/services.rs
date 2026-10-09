@@ -1,4 +1,4 @@
-use crate::{HostId, HostSessionId};
+use crate::{HostId, HostSessionId, SystemdStopImpactInspectionId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
@@ -54,6 +54,8 @@ pub struct ServiceEntry {
     pub reload_observation_id: Option<ServiceObservationId>,
     #[serde(default)]
     pub start_observation_id: Option<ServiceObservationId>,
+    #[serde(default)]
+    pub stop_impact_inspection_id: Option<SystemdStopImpactInspectionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

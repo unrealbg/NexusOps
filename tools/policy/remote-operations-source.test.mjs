@@ -819,3 +819,65 @@ test('policy pins the exact CanStart/CanReload inventory command and operation b
     /native operation binding for plan_service_start must remain fixed/,
   );
 });
+
+test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactQuerySource: fixture.stopImpactQuerySource.replace('"FailureAction",', '"CollectMode",'),
+    }),
+    /fixed 37-property systemd query contract changed/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactQuerySource: fixture.stopImpactQuerySource.replace('--no-ask-password --all', '--all'),
+    }),
+    /fixed native read-only query is missing/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replace(
+        'const MAX_QUERIES: u8 = 6;',
+        'const MAX_QUERIES: u8 = 7;',
+      ),
+    }),
+    /bounded graph implementation is missing/,
+  );
+});
+
+test('policy rejects Goal 05G renderer targets and inspection-to-mutation bridges', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      clientSource: fixture.clientSource.replace(
+        'inspectionId: SystemdStopImpactInspectionId,',
+        'inspectionId: SystemdStopImpactInspectionId, unit: string,',
+      ),
+    }),
+    /renderer request must carry only opaque inspection authority/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      remoteProductionSources: [...fixture.remoteProductionSources, {
+        path: 'crates/nexus-remote-operations/src/stop_bridge.rs',
+        source: 'pub fn bridge(value: SystemdStopImpactInspectionId) { let _ = value; }',
+      }],
+    }),
+    /inspection identity or result must not enter mutation authority/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactQuerySource: fixture.stopImpactQuerySource.replace(
+        'const QUERY_TIMEOUT: Duration = Duration::from_secs(8);',
+        'const QUERY_TIMEOUT: Duration = Duration::from_secs(8);\nfn retry() {}',
+      ),
+    }),
+    /contains forbidden fragment retry/,
+  );
+});

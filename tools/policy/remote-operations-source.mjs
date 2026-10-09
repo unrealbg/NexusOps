@@ -180,6 +180,9 @@ export function verifyRemoteOperationsSourceText({
   sshProductionSources,
   sshCargoSource,
   readOnlyCommandSource,
+  stopImpactQuerySource,
+  stopImpactDiscoverySource,
+  stopImpactModelSource,
   capabilitySource,
 }) {
   const commandSections = tauriProductionSources.flatMap(({ path, source }) => {
@@ -537,6 +540,7 @@ export function verifyRemoteOperationsSourceText({
     { path: 'crates/nexus-core/src/application/rotation.rs', name: 'plan_host_key_rotation', count: 1 },
     { path: 'crates/nexus-core/src/application/rotation.rs', name: 'execute_host_key_rotation', count: 1 },
     { path: reviewedCorePath, name: 'list_host_services', count: 1 },
+    { path: reviewedCorePath, name: 'assess_service_stop_impact', count: 1 },
     { path: reviewedCorePath, name: 'plan_service_reset_failed', count: 2 },
     { path: reviewedCorePath, name: 'discard_service_reset_failed', count: 2 },
     { path: reviewedCorePath, name: 'execute_service_reset_failed', count: 1 },
@@ -993,6 +997,154 @@ export function verifyRemoteOperationsSourceText({
     fail('ReadOnlyCommand must remain native and non-serializable');
   }
 
+  const stopImpactCommands = commandSections.filter(({ source }) =>
+    source.includes('SystemdStopImpact'));
+  if (stopImpactCommands.length !== 1
+      || stopImpactCommands[0].path !== reviewedCommandPath
+      || stopImpactCommands[0].name !== 'assess_service_stop_impact') {
+    fail('Goal 05G must expose exactly one reviewed read-only assessment Tauri command');
+  }
+  const stopImpactCommand = stopImpactCommands[0].source;
+  for (const required of [
+    'host_id: HostId',
+    'host_session_id: HostSessionId',
+    'inspection_id: SystemdStopImpactInspectionId',
+    'Result<SystemdStopImpactAssessment, AppError>',
+    'app.assess_service_stop_impact(host_id, host_session_id, inspection_id)',
+  ]) {
+    if (!stopImpactCommand.includes(required)) {
+      fail(`Goal 05G assessment Tauri command is missing ${required}`);
+    }
+  }
+  for (const forbidden of [
+    'unit:', 'unit_name:', 'service:', 'target:', 'String', 'ServiceObservationId',
+    'RemoteOperationPlanId', '.plan_service_', '.execute_service_', '.discard_service_',
+  ]) {
+    if (stopImpactCommand.includes(forbidden)) {
+      fail(`Goal 05G assessment Tauri command contains forbidden authority input ${forbidden}`);
+    }
+  }
+  const stopImpactRegistrations = tauriProductionSources.flatMap(({ path, source }) =>
+    handlerRegistrationIndices(path, source, 'assess_service_stop_impact'));
+  if (stopImpactRegistrations.length !== 1
+      || !capabilitySource.includes('allow-assess-service-stop-impact')) {
+    fail('Goal 05G assessment command registration and capability must remain singular');
+  }
+
+  const stopImpactQueryProduction = stopImpactQuerySource.split('#[cfg(test)]')[0];
+  const expectedStopImpactProperties = [
+    'Id', 'Names', 'Following', 'LoadState', 'ActiveState', 'SubState', 'CanStop',
+    'RefuseManualStop', 'Job', 'NeedDaemonReload', 'StopWhenUnneeded', 'Requires',
+    'RequiredBy', 'Requisite', 'RequisiteOf', 'Wants', 'WantedBy', 'BindsTo',
+    'BoundBy', 'PartOf', 'ConsistsOf', 'PropagatesStopTo', 'StopPropagatedFrom',
+    'Upholds', 'UpheldBy', 'Conflicts', 'ConflictedBy', 'Before', 'After', 'Triggers',
+    'TriggeredBy', 'OnSuccess', 'OnFailure', 'OnSuccessJobMode', 'OnFailureJobMode',
+    'SuccessAction', 'FailureAction',
+  ];
+  const propertyDeclaration = /SYSTEMD_STOP_IMPACT_PROPERTIES:\s*\[&str;\s*37\]\s*=\s*\[([\s\S]*?)\];/.exec(
+    stopImpactQueryProduction,
+  );
+  const actualStopImpactProperties = propertyDeclaration
+    ? [...propertyDeclaration[1].matchAll(/"([A-Za-z]+)"/g)].map((match) => match[1])
+    : [];
+  if (JSON.stringify(actualStopImpactProperties) !== JSON.stringify(expectedStopImpactProperties)) {
+    fail('Goal 05G fixed 37-property systemd query contract changed');
+  }
+  const fixedStopImpactPrefix = 'LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password --all --property=';
+  for (const required of [
+    fixedStopImpactPrefix,
+    'const MAX_UNITS_PER_QUERY: usize = 16;',
+    'const MAX_UNIT_BYTES: usize = 255;',
+    'const MAX_OUTPUT_BYTES: usize = 64 * 1024;',
+    'const QUERY_TIMEOUT: Duration = Duration::from_secs(8);',
+    'command.push_str(" show --");',
+    'session.execute_stop_impact(query, child)',
+  ]) {
+    if (!stopImpactQueryProduction.includes(required)) {
+      fail(`Goal 05G fixed native read-only query is missing ${required}`);
+    }
+  }
+  for (const forbidden of ['systemctl stop', 'sudo', 'pkexec', 'retry', 'pub fn command_for']) {
+    if (stopImpactQueryProduction.toLowerCase().includes(forbidden.toLowerCase())) {
+      fail(`Goal 05G native read-only query contains forbidden fragment ${forbidden}`);
+    }
+  }
+
+  for (const required of [
+    'const MAX_NODES: usize = 64;',
+    'const MAX_EDGES: usize = 512;',
+    'const MAX_DEPTH: u8 = 4;',
+    'const MAX_ALIASES: usize = 16;',
+    'const MAX_PROPERTY_BYTES: usize = 8 * 1024;',
+    'const MAX_BLOCK_BYTES: usize = 32 * 1024;',
+    'const MAX_AGGREGATE_OUTPUT_BYTES: usize = 256 * 1024;',
+    'const MAX_WORKING_SET_BYTES: usize = 2 * 1024 * 1024;',
+    'const MAX_QUERIES: u8 = 6;',
+    'const FINAL_QUERY_RESERVE: Duration = Duration::from_secs(8);',
+    'const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);',
+    'while builder.accounting.actual_ssh_queries < MAX_QUERIES - 1',
+    'builder.accounting.actual_ssh_queries += 1;',
+    'engine.execute(session, &root_query, cancellation.clone())',
+    'self.promote_cached_descendants(canonical);',
+    'candidate_affected(',
+  ]) {
+    if (!stopImpactDiscoverySource.includes(required)) {
+      fail(`Goal 05G bounded graph implementation is missing ${required}`);
+    }
+  }
+  const stopImpactDiscoveryProduction = stopImpactDiscoverySource.split('#[cfg(test)]')[0];
+  if ((stopImpactDiscoveryProduction.match(/engine\s*\.execute\(session, &root_query/g) ?? []).length !== 2) {
+    fail('Goal 05G root must be queried exactly twice: initial observation and final revalidation');
+  }
+  const sshSessionSource = sshProductionSources.find(({ path }) =>
+    path === 'crates/nexus-ssh/src/session.rs')?.source ?? '';
+  for (const required of [
+    'enum ReviewedReadOnlyCommand',
+    'Fixed(ReadOnlyCommand)',
+    'StopImpact(&',
+    'SystemdStopImpactQuery)',
+    'ReviewedReadOnlyCommand::StopImpact(query)',
+  ]) {
+    if (!sshSessionSource.includes(required)) {
+      fail(`Goal 05G SSH transport must remain closed over typed read-only commands: ${required}`);
+    }
+  }
+  if (/execute_(?:fixed|reviewed)_read_only\s*\([^)]*(?:&str|String)/s.test(sshSessionSource)) {
+    fail('Goal 05G SSH transport must not expose a generic command-string helper');
+  }
+
+  const stopImpactMutationLeak = [
+    ...remoteProductionSources,
+    ...commandSections.filter(({ name }) => allowedMutationCommands.has(name)),
+  ].some(({ source }) => source.includes('SystemdStopImpact'));
+  if (stopImpactMutationLeak) {
+    fail('Goal 05G inspection identity or result must not enter mutation authority');
+  }
+  if (!stopImpactModelSource.includes('pub struct SystemdStopImpactInspectionId')
+      || !stopImpactModelSource.includes('pub canonical_unit: String')
+      || /RemoteOperationPlanId|NativeOperation|SystemdStop\b/.test(stopImpactModelSource)) {
+    fail('Goal 05G diagnostic DTO boundary changed or gained mutation authority');
+  }
+  const productionRust = [
+    ...tauriProductionSources,
+    ...coreProductionSources,
+    ...remoteProductionSources,
+    ...sshProductionSources,
+  ].map(({ source }) => source).join('\n');
+  if (/\bSystemdStop\b/.test(productionRust)
+      || /(?:plan|execute|discard)_service_stop\b/.test(productionRust)
+      || /systemctl\s+stop\b/.test(productionRust)) {
+    fail('Goal 05G must not introduce SystemdStop or a fifth mutation surface');
+  }
+  const rendererAssessment = /assessStopImpact:\s*\(([\s\S]*?)\)\s*=>\s*request<SystemdStopImpactAssessment>/.exec(
+    clientSource,
+  );
+  if (!rendererAssessment
+      || !rendererAssessment[1].includes('inspectionId: SystemdStopImpactInspectionId')
+      || /unit|service|target|canonical/i.test(rendererAssessment[1])) {
+    fail('Goal 05G renderer request must carry only opaque inspection authority');
+  }
+
   return { commandCount: commandNames.length };
 }
 
@@ -1025,6 +1177,9 @@ export async function remoteOperationsSourceFixture(root) {
     sshProductionSources: await rustSources(root, join(root, 'crates/nexus-ssh/src')),
     sshCargoSource: await readFile(join(root, 'crates/nexus-ssh/Cargo.toml'), 'utf8'),
     readOnlyCommandSource: await readFile(join(root, 'crates/nexus-operations/src/command.rs'), 'utf8'),
+    stopImpactQuerySource: await readFile(join(root, 'crates/nexus-operations/src/stop_impact.rs'), 'utf8'),
+    stopImpactDiscoverySource: await readFile(join(root, 'crates/nexus-discovery/src/stop_impact.rs'), 'utf8'),
+    stopImpactModelSource: await readFile(join(root, 'crates/nexus-model/src/stop_impact.rs'), 'utf8'),
     capabilitySource: await readFile(join(root, 'apps/desktop/src-tauri/capabilities/main.json'), 'utf8'),
   };
 }
