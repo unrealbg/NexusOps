@@ -40,7 +40,7 @@ LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-as
 
 Reload has its own plan/discard/execute IPC family, one-shot approval and independent checkbox. The transport retains the 5-second open, 30-second completion, 2-second cleanup and 8 KiB aggregate-output bounds. It has no retry, rollback, restart fallback, sudo or generic service verb. Every consumed authority attempts exactly one metadata-only `service.reload` / High / User audit and one separate best-effort service observation. Systemctl success is not a claim about configuration validity, health or availability.
 
-## Goal 05F bounded Start candidate
+## Goal 05F bounded systemd Start
 
 Start is a fourth, separate High-risk operation. Its capability exists only for an exact `loaded / inactive / dead / CanStart=yes` row. Planning and execution repeat the complete inventory and exact check; the renderer supplies only the opaque Start observation ID. The fixed mapping is:
 
@@ -48,9 +48,22 @@ Start is a fourth, separate High-risk operation. Its capability exists only for 
 LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password start -- <STRICT_UNIT>
 ```
 
-Start has its own plan/discard/execute IPC family and independent confirmation checkbox. It uses the 5-second open, 30-second completion, 2-second cleanup and 8 KiB aggregate-output bounds. There is no retry, rollback, Stop, `--no-block`, sudo or permission fallback. `CanStart=yes` does not imply that the SSH account is authorized or that startup is safe, healthy or lasting. Systemd may activate dependencies, bind network listeners or process queued work. Every consumed authority attempts exactly one metadata-only `service.start` / High / User audit and one best-effort fresh service observation. A confirmed command success describes the Start job result and does not claim exclusive causation or a particular post-state.
+Start has its own plan/discard/execute IPC family and independent confirmation checkbox. It uses the 5-second open, 30-second completion, 2-second cleanup and 8 KiB aggregate-output bounds. There is no retry, rollback, Stop, `--no-block`, sudo or permission fallback. `CanStart=yes` does not imply that the SSH account is authorized or that startup is safe, healthy or lasting. Systemd may activate dependencies, bind network listeners or process queued work. Every consumed authority attempts exactly one metadata-only `service.start` / High / User audit and one best-effort fresh service observation. A successful Start command completion does not prove application health, configuration validity, dependency health, continued running or exclusive NexusOps causation.
 
-Goal 05F is a candidate pending source review, disposable real-systemd Start acceptance and Native Windows desktop acceptance. No real systemd Start mutation was performed during implementation.
+Goal 05F passed source review, source-policy re-review, OpenSSH systemctl-absent interoperability, disposable real-systemd Start acceptance and Native Windows desktop end-to-end acceptance. The implementation HEAD `90c21099318d787c49cb0b627ca46707b81aeb06` was merged as `4548d23d88d1729b4ae41c917f50ed8d2227b0e3`, and the post-merge push workflow passed on Ubuntu, Windows and macOS. The accepted production path was:
+
+```text
+Windows production desktop UI
+→ operation-specific Tauri IPC
+→ Application
+→ one-shot SystemdStart authority
+→ SshSession
+→ typed SystemdStart transport
+→ real OpenSSH
+→ real systemd
+```
+
+The eligible target exposed Start while a non-startable control did not. The High-risk confirmation gate required its independent checkbox. Exactly one Start dispatch changed `ExecStart` from `0 → 1` and MainPID from `0 → >0`, producing `loaded / active / running` with `NRestarts=0`; SSH and the product session survived. Manual Refresh removed Start and exposed the existing Try-Restart capability for the now-running service. Exactly one metadata-only success audit was persisted, with no retry or Stop. Disposable real-systemd acceptance explicitly proved same-plan replay rejection. The Windows UI gate had no established replay instrumentation and did not manually replay the consumed plan; it instead proved one Start click and dispatch, no second Start, capability removal after Refresh and an `ExecStart` count that remained exactly `1`.
 
 ## Validation and native acceptance
 
