@@ -16,7 +16,7 @@ use nexus_model::{
     AppError, AuthenticationMethod, ErrorCode, Host, HostConnectionConfig, HostFingerprint, HostId,
     HostKeyChallenge, HostSessionId,
 };
-use nexus_operations::{ReadOnlyCommand, RemoteSession};
+use nexus_operations::{ReadOnlyCommand, RemoteSession, SystemdStopImpactQuery};
 use nexus_remote_operations::{
     AuthorityBinding, AuthorityRevalidator, ConsumedAuthority, MutationTransportOutcome, PlanDraft,
     RemoteOperationFoundation, SystemdReload, SystemdReloadPreconditions, SystemdResetFailed,
@@ -45,6 +45,7 @@ struct FixtureHandler {
     command_count: Arc<AtomicUsize>,
     journal_commands: Arc<AtomicUsize>,
     docker_commands: Arc<AtomicUsize>,
+    stop_impact_commands: Arc<AtomicUsize>,
     reset_failed_commands: Arc<AtomicUsize>,
     last_reset_failed_command: Arc<std::sync::Mutex<Vec<u8>>>,
     try_restart_commands: Arc<AtomicUsize>,
@@ -128,6 +129,11 @@ impl server::Handler for FixtureHandler {
         }
         if command == ReadOnlyCommand::DockerContainers.command().as_bytes() {
             self.docker_commands.fetch_add(1, Ordering::SeqCst);
+        }
+        let stop_impact = SystemdStopImpactQuery::single("fixture.service")
+            .is_ok_and(|query| command == query.command().as_bytes());
+        if stop_impact {
+            self.stop_impact_commands.fetch_add(1, Ordering::SeqCst);
         }
         let reset_failed = command == b"LC_ALL=C SYSTEMD_COLORS=0 SYSTEMD_URLIFY=0 systemctl --system --no-pager --no-ask-password reset-failed -- broken.service";
         if reset_failed {
@@ -222,6 +228,12 @@ impl server::Handler for FixtureHandler {
             return Ok(());
         }
         session.channel_success(channel)?;
+        if mode == 23 && stop_impact {
+            session.extended_data(channel, 1, &b"private diagnostic"[..])?;
+            session.exit_status_request(channel, 0)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         match mode {
             1 => {
                 // Output is sent incrementally by russh with SSH window backpressure.
@@ -303,6 +315,7 @@ impl Fixture {
             command_count: Arc::new(AtomicUsize::new(0)),
             journal_commands: Arc::new(AtomicUsize::new(0)),
             docker_commands: Arc::new(AtomicUsize::new(0)),
+            stop_impact_commands: Arc::new(AtomicUsize::new(0)),
             reset_failed_commands: Arc::new(AtomicUsize::new(0)),
             last_reset_failed_command: Arc::new(std::sync::Mutex::new(Vec::new())),
             try_restart_commands: Arc::new(AtomicUsize::new(0)),
@@ -1499,6 +1512,38 @@ async fn docker_empty_and_failure_responses_do_not_break_other_fixed_ssh_reads()
         "nexus-fixture\n"
     );
     assert_eq!(fixture.handler.docker_commands.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn stop_impact_rejects_private_stderr_and_keeps_the_session_usable() {
+    let fixture = Fixture::start().await;
+    let session = fixture
+        .trusted_provider()
+        .connect(&fixture.host, password(), CancellationToken::new())
+        .await
+        .expect("connect");
+    fixture.handler.mode.store(23, Ordering::SeqCst);
+    let query = SystemdStopImpactQuery::single("fixture.service").unwrap();
+    let error = session
+        .execute_stop_impact(&query, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Discovery);
+    assert!(!error.message.contains("private diagnostic"));
+    assert_eq!(
+        fixture.handler.stop_impact_commands.load(Ordering::SeqCst),
+        1
+    );
+    assert!(!session.is_closed());
+
+    fixture.handler.mode.store(0, Ordering::SeqCst);
+    assert_eq!(
+        session
+            .execute(ReadOnlyCommand::Hostname, CancellationToken::new())
+            .await
+            .unwrap(),
+        "nexus-fixture\n"
+    );
 }
 
 #[tokio::test]

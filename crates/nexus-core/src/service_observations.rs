@@ -380,6 +380,7 @@ mod tests {
                 try_restart_observation_id: None,
                 reload_observation_id: None,
                 start_observation_id: None,
+                stop_impact_inspection_id: None,
             }],
         }
     }
@@ -425,6 +426,7 @@ mod tests {
             try_restart_observation_id: None,
             reload_observation_id: None,
             start_observation_id: None,
+            stop_impact_inspection_id: None,
         });
         value.entries.push(ServiceEntry {
             unit: "inactive.service".into(),
@@ -438,6 +440,7 @@ mod tests {
             try_restart_observation_id: None,
             reload_observation_id: None,
             start_observation_id: None,
+            stop_impact_inspection_id: None,
         });
         value.entries.push(ServiceEntry {
             unit: "bad;unit.service".into(),
@@ -451,6 +454,7 @@ mod tests {
             try_restart_observation_id: None,
             reload_observation_id: None,
             start_observation_id: None,
+            stop_impact_inspection_id: None,
         });
         value.entries.push(ServiceEntry {
             unit: "inactive-disabled.service".into(),
@@ -464,6 +468,7 @@ mod tests {
             try_restart_observation_id: None,
             reload_observation_id: None,
             start_observation_id: None,
+            stop_impact_inspection_id: None,
         });
         let owner = binding(host, session, 7);
         store.publish(owner, sequence, &mut value).unwrap();

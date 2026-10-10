@@ -819,3 +819,158 @@ test('policy pins the exact CanStart/CanReload inventory command and operation b
     /native operation binding for plan_service_start must remain fixed/,
   );
 });
+
+test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactQuerySource: fixture.stopImpactQuerySource.replace('"FailureAction",', '"CollectMode",'),
+    }),
+    /fixed 37-property systemd query contract changed/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactQuerySource: fixture.stopImpactQuerySource.replace('--no-ask-password --all', '--all'),
+    }),
+    /fixed native read-only query is missing/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replace(
+        'const MAX_QUERIES: u8 = 6;',
+        'const MAX_QUERIES: u8 = 7;',
+      ),
+    }),
+    /bounded graph implementation is missing/,
+  );
+  for (const fragment of [
+    'fn match_batch_by_identity(',
+    'fn has_direct_frontier(&self) -> bool',
+    'StopImpactConditionalClassification::CoverageUnknown',
+    'const MAX_DIAGNOSTICS: usize = 512;',
+    'StopImpactWarning::UnsupportedEnumerant',
+    'StopImpactWarning::DiagnosticLimit',
+    '("UpheldBy", StopImpactDiagnosticKind::UpheldByReactivation)',
+    'omitted_known_diagnostics',
+    'relationship_order',
+    'eligible.sort_by',
+    'fn conditional_diagnostics(&self)',
+    'impl Iterator<Item = DiagnosticView',
+    'struct DiagnosticProjection',
+    '(MAX_DIAGNOSTICS + 1) * 1024 + MAX_PROPERTY_BYTES * size_of::<&str>()',
+    '.saturating_add(DIAGNOSTIC_WORKING_SET_BYTES)',
+    'retained: Vec::with_capacity(MAX_DIAGNOSTICS)',
+    'seen_related: Vec::with_capacity(MAX_PROPERTY_BYTES)',
+    'assert!(self.seen_related.len() < MAX_PROPERTY_BYTES)',
+    'self.seen_related.binary_search(&normalized)',
+    'self.retained.pop();',
+    'self.retained.insert(index, diagnostic.into_owned());',
+    'std::num::NonZeroU32::new',
+  ]) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replaceAll(fragment, 'removed_policy_fragment'),
+      }),
+      /bounded graph implementation is missing/,
+    );
+  }
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replace(
+        'let mut projection = DiagnosticProjection::new();',
+        'let mut diagnostic_map = BTreeMap::new();\nlet mut projection = DiagnosticProjection::new();',
+      ),
+    }),
+    /diagnostic projection must not materialize all diagnostics/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replace(
+        'self.accounting.omitted_known_diagnostics = self',
+        'self.accounting.omitted_known_edges = self',
+      ),
+    }),
+    /diagnostic truncation changed graph-edge accounting/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replace(
+        'self.warning(StopImpactWarning::DiagnosticLimit);',
+        'self.warning(StopImpactWarning::EdgeLimit);',
+      ),
+    }),
+    /diagnostic truncation changed graph-edge accounting/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('session.rs')
+        ? { ...file, source: file.source.replace('collect_stop_impact_output(&mut reader)', 'collect_output(&mut reader)') }
+        : file),
+    }),
+    /SSH transport must remain closed over typed read-only commands/,
+  );
+});
+
+test('policy rejects Goal 05G renderer targets and inspection-to-mutation bridges', async () => {
+  const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  for (const accountingField of [
+    'pub retained_diagnostics: u32,',
+    'pub omitted_known_diagnostics: u32,',
+  ]) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        stopImpactModelSource: fixture.stopImpactModelSource.replace(accountingField, ''),
+      }),
+      /diagnostic DTO boundary changed/,
+    );
+  }
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactModelSource: fixture.stopImpactModelSource.replace(
+        'pub conditional_diagnostics: Vec<SystemdStopImpactDiagnostic>,',
+        '',
+      ),
+    }),
+    /diagnostic DTO boundary changed/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      clientSource: fixture.clientSource.replace(
+        'inspectionId: SystemdStopImpactInspectionId,',
+        'inspectionId: SystemdStopImpactInspectionId, unit: string,',
+      ),
+    }),
+    /renderer request must carry only opaque inspection authority/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      remoteProductionSources: [...fixture.remoteProductionSources, {
+        path: 'crates/nexus-remote-operations/src/stop_bridge.rs',
+        source: 'pub fn bridge(value: SystemdStopImpactInspectionId) { let _ = value; }',
+      }],
+    }),
+    /inspection identity or result must not enter mutation authority/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactQuerySource: fixture.stopImpactQuerySource.replace(
+        'const QUERY_TIMEOUT: Duration = Duration::from_secs(8);',
+        'const QUERY_TIMEOUT: Duration = Duration::from_secs(8);\nfn retry() {}',
+      ),
+    }),
+    /contains forbidden fragment retry/,
+  );
+});
