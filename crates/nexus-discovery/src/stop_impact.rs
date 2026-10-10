@@ -552,63 +552,59 @@ fn unit_list(value: &str) -> Result<Vec<String>, AppError> {
 }
 
 fn shell_words(value: &str) -> Result<Vec<String>, AppError> {
-    #[derive(Clone, Copy)]
-    enum Quote {
-        None,
-        Single,
-        Double,
+    // systemd v255's string-array printer calls shell_maybe_quote(str, 0):
+    // https://github.com/systemd/systemd/blob/db11bab38ccf1ed257f310d29070843d4c58ea01/src/shared/bus-print-properties.c#L228
+    // Its default double-quoted form escapes SHELL_NEED_ESCAPE ("\\`$).
+    // Decode that one CLI layer, never the canonical unit-name \xHH layer.
+    // Retain literal unquoted/single-quoted identities for existing inputs.
+    if !value.is_ascii() || value.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(invalid());
     }
-
     let mut words = Vec::new();
-    let mut current = String::new();
-    let mut quote = Quote::None;
-    let mut escaped = false;
-    let mut started = false;
-    for character in value.chars() {
-        if escaped {
-            // Preserve systemd's `\\xHH` unit-name encoding for the typed
-            // identity validator rather than interpreting shell escapes here.
-            current.push('\\');
-            current.push(character);
-            escaped = false;
-            started = true;
+    let mut characters = value.chars().peekable();
+    while characters.peek().is_some() {
+        if characters.peek() == Some(&' ') {
+            characters.next();
             continue;
         }
-        match quote {
-            Quote::None if character.is_ascii_whitespace() => {
-                if started {
-                    words.push(std::mem::take(&mut current));
-                    started = false;
+        let quote = match characters.peek() {
+            Some('\'' | '"') => characters.next(),
+            _ => None,
+        };
+        let mut closed = quote.is_none();
+        let mut current = String::new();
+        while let Some(character) = characters.next() {
+            match (quote, character) {
+                (Some(delimiter), character) if character == delimiter => {
+                    closed = true;
+                    break;
                 }
-            }
-            Quote::None if character == '\'' => {
-                quote = Quote::Single;
-                started = true;
-            }
-            Quote::None if character == '"' => {
-                quote = Quote::Double;
-                started = true;
-            }
-            Quote::Single if character == '\'' => quote = Quote::None,
-            Quote::Double if character == '"' => quote = Quote::None,
-            Quote::None | Quote::Double if character == '\\' => {
-                escaped = true;
-                started = true;
-            }
-            _ => {
-                current.push(character);
-                started = true;
+                (None, ' ') => break,
+                (None, '\'' | '"') => return Err(invalid()),
+                (None | Some('"'), '\\') => {
+                    let escaped = characters.next().ok_or_else(invalid)?;
+                    match (quote, escaped) {
+                        (Some('"'), '\\' | '"' | '`' | '$') => current.push(escaped),
+                        (None, 'x') => {
+                            // Already-canonical unquoted identity: typed unit
+                            // validation checks both hex digits afterwards.
+                            current.push('\\');
+                            current.push('x');
+                        }
+                        _ => return Err(invalid()),
+                    }
+                }
+                (_, character) => current.push(character),
             }
         }
-    }
-    if escaped || !matches!(quote, Quote::None) {
-        return Err(invalid());
-    }
-    if started {
+        // Upstream emits one complete quoted token, never shell concatenation.
+        if !closed
+            || current.is_empty()
+            || (quote.is_some() && characters.peek().is_some_and(|next| *next != ' '))
+        {
+            return Err(invalid());
+        }
         words.push(current);
-    }
-    if words.iter().any(String::is_empty) {
-        return Err(invalid());
     }
     Ok(words)
 }
@@ -1869,6 +1865,206 @@ mod tests {
     }
 
     #[test]
+    fn systemd_v255_cli_relationship_lists_preserve_canonical_hex_escapes() {
+        // systemd v255, db11bab38ccf1ed257f310d29070843d4c58ea01:
+        // src/shared/bus-print-properties.c: string arrays use shell_maybe_quote(str, 0).
+        // src/basic/escape.c: shell_maybe_quote/strcpy_backslash_escaped and
+        // src/basic/escape.h: SHELL_NEED_ESCAPE make each literal backslash
+        // a doubled backslash inside double quotes. These are synthetic names.
+        for (cli, canonical) in [
+            ("normal.service", "normal.service"),
+            (
+                "instance@one-two_3:four.service",
+                "instance@one-two_3:four.service",
+            ),
+            (
+                r#""mnt-fixture\\x20one.mount""#,
+                r"mnt-fixture\x20one.mount",
+            ),
+            (r#""escaped\\x2dunit.service""#, r"escaped\x2dunit.service"),
+            (
+                r#""escaped\\x5C\\x22\\x3b.service""#,
+                r"escaped\x5C\x22\x3b.service",
+            ),
+            (r"escaped\x20unit.service", r"escaped\x20unit.service"),
+            (r"'escaped\x20unit.service'", r"escaped\x20unit.service"),
+        ] {
+            assert_eq!(unit_list(cli).unwrap(), [canonical], "CLI form: {cli}");
+        }
+        // Canonical hex spelling is opaque identity text, never a decoded byte
+        // (including NUL, whitespace, shell syntax, non-ASCII or backslash).
+        for byte in 0..=255 {
+            for hex in [format!("{byte:02x}"), format!("{byte:02X}")] {
+                let canonical = format!(r"escaped\x{hex}.service");
+                let cli = format!(r#""escaped\\x{hex}.service""#);
+                assert_eq!(unit_list(&cli).unwrap(), [canonical]);
+            }
+        }
+    }
+
+    #[test]
+    fn systemd_v255_cli_mixed_batch_and_alias_identity_matching() {
+        let list = r#"normal.service "escaped\\x20one.service" "escaped\\x2Dtwo.mount""#;
+        let normal = record("normal.service", "", "", false);
+        let canonical = r"canonical\x20unit.service";
+        let alias = r"alias\x20unit.service";
+        let escaped = record(canonical, list, "", false)
+            .replace(
+                &format!("Names={canonical}"),
+                r#"Names="canonical\\x20unit.service" "alias\\x20unit.service""#,
+            )
+            .replace("Following=", &format!("Following={canonical}"))
+            .replace("Before=", &format!("Before={list}"));
+        let batch = format!("{normal}\n\n{escaped}\n");
+        let parsed = parse_systemd_stop_impact(&batch).unwrap();
+        assert_eq!(parsed.len(), 2);
+        for property in ["RequiredBy", "Before"] {
+            assert_eq!(
+                parsed[1].related(property),
+                [
+                    "normal.service",
+                    r"escaped\x20one.service",
+                    r"escaped\x2Dtwo.mount"
+                ]
+            );
+        }
+        assert_eq!(parsed[1].names, [canonical, alias]);
+        assert_eq!(parsed[1].following.as_deref(), Some(canonical));
+        let requested = vec![pending("normal.service"), pending(alias)];
+        let matched = match_batch_by_identity(&requested, parsed.clone()).unwrap();
+        assert_eq!(matched[alias].id, canonical);
+        let reversed =
+            match_batch_by_identity(&requested, parsed.into_iter().rev().collect()).unwrap();
+        assert_eq!(matched[alias], reversed[alias]);
+        assert_eq!(matched["normal.service"], reversed["normal.service"]);
+
+        // Two requested aliases still cannot claim the same observed record.
+        let ambiguous = vec![pending(canonical), pending(alias)];
+        let parsed = parse_systemd_stop_impact(&escaped).unwrap();
+        assert!(match_batch_by_identity(&ambiguous, parsed).is_err());
+    }
+
+    #[test]
+    fn systemd_v255_cli_rejects_malformed_quotes_and_unsupported_escapes() {
+        for value in [
+            "'unterminated.service",
+            "\"unterminated.service",
+            "\"\"",
+            "''",
+            "pre\"mixed\".service",
+            "'one'\"two\".service",
+            "\"unit.service\"suffix",
+            r#""escaped\x20.service""#,
+            r#""escaped\q.service""#,
+            r#""escaped\n.service""#,
+            r#""escaped\t.service""#,
+            r#""escaped\040.service""#,
+            r#""escaped\u0020.service""#,
+            r#""escaped\\\\x20.service""#,
+            r"escaped\\x20.service",
+            r"escaped\q.service",
+            r"escaped\x.service",
+            r"escaped\x2.service",
+            r"escaped\xGG.service",
+            r"escaped\X20.service",
+            r#""escaped\\x.service""#,
+            r#""escaped\\x2.service""#,
+            r#""escaped\\x2z.service""#,
+            "trailing.service\\",
+            "\"trailing.service\\",
+            r"$'escaped\x20.service'",
+        ] {
+            assert!(
+                unit_list(value).is_err(),
+                "accepted malformed CLI form: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn systemd_v255_cli_rejects_unsafe_decoded_values_and_normalized_duplicates() {
+        for value in [
+            "\"white space.service\"",
+            "'white space.service'",
+            "\"unit;other.service\"",
+            r#""unit\$value.service""#,
+            r#""unit\`value.service""#,
+            r#""unit\"value.service""#,
+            "unit&other.service",
+            "unit|other.service",
+            "unit(1).service",
+            "unit*.service",
+            "unit>other.service",
+            "unit<other.service",
+            "unit!other.service",
+            "unit/other.service",
+            "unit=value.service",
+            "unité.service",
+            r#"escaped\x20unit.service "escaped\\x20unit.service""#,
+            r#"'escaped\x20unit.service' "escaped\\x20unit.service""#,
+            r#""escaped\\x20unit.service" "escaped\\x20unit.service""#,
+            "normal.service 'normal.service'",
+        ] {
+            assert!(
+                unit_list(value).is_err(),
+                "accepted unsafe/duplicate identities: {value}"
+            );
+        }
+        for byte in (0..=31).chain(std::iter::once(127)) {
+            for value in [
+                format!("unit{}name.service", char::from(byte)),
+                format!("normal.service{}other.service", char::from(byte)),
+            ] {
+                assert!(unit_list(&value).is_err(), "accepted control byte: {byte}");
+            }
+        }
+    }
+
+    #[test]
+    fn systemd_v255_cli_rejects_entire_malformed_mixed_batches() {
+        let normal = record("normal.service", "", "", false);
+        for property in ["Names", "RequiredBy", "Before"] {
+            for cli in [
+                r#""escaped\\x2z.service""#,
+                r#""escaped\\x20.service" escaped\x20.service"#,
+                "\"unterminated.service",
+            ] {
+                let original = if property == "Names" {
+                    "Names=other.service".to_owned()
+                } else {
+                    format!("{property}=")
+                };
+                let malformed = record("other.service", "", "", false)
+                    .replace(&original, &format!("{property}={cli}"));
+                for batch in [
+                    format!("{normal}\n\n{malformed}"),
+                    format!("{malformed}\n\n{normal}"),
+                ] {
+                    assert!(parse_systemd_stop_impact(&batch).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn systemd_v255_cli_normalization_keeps_encoded_property_and_unit_bounds() {
+        let prefix = "a".repeat(243);
+        let canonical = format!(r"{prefix}\x20.service");
+        let cli = format!(r#""{prefix}\\x20.service""#);
+        assert_eq!(canonical.len(), 255);
+        assert!(cli.len() > canonical.len());
+        assert_eq!(unit_list(&cli).unwrap(), [canonical]);
+        let oversized = format!(r#""a{prefix}\\x20.service""#);
+        assert!(unit_list(&oversized).is_err());
+
+        // The original encoded property is bounded before normalization, even
+        // when decoding/tokenization would produce only two short identities.
+        let oversized_property = format!("{}{}other.service", cli, " ".repeat(MAX_PROPERTY_BYTES));
+        let batch = record("root.service", &oversized_property, "", false);
+        assert!(parse_systemd_stop_impact(&batch).is_err());
+    }
+
+    #[test]
     fn identity_matching_rejects_missing_extra_duplicate_and_ambiguous_records() {
         let requested = vec![pending("a.service"), pending("b.service")];
         let a = parse_systemd_stop_impact(&record("a.service", "", "", false))
@@ -1946,6 +2142,96 @@ mod tests {
     struct Session {
         responses: Mutex<VecDeque<String>>,
         commands: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[tokio::test]
+    async fn systemd_v255_cli_candidate_batch_keeps_valid_records_and_final_root_query() {
+        let helper_id = "helper.service";
+        let helper_alias = "helper-alias.service";
+        let helper = record(helper_id, "root.service", "", true).replace(
+            &format!("Names={helper_id}"),
+            "Names=helper.service helper-alias.service",
+        );
+        let slice = record(
+            "system.slice",
+            r#"root.service helper.service "mnt-fixture\\x20one.mount""#,
+            "",
+            false,
+        )
+        .replace(
+            "Before=",
+            r#"Before=child.service "mnt-fixture\\x20one.mount""#,
+        );
+        let child = record("child.service", "", "", false);
+        let mut results = Vec::new();
+        let mut request_sets = Vec::new();
+        for reversed in [false, true] {
+            let requires = if reversed {
+                "system.slice helper-alias.service"
+            } else {
+                "helper-alias.service system.slice"
+            };
+            let root = record("root.service", "child.service", requires, false)
+                .replace("OnSuccess=", "OnSuccess=notify.service");
+            let batch = if reversed {
+                [slice.as_str(), helper.as_str()]
+            } else {
+                [helper.as_str(), slice.as_str()]
+            }
+            .join("\n\n");
+            let commands = Arc::new(Mutex::new(Vec::new()));
+            let session = Session {
+                responses: Mutex::new(VecDeque::from([root.clone(), child.clone(), batch, root])),
+                commands: commands.clone(),
+            };
+            let result = assess_systemd_stop_impact(
+                &session,
+                CancellationToken::new(),
+                HostId::new(),
+                HostSessionId::new(),
+                "root.service".into(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.completeness, StopImpactCompleteness::Complete);
+            assert!(result.root_consistent);
+            assert_eq!(result.accounting.actual_ssh_queries, 4);
+            assert_eq!(result.accounting.retained_units, 3);
+            assert_eq!(result.accounting.unresolved_frontier_references, 0);
+            assert!(result.conditional_consequences.iter().any(|consequence| {
+                consequence.canonical_unit == helper_id
+                    && consequence.classification
+                        == StopImpactConditionalClassification::ConditionallyAffected
+            }));
+            assert!(
+                !result
+                    .warnings
+                    .contains(&StopImpactWarning::UnsupportedProperty)
+            );
+            let requests = commands.lock().unwrap().clone();
+            assert_eq!(requests.len(), 4);
+            assert!(requests[2].ends_with(&format!(" show -- '{helper_alias}' 'system.slice'")));
+            assert!(
+                requests
+                    .last()
+                    .unwrap()
+                    .ends_with(" show -- 'root.service'")
+            );
+            request_sets.push(requests);
+            results.push(result);
+        }
+        assert_eq!(request_sets[0], request_sets[1]);
+        assert_eq!(results[0].units, results[1].units);
+        assert_eq!(results[0].edges, results[1].edges);
+        assert_eq!(
+            results[0].conditional_consequences,
+            results[1].conditional_consequences
+        );
+        assert_eq!(
+            results[0].conditional_diagnostics,
+            results[1].conditional_diagnostics
+        );
+        assert_eq!(results[0].accounting, results[1].accounting);
     }
 
     struct FallibleSession {
