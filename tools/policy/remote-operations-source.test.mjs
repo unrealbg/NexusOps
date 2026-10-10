@@ -850,7 +850,11 @@ test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds',
     'fn match_batch_by_identity(',
     'fn has_direct_frontier(&self) -> bool',
     'StopImpactConditionalClassification::CoverageUnknown',
+    'const MAX_DIAGNOSTICS: usize = 512;',
     'StopImpactWarning::UnsupportedEnumerant',
+    'StopImpactWarning::DiagnosticLimit',
+    '("UpheldBy", StopImpactDiagnosticKind::UpheldByReactivation)',
+    'omitted_known_diagnostics',
     'relationship_order',
     'eligible.sort_by',
     'fn conditional_diagnostics(&self)',
@@ -867,6 +871,26 @@ test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds',
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,
+      stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replace(
+        'self.accounting.omitted_known_diagnostics = self',
+        'self.accounting.omitted_known_edges = self',
+      ),
+    }),
+    /diagnostic truncation changed graph-edge accounting/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replace(
+        'self.warning(StopImpactWarning::DiagnosticLimit);',
+        'self.warning(StopImpactWarning::EdgeLimit);',
+      ),
+    }),
+    /diagnostic truncation changed graph-edge accounting/,
+  );
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
       sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('session.rs')
         ? { ...file, source: file.source.replace('collect_stop_impact_output(&mut reader)', 'collect_output(&mut reader)') }
         : file),
@@ -877,6 +901,18 @@ test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds',
 
 test('policy rejects Goal 05G renderer targets and inspection-to-mutation bridges', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  for (const accountingField of [
+    'pub retained_diagnostics: u32,',
+    'pub omitted_known_diagnostics: u32,',
+  ]) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        stopImpactModelSource: fixture.stopImpactModelSource.replace(accountingField, ''),
+      }),
+      /diagnostic DTO boundary changed/,
+    );
+  }
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,

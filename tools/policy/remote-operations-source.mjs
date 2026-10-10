@@ -1073,6 +1073,7 @@ export function verifyRemoteOperationsSourceText({
   for (const required of [
     'const MAX_NODES: usize = 64;',
     'const MAX_EDGES: usize = 512;',
+    'const MAX_DIAGNOSTICS: usize = 512;',
     'const MAX_DEPTH: u8 = 4;',
     'const MAX_ALIASES: usize = 16;',
     'const MAX_PROPERTY_BYTES: usize = 8 * 1024;',
@@ -1093,6 +1094,9 @@ export function verifyRemoteOperationsSourceText({
     'fn promote_eligible_candidates(&mut self)',
     'StopImpactConditionalClassification::CoverageUnknown',
     'StopImpactWarning::UnsupportedEnumerant',
+    'StopImpactWarning::DiagnosticLimit',
+    '("UpheldBy", StopImpactDiagnosticKind::UpheldByReactivation)',
+    'omitted_known_diagnostics',
     'relationship_order',
     'eligible.sort_by',
     'fn conditional_diagnostics(&self)',
@@ -1103,6 +1107,32 @@ export function verifyRemoteOperationsSourceText({
     }
   }
   const stopImpactDiscoveryProduction = stopImpactDiscoverySource.split('#[cfg(test)]')[0];
+  const diagnosticLimitStart = stopImpactDiscoveryProduction.indexOf('let omitted_diagnostics =');
+  const diagnosticLimitEnd = stopImpactDiscoveryProduction.indexOf(
+    'let conditional_diagnostics =',
+    diagnosticLimitStart,
+  );
+  if (diagnosticLimitStart < 0 || diagnosticLimitEnd < 0) {
+    fail('Goal 05G diagnostic truncation accounting is missing');
+  }
+  const diagnosticLimitBlock = stopImpactDiscoveryProduction.slice(
+    diagnosticLimitStart,
+    diagnosticLimitEnd,
+  );
+  for (const forbidden of ['omitted_known_edges', 'StopImpactWarning::EdgeLimit']) {
+    if (diagnosticLimitBlock.includes(forbidden)) {
+      fail('Goal 05G diagnostic truncation changed graph-edge accounting');
+    }
+  }
+  for (const required of [
+    'MAX_DIAGNOSTICS',
+    'omitted_known_diagnostics',
+    'StopImpactWarning::DiagnosticLimit',
+  ]) {
+    if (!diagnosticLimitBlock.includes(required)) {
+      fail('Goal 05G diagnostic truncation accounting changed');
+    }
+  }
   if ((stopImpactDiscoveryProduction.match(/engine\s*\.execute\(session, &root_query/g) ?? []).length !== 2) {
     fail('Goal 05G root must be queried exactly twice: initial observation and final revalidation');
   }
@@ -1140,6 +1170,8 @@ export function verifyRemoteOperationsSourceText({
       || !stopImpactModelSource.includes('pub job_mode: Option<StopImpactJobMode>')
       || !stopImpactModelSource.includes('pub manager_action: Option<StopImpactManagerAction>')
       || !stopImpactModelSource.includes('pub conditional_diagnostics: Vec<SystemdStopImpactDiagnostic>')
+      || !stopImpactModelSource.includes('pub retained_diagnostics: u32')
+      || !stopImpactModelSource.includes('pub omitted_known_diagnostics: u32')
       || /RemoteOperationPlanId|NativeOperation|SystemdStop\b/.test(stopImpactModelSource)) {
     fail('Goal 05G diagnostic DTO boundary changed or gained mutation authority');
   }

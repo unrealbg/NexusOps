@@ -75,6 +75,7 @@ pub enum StopImpactWarning {
     AliasAmbiguity,
     UnsupportedProperty,
     UnsupportedEnumerant,
+    DiagnosticLimit,
     ConcurrentTopologyChange,
     CandidateCoverageIncomplete,
 }
@@ -86,6 +87,7 @@ pub enum StopImpactDiagnosticKind {
     OnFailureActivation,
     Trigger,
     TriggeredBy,
+    UpheldByReactivation,
     NonDefaultOnSuccessJobMode,
     NonDefaultOnFailureJobMode,
     SuccessManagerAction,
@@ -184,9 +186,11 @@ pub struct SystemdStopImpactAccounting {
     pub retained_units: u32,
     pub retained_edges: u32,
     pub retained_candidates: u32,
+    pub retained_diagnostics: u32,
     pub omitted_known_units: u32,
     pub omitted_known_edges: u32,
     pub omitted_known_candidates: u32,
+    pub omitted_known_diagnostics: u32,
     pub unresolved_frontier_references: u32,
     pub actual_ssh_queries: u8,
 }

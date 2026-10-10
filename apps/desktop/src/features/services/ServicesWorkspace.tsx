@@ -446,6 +446,9 @@ export function ServicesWorkspace({ host }: { host: Host }) {
               <dt>Observed units</dt><dd>{visibleAssessment.accounting.observedUnitRecords}</dd>
               <dt>Retained units</dt><dd>{visibleAssessment.accounting.retainedUnits}</dd>
               <dt>Retained edges</dt><dd>{visibleAssessment.accounting.retainedEdges}</dd>
+              <dt>Omitted known edges</dt><dd>{visibleAssessment.accounting.omittedKnownEdges}</dd>
+              <dt>Retained passive diagnostics</dt><dd>{visibleAssessment.accounting.retainedDiagnostics}</dd>
+              <dt>Omitted known passive diagnostics</dt><dd>{visibleAssessment.accounting.omittedKnownDiagnostics}</dd>
               <dt>Unresolved frontier references</dt><dd>{visibleAssessment.accounting.unresolvedFrontierReferences}</dd>
               <dt>Actual SSH queries</dt><dd>{visibleAssessment.accounting.actualSshQueries}</dd>
             </dl>

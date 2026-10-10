@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_NODES: usize = 64;
 const MAX_EDGES: usize = 512;
+const MAX_DIAGNOSTICS: usize = 512;
 const MAX_DEPTH: u8 = 4;
 const MAX_ALIASES: usize = 16;
 const MAX_PROPERTY_BYTES: usize = 8 * 1024;
@@ -78,6 +79,7 @@ impl ParsedStopImpactUnit {
             || !self.related("OnFailure").is_empty()
             || !self.related("Triggers").is_empty()
             || !self.related("TriggeredBy").is_empty()
+            || !self.related("UpheldBy").is_empty()
             || self.on_success_job_mode != "fail"
             || self.on_failure_job_mode != "replace"
             || self.success_action != "none"
@@ -98,6 +100,7 @@ impl ParsedStopImpactUnit {
             ("OnFailure", StopImpactDiagnosticKind::OnFailureActivation),
             ("Triggers", StopImpactDiagnosticKind::Trigger),
             ("TriggeredBy", StopImpactDiagnosticKind::TriggeredBy),
+            ("UpheldBy", StopImpactDiagnosticKind::UpheldByReactivation),
         ] {
             diagnostics.extend(self.related(property).iter().map(|related_unit| {
                 SystemdStopImpactDiagnostic {
@@ -574,9 +577,11 @@ impl Builder {
                 retained_units: 1,
                 retained_edges: 0,
                 retained_candidates: 0,
+                retained_diagnostics: 0,
                 omitted_known_units: 0,
                 omitted_known_edges: 0,
                 omitted_known_candidates: 0,
+                omitted_known_diagnostics: 0,
                 unresolved_frontier_references: 0,
                 actual_ssh_queries: 1,
             },
@@ -1292,19 +1297,19 @@ impl Builder {
                 diagnostic_map.entry(key).or_insert(diagnostic);
             }
         }
-        let omitted_diagnostics = diagnostic_map.len().saturating_sub(MAX_EDGES);
+        let omitted_diagnostics = diagnostic_map.len().saturating_sub(MAX_DIAGNOSTICS);
         if omitted_diagnostics > 0 {
-            self.accounting.omitted_known_edges = self
+            self.accounting.omitted_known_diagnostics = self
                 .accounting
-                .omitted_known_edges
+                .omitted_known_diagnostics
                 .saturating_add(u32::try_from(omitted_diagnostics).unwrap_or(u32::MAX));
             self.incomplete = true;
             self.unknown = true;
-            self.warning(StopImpactWarning::EdgeLimit);
+            self.warning(StopImpactWarning::DiagnosticLimit);
         }
         let conditional_diagnostics = diagnostic_map
             .into_values()
-            .take(MAX_EDGES)
+            .take(MAX_DIAGNOSTICS)
             .collect::<Vec<_>>();
         let mut units = self
             .records
@@ -1337,6 +1342,8 @@ impl Builder {
             .collect::<Vec<_>>();
         self.accounting.retained_units = u32::try_from(units.len()).unwrap_or(u32::MAX);
         self.accounting.retained_edges = u32::try_from(edges.len()).unwrap_or(u32::MAX);
+        self.accounting.retained_diagnostics =
+            u32::try_from(conditional_diagnostics.len()).unwrap_or(u32::MAX);
         let warnings = self
             .warnings
             .into_iter()
@@ -1594,6 +1601,7 @@ fn diagnostic_code(value: StopImpactDiagnosticKind) -> u8 {
         StopImpactDiagnosticKind::OnFailureActivation => 1,
         StopImpactDiagnosticKind::Trigger => 2,
         StopImpactDiagnosticKind::TriggeredBy => 3,
+        StopImpactDiagnosticKind::UpheldByReactivation => 9,
         StopImpactDiagnosticKind::NonDefaultOnSuccessJobMode => 4,
         StopImpactDiagnosticKind::NonDefaultOnFailureJobMode => 5,
         StopImpactDiagnosticKind::SuccessManagerAction => 6,
@@ -1615,6 +1623,7 @@ fn warning_code(value: StopImpactWarning) -> u8 {
         StopImpactWarning::UnsupportedEnumerant => 8,
         StopImpactWarning::ConcurrentTopologyChange => 9,
         StopImpactWarning::CandidateCoverageIncomplete => 10,
+        StopImpactWarning::DiagnosticLimit => 11,
     }
 }
 
@@ -1631,6 +1640,7 @@ fn warning_from_code(value: u8) -> Option<StopImpactWarning> {
         8 => StopImpactWarning::UnsupportedEnumerant,
         9 => StopImpactWarning::ConcurrentTopologyChange,
         10 => StopImpactWarning::CandidateCoverageIncomplete,
+        11 => StopImpactWarning::DiagnosticLimit,
         _ => return None,
     })
 }
@@ -2203,6 +2213,115 @@ mod tests {
             diagnostic.related_unit.as_deref() != Some("reboot")
                 && diagnostic.related_unit.as_deref() != Some("restart-dependencies")
         }));
+    }
+
+    #[tokio::test]
+    async fn publishes_upheld_by_as_passive_unknown_reactivation_context() {
+        let root =
+            record("root.service", "", "", false).replace("UpheldBy=", "UpheldBy=guardian.service");
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([root.clone(), root])),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Complete);
+        assert_eq!(result.uncertainty, StopImpactUncertainty::UnknownImpact);
+        assert!(result.edges.is_empty());
+        assert_eq!(result.accounting.retained_edges, 0);
+        assert_eq!(result.accounting.omitted_known_edges, 0);
+        assert_eq!(result.accounting.retained_diagnostics, 1);
+        assert_eq!(result.accounting.omitted_known_diagnostics, 0);
+        assert_eq!(
+            result.conditional_diagnostics,
+            [SystemdStopImpactDiagnostic {
+                canonical_unit: "root.service".into(),
+                kind: StopImpactDiagnosticKind::UpheldByReactivation,
+                related_unit: Some("guardian.service".into()),
+                job_mode: None,
+                manager_action: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostic_limit_does_not_change_graph_edge_accounting() {
+        let references = (0..513)
+            .map(|index| format!("u{index:03}.service"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let root = record("root.service", "", "", false)
+            .replace("UpheldBy=", &format!("UpheldBy={references}"));
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([root.clone(), root])),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Partial);
+        assert_eq!(result.uncertainty, StopImpactUncertainty::UnknownImpact);
+        assert_eq!(result.conditional_diagnostics.len(), MAX_DIAGNOSTICS);
+        assert_eq!(result.accounting.retained_diagnostics, 512);
+        assert_eq!(result.accounting.omitted_known_diagnostics, 1);
+        assert_eq!(result.accounting.retained_edges, 0);
+        assert_eq!(result.accounting.omitted_known_edges, 0);
+        assert!(
+            result
+                .warnings
+                .contains(&StopImpactWarning::DiagnosticLimit)
+        );
+        assert!(!result.warnings.contains(&StopImpactWarning::EdgeLimit));
+    }
+
+    #[tokio::test]
+    async fn graph_edge_and_passive_diagnostic_accounting_are_independent() {
+        let references = (0..513)
+            .map(|index| format!("u{index:03}.service"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let root = record("root.service", "child.service", "", false)
+            .replace("UpheldBy=", &format!("UpheldBy={references}"));
+        let child = record("child.service", "", "", false);
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([root.clone(), child, root])),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Partial);
+        assert_eq!(result.accounting.retained_edges, 1);
+        assert_eq!(result.accounting.omitted_known_edges, 0);
+        assert_eq!(result.accounting.retained_diagnostics, 512);
+        assert_eq!(result.accounting.omitted_known_diagnostics, 1);
+        assert_eq!(result.edges.len(), 1);
+        assert_eq!(result.conditional_diagnostics.len(), MAX_DIAGNOSTICS);
+        assert!(
+            result
+                .warnings
+                .contains(&StopImpactWarning::DiagnosticLimit)
+        );
+        assert!(!result.warnings.contains(&StopImpactWarning::EdgeLimit));
     }
 
     #[tokio::test]

@@ -63,8 +63,9 @@ function stopImpactAssessment(hostSessionId = A): SystemdStopImpactAssessment {
     units: [], edges: [], conditionalConsequences: [], conditionalDiagnostics: [], warnings: [], limitations: [],
     accounting: {
       observedUnitRecords: 1, observedRelationshipReferences: 0, observedCandidateReferences: 0,
-      retainedUnits: 1, retainedEdges: 0, retainedCandidates: 0, omittedKnownUnits: 0,
-      omittedKnownEdges: 0, omittedKnownCandidates: 0, unresolvedFrontierReferences: 0,
+      retainedUnits: 1, retainedEdges: 0, retainedCandidates: 0, retainedDiagnostics: 0,
+      omittedKnownUnits: 0, omittedKnownEdges: 0, omittedKnownCandidates: 0,
+      omittedKnownDiagnostics: 0, unresolvedFrontierReferences: 0,
       actualSshQueries: 2,
     },
   };
@@ -152,13 +153,15 @@ describe('session-bound Services workspace', () => {
       }],
       conditionalDiagnostics: [
         { canonicalUnit: 'ssh.service', kind: 'onFailureActivation', relatedUnit: 'recovery.service', jobMode: null, managerAction: null },
+        { canonicalUnit: 'ssh.service', kind: 'upheldByReactivation', relatedUnit: 'guardian.service', jobMode: null, managerAction: null },
         { canonicalUnit: 'ssh.service', kind: 'successManagerAction', relatedUnit: null, jobMode: null, managerAction: 'reboot' },
       ],
       accounting: {
         observedUnitRecords: 1, observedRelationshipReferences: 0,
         observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0,
-        retainedCandidates: 0, omittedKnownUnits: 0, omittedKnownEdges: 0,
-        omittedKnownCandidates: 0, unresolvedFrontierReferences: 2, actualSshQueries: 2,
+        retainedCandidates: 0, retainedDiagnostics: 3, omittedKnownUnits: 0,
+        omittedKnownEdges: 0, omittedKnownCandidates: 0, omittedKnownDiagnostics: 0,
+        unresolvedFrontierReferences: 2, actualSshQueries: 2,
       },
       warnings: ['concurrentTopologyChange'],
       limitations: ['systemd topology only'],
@@ -169,16 +172,21 @@ describe('session-bound Services workspace', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Read-only stop impact' });
     expect(within(dialog).getByText(/does not authorize or perform a stop/)).toBeInTheDocument();
     expect(within(dialog).getByText(/Absence of an observed relationship/)).toBeInTheDocument();
-    expect(within(dialog).getAllByText('ssh.service')).toHaveLength(6);
+    expect(within(dialog).getAllByText('ssh.service')).toHaveLength(7);
     expect(within(dialog).getByText('requiredBy')).toBeInTheDocument();
     expect(within(dialog).getByText('worker.service')).toBeInTheDocument();
     expect(within(dialog).getByText('retainedByUnaffectedReference')).toBeInTheDocument();
     expect(within(dialog).getByText('cache.service')).toBeInTheDocument();
     expect(within(dialog).getByText('onFailureActivation')).toBeInTheDocument();
     expect(within(dialog).getByText('recovery.service')).toBeInTheDocument();
+    expect(within(dialog).getByText('upheldByReactivation')).toBeInTheDocument();
+    expect(within(dialog).getByText('guardian.service')).toBeInTheDocument();
     expect(within(dialog).getByText('successManagerAction')).toBeInTheDocument();
     expect(within(dialog).getByText('reboot')).toBeInTheDocument();
+    expect(within(dialog).getByText('Retained passive diagnostics')).toBeInTheDocument();
+    expect(within(dialog).getByText('Omitted known passive diagnostics')).toBeInTheDocument();
     expect(within(dialog).getByText(/do not prove causation/)).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /stop/i })).not.toBeInTheDocument();
     expect(within(dialog).getByText(/concurrentTopologyChange/)).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
     expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
@@ -201,8 +209,9 @@ describe('session-bound Services workspace', () => {
       units: [], edges: [], conditionalConsequences: [], conditionalDiagnostics: [], warnings: [], limitations: [], accounting: {
         observedUnitRecords: 1, observedRelationshipReferences: 0,
         observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0,
-        retainedCandidates: 0, omittedKnownUnits: 0, omittedKnownEdges: 0,
-        omittedKnownCandidates: 0, unresolvedFrontierReferences: 0, actualSshQueries: 2,
+        retainedCandidates: 0, retainedDiagnostics: 0, omittedKnownUnits: 0,
+        omittedKnownEdges: 0, omittedKnownCandidates: 0, omittedKnownDiagnostics: 0,
+        unresolvedFrontierReferences: 0, actualSshQueries: 2,
       },
     }); });
     expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
