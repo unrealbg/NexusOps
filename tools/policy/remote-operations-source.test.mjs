@@ -858,6 +858,16 @@ test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds',
     'relationship_order',
     'eligible.sort_by',
     'fn conditional_diagnostics(&self)',
+    'impl Iterator<Item = DiagnosticView',
+    'struct DiagnosticProjection',
+    '(MAX_DIAGNOSTICS + 1) * 1024 + MAX_PROPERTY_BYTES * size_of::<&str>()',
+    '.saturating_add(DIAGNOSTIC_WORKING_SET_BYTES)',
+    'retained: Vec::with_capacity(MAX_DIAGNOSTICS)',
+    'seen_related: Vec::with_capacity(MAX_PROPERTY_BYTES)',
+    'assert!(self.seen_related.len() < MAX_PROPERTY_BYTES)',
+    'self.seen_related.binary_search(&normalized)',
+    'self.retained.pop();',
+    'self.retained.insert(index, diagnostic.into_owned());',
     'std::num::NonZeroU32::new',
   ]) {
     assert.throws(
@@ -868,6 +878,16 @@ test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds',
       /bounded graph implementation is missing/,
     );
   }
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replace(
+        'let mut projection = DiagnosticProjection::new();',
+        'let mut diagnostic_map = BTreeMap::new();\nlet mut projection = DiagnosticProjection::new();',
+      ),
+    }),
+    /diagnostic projection must not materialize all diagnostics/,
+  );
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,

@@ -1100,13 +1100,29 @@ export function verifyRemoteOperationsSourceText({
     'relationship_order',
     'eligible.sort_by',
     'fn conditional_diagnostics(&self)',
+    'impl Iterator<Item = DiagnosticView',
+    'struct DiagnosticProjection',
+    '(MAX_DIAGNOSTICS + 1) * 1024 + MAX_PROPERTY_BYTES * size_of::<&str>()',
+    '.saturating_add(DIAGNOSTIC_WORKING_SET_BYTES)',
+    'retained: Vec::with_capacity(MAX_DIAGNOSTICS)',
+    'seen_related: Vec::with_capacity(MAX_PROPERTY_BYTES)',
+    'assert!(self.seen_related.len() < MAX_PROPERTY_BYTES)',
+    'self.seen_related.binary_search(&normalized)',
+    'self.retained.pop();',
+    'self.retained.insert(index, diagnostic.into_owned());',
     'std::num::NonZeroU32::new',
   ]) {
     if (!stopImpactDiscoverySource.includes(required)) {
       fail(`Goal 05G bounded graph implementation is missing ${required}`);
     }
   }
-  const stopImpactDiscoveryProduction = stopImpactDiscoverySource.split('#[cfg(test)]')[0];
+  // Inspect the full production source: inline cfg(test) metrics above the
+  // test module must not hide finish() from policy verification.
+  const stopImpactDiscoveryProduction = stopImpactDiscoverySource.split(/#\[cfg\(test\)\]\s*mod tests/)[0];
+  if (stopImpactDiscoveryProduction.includes('let mut diagnostic_map =')
+      || /fn conditional_diagnostics\(&self\)\s*->\s*Vec</.test(stopImpactDiscoveryProduction)) {
+    fail('Goal 05G diagnostic projection must not materialize all diagnostics');
+  }
   const diagnosticLimitStart = stopImpactDiscoveryProduction.indexOf('let omitted_diagnostics =');
   const diagnosticLimitEnd = stopImpactDiscoveryProduction.indexOf(
     'let conditional_diagnostics =',

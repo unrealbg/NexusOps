@@ -23,6 +23,11 @@ const MAX_PROPERTY_BYTES: usize = 8 * 1024;
 const MAX_BLOCK_BYTES: usize = 32 * 1024;
 const MAX_AGGREGATE_OUTPUT_BYTES: usize = 256 * 1024;
 const MAX_WORKING_SET_BYTES: usize = 2 * 1024 * 1024;
+// Reserve projection storage during traversal, before it is allocated in finish().
+// Each owned slot includes the DTO, two <=255-byte identities and allocation
+// overhead. Deduplication borrows at most one 8 KiB property's identities.
+const DIAGNOSTIC_WORKING_SET_BYTES: usize =
+    (MAX_DIAGNOSTICS + 1) * 1024 + MAX_PROPERTY_BYTES * size_of::<&str>();
 const MAX_QUERIES: u8 = 6;
 const FINAL_QUERY_RESERVE: Duration = Duration::from_secs(8);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
@@ -93,35 +98,37 @@ impl ParsedStopImpactUnit {
             || self.unsupported_failure_action
     }
 
-    fn conditional_diagnostics(&self) -> Vec<SystemdStopImpactDiagnostic> {
-        let mut diagnostics = Vec::new();
-        for (property, kind) in [
+    fn conditional_diagnostics(&self) -> impl Iterator<Item = DiagnosticView<'_>> {
+        let relationships = [
             ("OnSuccess", StopImpactDiagnosticKind::OnSuccessActivation),
             ("OnFailure", StopImpactDiagnosticKind::OnFailureActivation),
             ("Triggers", StopImpactDiagnosticKind::Trigger),
             ("TriggeredBy", StopImpactDiagnosticKind::TriggeredBy),
             ("UpheldBy", StopImpactDiagnosticKind::UpheldByReactivation),
-        ] {
-            diagnostics.extend(self.related(property).iter().map(|related_unit| {
-                SystemdStopImpactDiagnostic {
-                    canonical_unit: self.id.clone(),
+        ]
+        .into_iter()
+        .flat_map(move |(property, kind)| {
+            self.related(property)
+                .iter()
+                .map(move |related_unit| DiagnosticView {
+                    canonical_unit: &self.id,
                     kind,
-                    related_unit: Some(related_unit.clone()),
+                    related_unit: Some(related_unit),
                     job_mode: None,
                     manager_action: None,
-                }
-            }));
-        }
+                })
+        });
+        let mut scalars = [None; 5];
         if self.has_unsupported_enumerant() {
-            diagnostics.push(SystemdStopImpactDiagnostic {
-                canonical_unit: self.id.clone(),
+            scalars[0] = Some(DiagnosticView {
+                canonical_unit: &self.id,
                 kind: StopImpactDiagnosticKind::UnsupportedEnumerant,
                 related_unit: None,
                 job_mode: None,
                 manager_action: None,
             });
         }
-        for (value, default, unsupported, kind) in [
+        for (index, (value, default, unsupported, kind)) in [
             (
                 self.on_success_job_mode.as_str(),
                 "fail",
@@ -134,10 +141,13 @@ impl ParsedStopImpactUnit {
                 self.unsupported_on_failure_job_mode,
                 StopImpactDiagnosticKind::NonDefaultOnFailureJobMode,
             ),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             if !unsupported && value != default {
-                diagnostics.push(SystemdStopImpactDiagnostic {
-                    canonical_unit: self.id.clone(),
+                scalars[index + 1] = Some(DiagnosticView {
+                    canonical_unit: &self.id,
                     kind,
                     related_unit: None,
                     job_mode: stop_impact_job_mode(value),
@@ -145,7 +155,7 @@ impl ParsedStopImpactUnit {
                 });
             }
         }
-        for (value, unsupported, kind) in [
+        for (index, (value, unsupported, kind)) in [
             (
                 self.success_action.as_str(),
                 self.unsupported_success_action,
@@ -156,10 +166,13 @@ impl ParsedStopImpactUnit {
                 self.unsupported_failure_action,
                 StopImpactDiagnosticKind::FailureManagerAction,
             ),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             if !unsupported && value != "none" {
-                diagnostics.push(SystemdStopImpactDiagnostic {
-                    canonical_unit: self.id.clone(),
+                scalars[index + 3] = Some(DiagnosticView {
+                    canonical_unit: &self.id,
                     kind,
                     related_unit: None,
                     job_mode: None,
@@ -167,7 +180,121 @@ impl ParsedStopImpactUnit {
                 });
             }
         }
-        diagnostics
+        relationships.chain(scalars.into_iter().flatten())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DiagnosticView<'a> {
+    canonical_unit: &'a str,
+    kind: StopImpactDiagnosticKind,
+    related_unit: Option<&'a str>,
+    job_mode: Option<StopImpactJobMode>,
+    manager_action: Option<StopImpactManagerAction>,
+}
+
+impl DiagnosticView<'_> {
+    fn key(&self) -> (&str, u8, &str) {
+        (
+            self.canonical_unit,
+            diagnostic_code(self.kind),
+            self.related_unit.unwrap_or_default(),
+        )
+    }
+
+    fn into_owned(self) -> SystemdStopImpactDiagnostic {
+        SystemdStopImpactDiagnostic {
+            canonical_unit: self.canonical_unit.to_owned(),
+            kind: self.kind,
+            related_unit: self.related_unit.map(str::to_owned),
+            job_mode: self.job_mode,
+            manager_action: self.manager_action,
+        }
+    }
+}
+
+struct DiagnosticProjection<'a> {
+    retained: Vec<SystemdStopImpactDiagnostic>,
+    // Reset between properties/records. These references borrow the existing
+    // parsed records or alias map; omitted identities are never cloned.
+    seen_related: Vec<&'a str>,
+    unique_count: usize,
+    #[cfg(test)]
+    peak_retained: usize,
+    #[cfg(test)]
+    peak_seen_related: usize,
+}
+
+impl<'a> DiagnosticProjection<'a> {
+    fn new() -> Self {
+        Self {
+            retained: Vec::with_capacity(MAX_DIAGNOSTICS),
+            seen_related: Vec::with_capacity(MAX_PROPERTY_BYTES),
+            unique_count: 0,
+            #[cfg(test)]
+            peak_retained: 0,
+            #[cfg(test)]
+            peak_seen_related: 0,
+        }
+    }
+
+    fn project_record(
+        &mut self,
+        record: &'a ParsedStopImpactUnit,
+        aliases: &'a HashMap<String, String>,
+        ambiguous_aliases: &HashSet<String>,
+    ) {
+        self.seen_related.clear();
+        let mut previous_kind = None;
+        for mut diagnostic in record.conditional_diagnostics() {
+            if previous_kind != Some(diagnostic.kind) {
+                self.seen_related.clear();
+                previous_kind = Some(diagnostic.kind);
+            }
+            if let Some(related) = diagnostic.related_unit {
+                let normalized = if ambiguous_aliases.contains(related) {
+                    related
+                } else {
+                    aliases.get(related).map_or(related, String::as_str)
+                };
+                let Err(index) = self.seen_related.binary_search(&normalized) else {
+                    continue;
+                };
+                // Strict parsing bounds each property's reference count by its
+                // byte limit. Insertions cannot grow the reserved allocation.
+                assert!(self.seen_related.len() < MAX_PROPERTY_BYTES);
+                self.seen_related.insert(index, normalized);
+                diagnostic.related_unit = Some(normalized);
+            }
+            self.unique_count += 1;
+            let index = self
+                .retained
+                .binary_search_by(|retained| {
+                    (
+                        retained.canonical_unit.as_str(),
+                        diagnostic_code(retained.kind),
+                        retained.related_unit.as_deref().unwrap_or_default(),
+                    )
+                        .cmp(&diagnostic.key())
+                })
+                .expect_err("canonical records and normalized per-kind identities are unique");
+            if index < MAX_DIAGNOSTICS {
+                // Evict before allocating, so even intermediate owned storage
+                // never contains 513 diagnostics or duplicated sort keys.
+                if self.retained.len() == MAX_DIAGNOSTICS {
+                    self.retained.pop();
+                }
+                self.retained.insert(index, diagnostic.into_owned());
+            }
+            #[cfg(test)]
+            {
+                self.peak_retained = self.peak_retained.max(self.retained.len());
+                self.peak_seen_related = self.peak_seen_related.max(self.seen_related.len());
+                assert!(self.retained.len() <= MAX_DIAGNOSTICS);
+                assert_eq!(self.retained.capacity(), MAX_DIAGNOSTICS);
+                assert_eq!(self.seen_related.capacity(), MAX_PROPERTY_BYTES);
+            }
+        }
     }
 }
 
@@ -596,7 +723,7 @@ impl Builder {
         self.warnings.insert(warning_code(warning));
     }
 
-    fn enforce_working_set(&mut self) -> bool {
+    fn working_set_bytes(&self) -> usize {
         let record_bytes =
             self.records.values().fold(0usize, |total, retained| {
                 let relationships = retained.record.relationships.iter().fold(
@@ -660,14 +787,18 @@ impl Builder {
                         .sum::<usize>(),
                 )
         });
-        let estimate = 64usize
+        64usize
             .saturating_mul(1024)
             .saturating_add(record_bytes)
             .saturating_add(candidate_bytes)
             .saturating_add(edge_bytes)
             .saturating_add(alias_bytes)
-            .saturating_add(pending_bytes);
-        if estimate <= MAX_WORKING_SET_BYTES {
+            .saturating_add(pending_bytes)
+            .saturating_add(DIAGNOSTIC_WORKING_SET_BYTES)
+    }
+
+    fn enforce_working_set(&mut self) -> bool {
+        if self.working_set_bytes() <= MAX_WORKING_SET_BYTES {
             return true;
         }
         self.accounting.unresolved_frontier_references = self
@@ -1271,7 +1402,7 @@ impl Builder {
         if self.incomplete {
             self.unknown = true;
         }
-        let mut diagnostic_map = BTreeMap::new();
+        let mut projection = DiagnosticProjection::new();
         for record in self
             .records
             .values()
@@ -1282,22 +1413,10 @@ impl Builder {
                     .map(|candidate| &candidate.record),
             )
         {
-            for mut diagnostic in record.conditional_diagnostics() {
-                if let Some(related) = diagnostic.related_unit.as_mut()
-                    && !self.ambiguous_aliases.contains(related)
-                    && let Some(canonical) = self.aliases.get(related)
-                {
-                    *related = canonical.clone();
-                }
-                let key = (
-                    diagnostic.canonical_unit.clone(),
-                    diagnostic_code(diagnostic.kind),
-                    diagnostic.related_unit.clone().unwrap_or_default(),
-                );
-                diagnostic_map.entry(key).or_insert(diagnostic);
-            }
+            projection.project_record(record, &self.aliases, &self.ambiguous_aliases);
         }
-        let omitted_diagnostics = diagnostic_map.len().saturating_sub(MAX_DIAGNOSTICS);
+        let omitted_diagnostics = projection.unique_count.saturating_sub(MAX_DIAGNOSTICS);
+        let projected_diagnostics = projection.retained;
         if omitted_diagnostics > 0 {
             self.accounting.omitted_known_diagnostics = self
                 .accounting
@@ -1307,10 +1426,7 @@ impl Builder {
             self.unknown = true;
             self.warning(StopImpactWarning::DiagnosticLimit);
         }
-        let conditional_diagnostics = diagnostic_map
-            .into_values()
-            .take(MAX_DIAGNOSTICS)
-            .collect::<Vec<_>>();
+        let conditional_diagnostics = projected_diagnostics;
         let mut units = self
             .records
             .into_values()
@@ -2322,6 +2438,327 @@ mod tests {
                 .contains(&StopImpactWarning::DiagnosticLimit)
         );
         assert!(!result.warnings.contains(&StopImpactWarning::EdgeLimit));
+    }
+
+    // 64 units, 7,040 raw passive references, 6,720 canonical diagnostics.
+    // Every traversal response fits 64 KiB; the aggregate fits 256 KiB.
+    fn large_diagnostic_responses(permuted: bool) -> Vec<String> {
+        let children = (0..63)
+            .map(|index| format!("child-{index:02}.service"))
+            .collect::<Vec<_>>();
+        let mut references = (0..20)
+            .map(|index| format!("event-{index:02}.service"))
+            .collect::<Vec<_>>();
+        references.extend(["child-alias.service".into(), "child-00.service".into()]);
+        if permuted {
+            references.reverse();
+        }
+        let decorate = |mut output: String| {
+            for property in [
+                "OnSuccess",
+                "OnFailure",
+                "Triggers",
+                "TriggeredBy",
+                "UpheldBy",
+            ] {
+                output = output.replace(
+                    &format!("{property}="),
+                    &format!("{property}={}", references.join(" ")),
+                );
+            }
+            if permuted {
+                output.lines().rev().collect::<Vec<_>>().join("\n")
+            } else {
+                output
+            }
+        };
+        let mut direct = children.clone();
+        if permuted {
+            direct.reverse();
+        }
+        let root = decorate(
+            record("root-alias.service", &direct.join(" "), "", false)
+                .replace(
+                    "Names=root-alias.service",
+                    "Names=root.service root-alias.service",
+                )
+                .replace("Following=", "Following=root.service"),
+        );
+        let mut responses = vec![root.clone()];
+        responses.extend(children.chunks(16).map(|batch| {
+            let mut outputs = batch
+                .iter()
+                .map(|child| {
+                    let output = if child == "child-00.service" {
+                        record("child-alias.service", "", "", false)
+                            .replace(
+                                "Names=child-alias.service",
+                                if permuted {
+                                    "Names=child-alias.service child-00.service"
+                                } else {
+                                    "Names=child-00.service child-alias.service"
+                                },
+                            )
+                            .replace("Following=", "Following=child-00.service")
+                    } else {
+                        record(child, "", "", false)
+                    };
+                    decorate(output)
+                })
+                .collect::<Vec<_>>();
+            if permuted {
+                outputs.reverse();
+            }
+            outputs.join("\n\n")
+        }));
+        responses.push(root);
+        assert_eq!(responses.len(), usize::from(MAX_QUERIES));
+        assert!(responses.iter().all(|output| output.len() <= 64 * 1024));
+        assert!(responses.iter().map(String::len).sum::<usize>() <= MAX_AGGREGATE_OUTPUT_BYTES);
+        for output in &responses {
+            assert!(
+                output
+                    .split("\n\n")
+                    .all(|block| block.len() <= MAX_BLOCK_BYTES)
+            );
+            assert!(
+                output
+                    .lines()
+                    .filter_map(|line| line.split_once('='))
+                    .all(|(_, value)| value.len() <= MAX_PROPERTY_BYTES)
+            );
+            assert!(parse_systemd_stop_impact(output).is_ok());
+        }
+        responses
+    }
+
+    #[tokio::test]
+    async fn large_diagnostic_assessment_is_exact_deterministic_and_ends_with_sixth_root_query() {
+        let mut results = Vec::new();
+        let mut requests = Vec::new();
+        for permuted in [false, true] {
+            let commands = Arc::new(Mutex::new(Vec::new()));
+            let session = Session {
+                responses: Mutex::new(VecDeque::from(large_diagnostic_responses(permuted))),
+                commands: commands.clone(),
+            };
+            let result = assess_systemd_stop_impact(
+                &session,
+                CancellationToken::new(),
+                HostId::new(),
+                HostSessionId::new(),
+                "root-alias.service".into(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.accounting.retained_units, 64);
+            assert_eq!(result.accounting.retained_diagnostics, 512);
+            assert_eq!(result.accounting.omitted_known_diagnostics, 6208);
+            assert_eq!(result.accounting.retained_edges, 63);
+            assert_eq!(result.accounting.omitted_known_edges, 0);
+            assert_eq!(result.accounting.actual_ssh_queries, 6);
+            assert_eq!(result.completeness, StopImpactCompleteness::Partial);
+            assert_eq!(result.uncertainty, StopImpactUncertainty::UnknownImpact);
+            assert!(result.root_consistent);
+            assert_eq!(result.warnings, [StopImpactWarning::DiagnosticLimit]);
+            let related = std::iter::once("child-00.service".to_owned())
+                .chain((0..20).map(|index| format!("event-{index:02}.service")))
+                .collect::<Vec<_>>();
+            let expected = (0..5)
+                .flat_map(|index| {
+                    let related = &related;
+                    [
+                        StopImpactDiagnosticKind::OnSuccessActivation,
+                        StopImpactDiagnosticKind::OnFailureActivation,
+                        StopImpactDiagnosticKind::Trigger,
+                        StopImpactDiagnosticKind::TriggeredBy,
+                        StopImpactDiagnosticKind::UpheldByReactivation,
+                    ]
+                    .into_iter()
+                    .flat_map(move |kind| {
+                        related.iter().map(move |name| SystemdStopImpactDiagnostic {
+                            canonical_unit: format!("child-{index:02}.service"),
+                            kind,
+                            related_unit: Some(name.clone()),
+                            job_mode: None,
+                            manager_action: None,
+                        })
+                    })
+                })
+                .take(MAX_DIAGNOSTICS)
+                .collect::<Vec<_>>();
+            assert_eq!(result.conditional_diagnostics, expected);
+            assert!(result.conditional_diagnostics.iter().all(|diagnostic| {
+                diagnostic.canonical_unit != "child-alias.service"
+                    && diagnostic.related_unit.as_deref() != Some("child-alias.service")
+            }));
+            let commands = commands.lock().unwrap().clone();
+            assert_eq!(commands.len(), 6);
+            assert_eq!(commands.first(), commands.last());
+            assert!(
+                commands
+                    .last()
+                    .unwrap()
+                    .ends_with(" show -- 'root-alias.service'")
+            );
+            assert!(session.responses.lock().unwrap().is_empty());
+            requests.push(commands);
+            results.push(result);
+        }
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(
+            results[0].conditional_diagnostics,
+            results[1].conditional_diagnostics
+        );
+        assert_eq!(results[0].accounting, results[1].accounting);
+        assert_eq!(results[0].units, results[1].units);
+        assert_eq!(results[0].edges, results[1].edges);
+    }
+
+    #[test]
+    fn large_diagnostic_projection_bounds_every_intermediate_allocation_and_reserves_working_set() {
+        for permuted in [false, true] {
+            let responses = large_diagnostic_responses(permuted);
+            let root = parse_systemd_stop_impact(&responses[0]).unwrap().remove(0);
+            let mut builder = Builder::new(
+                HostId::new(),
+                HostSessionId::new(),
+                "root-alias.service".into(),
+                root,
+                responses[0].len(),
+            );
+            builder.inspect_record("root.service");
+            assert!(builder.enforce_working_set());
+            for output in &responses[1..5] {
+                let batch = builder.take_batch();
+                builder
+                    .retain_batch(batch, parse_systemd_stop_impact(output).unwrap())
+                    .unwrap();
+                assert!(builder.enforce_working_set());
+                assert!(builder.working_set_bytes() <= MAX_WORKING_SET_BYTES);
+            }
+            let mut projection = DiagnosticProjection::new();
+            let mut records = builder.records.values().collect::<Vec<_>>();
+            records.sort_by(|left, right| left.record.id.cmp(&right.record.id));
+            if permuted {
+                records.reverse();
+            }
+            for retained in records {
+                projection.project_record(
+                    &retained.record,
+                    &builder.aliases,
+                    &builder.ambiguous_aliases,
+                );
+            }
+            assert_eq!(projection.unique_count, 6720);
+            assert_eq!(projection.peak_retained, 512);
+            assert_eq!(projection.peak_seen_related, 21);
+            assert_eq!(projection.retained.capacity(), 512);
+            assert_eq!(projection.seen_related.capacity(), MAX_PROPERTY_BYTES);
+            let owned_bytes = projection.retained.capacity()
+                * size_of::<SystemdStopImpactDiagnostic>()
+                + projection
+                    .retained
+                    .iter()
+                    .map(|diagnostic| {
+                        diagnostic.canonical_unit.capacity()
+                            + diagnostic.related_unit.as_ref().map_or(0, String::capacity)
+                    })
+                    .sum::<usize>();
+            let scratch_bytes = projection.seen_related.capacity() * size_of::<&str>();
+            assert!(owned_bytes + scratch_bytes < DIAGNOSTIC_WORKING_SET_BYTES);
+            assert!(
+                builder.working_set_bytes() - DIAGNOSTIC_WORKING_SET_BYTES
+                    + owned_bytes
+                    + scratch_bytes
+                    <= MAX_WORKING_SET_BYTES
+            );
+            drop(projection);
+
+            // The old estimate alone would admit this state. The projection
+            // reservation must reject it before finish allocates any diagnostics.
+            let without_projection = builder.working_set_bytes() - DIAGNOSTIC_WORKING_SET_BYTES;
+            let additional = (MAX_WORKING_SET_BYTES - without_projection) / (256 + 2 * 255);
+            for index in 0..additional {
+                let name = format!("{index:08}{}", "a".repeat(247));
+                builder.aliases.insert(name.clone(), name);
+            }
+            assert!(
+                builder.working_set_bytes() - DIAGNOSTIC_WORKING_SET_BYTES <= MAX_WORKING_SET_BYTES
+            );
+            assert!(builder.working_set_bytes() > MAX_WORKING_SET_BYTES);
+            assert!(!builder.enforce_working_set());
+            assert!(builder.incomplete);
+            assert!(builder.unknown);
+        }
+    }
+
+    #[test]
+    fn diagnostic_projection_preserves_ambiguous_aliases_and_scalar_kinds() {
+        let root = record("root.service", "", "", false)
+            .replace("UpheldBy=", "UpheldBy=alias.service canonical.service")
+            .replace("OnSuccessJobMode=fail", "OnSuccessJobMode=replace")
+            .replace("OnFailureJobMode=replace", "OnFailureJobMode=fail")
+            .replace("SuccessAction=none", "SuccessAction=reboot")
+            .replace("FailureAction=none", "FailureAction=poweroff");
+        let parsed = parse_systemd_stop_impact(&root).unwrap().remove(0);
+        let aliases = HashMap::from([("alias.service".into(), "canonical.service".into())]);
+        let ambiguous = HashSet::from(["alias.service".into()]);
+        let mut projection = DiagnosticProjection::new();
+        projection.project_record(&parsed, &aliases, &ambiguous);
+        assert_eq!(projection.unique_count, 6);
+        assert_eq!(projection.retained.len(), 6);
+        assert!(
+            projection
+                .retained
+                .iter()
+                .any(|diagnostic| diagnostic.related_unit.as_deref() == Some("alias.service"))
+        );
+        let mut normalized = DiagnosticProjection::new();
+        normalized.project_record(&parsed, &aliases, &HashSet::new());
+        assert_eq!(normalized.unique_count, 5);
+        assert_eq!(normalized.retained.len(), 5);
+    }
+
+    #[test]
+    fn diagnostic_projection_reservation_covers_maximum_length_owned_identities() {
+        let references = (0..32)
+            .map(|index| format!("{index:02}{}.service", "r".repeat(245)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(references.len(), MAX_PROPERTY_BYTES - 1);
+        let records = (0..9)
+            .map(|index| {
+                let id = format!("{index:02}{}.service", "u".repeat(245));
+                assert_eq!(id.len(), 255);
+                let output = record(&id, "", "", false)
+                    .replace("OnSuccess=", &format!("OnSuccess={references}"))
+                    .replace("OnFailure=", &format!("OnFailure={references}"))
+                    .replace("UpheldBy=", &format!("UpheldBy={references}"));
+                assert!(output.len() <= MAX_BLOCK_BYTES);
+                parse_systemd_stop_impact(&output).unwrap().remove(0)
+            })
+            .collect::<Vec<_>>();
+        let aliases = HashMap::new();
+        let ambiguous = HashSet::new();
+        let mut projection = DiagnosticProjection::new();
+        for record in records.iter().rev() {
+            projection.project_record(record, &aliases, &ambiguous);
+        }
+        assert_eq!(projection.unique_count, 864);
+        assert_eq!(projection.peak_retained, 512);
+        assert_eq!(projection.peak_seen_related, 32);
+        let maximum_owned_bytes =
+            MAX_DIAGNOSTICS * (size_of::<SystemdStopImpactDiagnostic>() + 2 * 255);
+        let scratch_bytes = projection.seen_related.capacity() * size_of::<&str>();
+        assert!(
+            maximum_owned_bytes + scratch_bytes + size_of::<DiagnosticProjection<'_>>()
+                < DIAGNOSTIC_WORKING_SET_BYTES
+        );
+        assert!(projection.retained.iter().all(|diagnostic| {
+            diagnostic.canonical_unit.capacity() == 255
+                && diagnostic.related_unit.as_ref().unwrap().capacity() == 255
+        }));
     }
 
     #[tokio::test]
