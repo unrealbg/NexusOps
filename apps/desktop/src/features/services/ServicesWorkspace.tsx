@@ -63,6 +63,7 @@ export function ServicesWorkspace({ host }: { host: Host }) {
   const [assessmentError, setAssessmentError] = useState<{ owner: string; message: string } | null>(null);
   const [assessingInspection, setAssessingInspection] = useState<{ owner: string; id: SystemdStopImpactInspectionId } | null>(null);
   const generation = useRef(0);
+  const assessmentGeneration = useRef(0);
   const inFlight = useRef(false);
   const actionInFlight = useRef(false);
 
@@ -74,10 +75,12 @@ export function ServicesWorkspace({ host }: { host: Host }) {
 
   useEffect(() => {
     const current = ++generation.current;
+    assessmentGeneration.current += 1;
     inFlight.current = false;
     actionInFlight.current = false;
     const cleanup = () => {
       generation.current += 1;
+      assessmentGeneration.current += 1;
       const currentPlan = planRef.current;
       if (currentPlan?.owner === owner) {
         planRef.current = null;
@@ -139,11 +142,13 @@ export function ServicesWorkspace({ host }: { host: Host }) {
     const current = generation.current;
     const hadSnapshot = validSnapshot !== null;
     inFlight.current = true;
+    assessmentGeneration.current += 1;
     setRefreshingOwner(owner);
     setError(null);
     setResult(null);
     setAssessment(null);
     setAssessmentError(null);
+    setAssessingInspection(null);
     void servicesApi.list(host.id, sessionId).then(
       (value) => {
         if (generation.current !== current) return;
@@ -165,15 +170,22 @@ export function ServicesWorkspace({ host }: { host: Host }) {
   }
 
   function assessStopImpact(inspectionId: SystemdStopImpactInspectionId) {
-    if (!connected || !sessionId || visibleAssessingInspection !== null) return;
+    if (
+      !connected || !sessionId || inFlight.current || actionInFlight.current
+      || pending || visibleAssessingInspection !== null
+    ) return;
     const requestGeneration = generation.current;
+    const requestAssessmentGeneration = ++assessmentGeneration.current;
     const requestOwner = owner;
     setAssessment(null);
     setAssessmentError(null);
     setAssessingInspection({ owner, id: inspectionId });
     void servicesApi.assessStopImpact(host.id, sessionId, inspectionId).then(
       (value) => {
-        if (generation.current !== requestGeneration) return;
+        if (
+          generation.current !== requestGeneration
+          || assessmentGeneration.current !== requestAssessmentGeneration
+        ) return;
         if (value.hostId !== host.id || value.hostSessionId !== sessionId) {
           setAssessmentError({
             owner,
@@ -184,7 +196,10 @@ export function ServicesWorkspace({ host }: { host: Host }) {
         setAssessment({ owner: requestOwner, value });
       },
       () => {
-        if (generation.current === requestGeneration) {
+        if (
+          generation.current === requestGeneration
+          && assessmentGeneration.current === requestAssessmentGeneration
+        ) {
           setAssessmentError({
             owner,
             message: 'Stop-impact assessment is unavailable. Refresh services and try again.',
@@ -192,7 +207,10 @@ export function ServicesWorkspace({ host }: { host: Host }) {
         }
       },
     ).finally(() => {
-      if (generation.current === requestGeneration) setAssessingInspection(null);
+      if (
+        generation.current === requestGeneration
+        && assessmentGeneration.current === requestAssessmentGeneration
+      ) setAssessingInspection(null);
     });
   }
 
@@ -408,7 +426,7 @@ export function ServicesWorkspace({ host }: { host: Host }) {
                 : rows.length === 0 ? <p>No services match this filter.</p>
                 : <div className="files-table-wrap"><table className="files-table"><thead><tr><th scope="col">Service</th><th scope="col">Load</th><th scope="col">Active</th><th scope="col">Sub</th><th scope="col">Description</th><th scope="col">Action</th></tr></thead><tbody>
                     {rows.map((entry) => <tr key={entry.unit}><td>{entry.unit}</td><td>{entry.loadState}</td><td>{entry.activeState}</td><td>{entry.subState}</td><td>{entry.description}</td><td><div className="service-actions">
-                      {entry.stopImpactInspectionId && <Button disabled={visibleAssessingInspection !== null} onClick={() => assessStopImpact(entry.stopImpactInspectionId!)}>{visibleAssessingInspection === entry.stopImpactInspectionId ? 'Assessing…' : 'Assess stop impact'}</Button>}
+                      {entry.stopImpactInspectionId && <Button disabled={pending || visibleAssessingInspection !== null} onClick={() => assessStopImpact(entry.stopImpactInspectionId!)}>{visibleAssessingInspection === entry.stopImpactInspectionId ? 'Assessing…' : 'Assess stop impact'}</Button>}
                       {entry.resetFailedObservationId && <Button disabled={visiblePlanningObservation !== null || executing || livePlan !== null} onClick={() => planResetFailed(entry.resetFailedObservationId!)}>{visiblePlanningObservation?.kind === 'resetFailed' && visiblePlanningObservation.id === entry.resetFailedObservationId ? 'Preparing…' : 'Reset failed state'}</Button>}
                       {entry.tryRestartObservationId && <Button variant="danger" disabled={visiblePlanningObservation !== null || executing || livePlan !== null} onClick={() => planTryRestart(entry.tryRestartObservationId!)}>{visiblePlanningObservation?.kind === 'tryRestart' && visiblePlanningObservation.id === entry.tryRestartObservationId ? 'Preparing…' : 'Restart active service'}</Button>}
                       {entry.reloadObservationId && <Button variant="danger" disabled={visiblePlanningObservation !== null || executing || livePlan !== null} onClick={() => planReload(entry.reloadObservationId!)}>{visiblePlanningObservation?.kind === 'reload' && visiblePlanningObservation.id === entry.reloadObservationId ? 'Preparing…' : 'Reload service'}</Button>}
@@ -442,6 +460,11 @@ export function ServicesWorkspace({ host }: { host: Host }) {
             <h3>Conditional consequences</h3>
             {visibleAssessment.conditionalConsequences.length === 0 ? <p>No conditional consequences were classified.</p> : <div className="files-table-wrap"><table className="files-table"><thead><tr><th scope="col">Unit</th><th scope="col">Classification</th><th scope="col">Observed from</th></tr></thead><tbody>
               {visibleAssessment.conditionalConsequences.map((consequence) => <tr key={consequence.canonicalUnit}><td><code>{consequence.canonicalUnit}</code></td><td>{consequence.classification}</td><td>{consequence.sources.join(', ') || '—'}</td></tr>)}
+            </tbody></table></div>}
+            <h3>Passive conditional diagnostics</h3>
+            <p>These observations identify possible activation, trigger, reactivation, or manager-action consequences. They do not prove causation or guarantee that any unit remains active.</p>
+            {visibleAssessment.conditionalDiagnostics.length === 0 ? <p>No passive conditional diagnostics were observed.</p> : <div className="files-table-wrap"><table className="files-table"><thead><tr><th scope="col">Unit</th><th scope="col">Diagnostic</th><th scope="col">Related unit</th></tr></thead><tbody>
+              {visibleAssessment.conditionalDiagnostics.map((diagnostic, index) => <tr key={`${diagnostic.canonicalUnit}:${diagnostic.kind}:${diagnostic.relatedUnit ?? ''}:${index}`}><td><code>{diagnostic.canonicalUnit}</code></td><td>{diagnostic.kind}</td><td>{diagnostic.relatedUnit ? <code>{diagnostic.relatedUnit}</code> : diagnostic.jobMode ?? diagnostic.managerAction ?? 'Unsupported bounded value'}</td></tr>)}
             </tbody></table></div>}
             <div className="modal-actions"><Button onClick={() => setAssessment(null)}>Close</Button></div>
           </Modal>}

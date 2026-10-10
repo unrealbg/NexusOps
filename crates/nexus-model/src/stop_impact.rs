@@ -74,8 +74,73 @@ pub enum StopImpactWarning {
     OutputLimit,
     AliasAmbiguity,
     UnsupportedProperty,
+    UnsupportedEnumerant,
     ConcurrentTopologyChange,
     CandidateCoverageIncomplete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum StopImpactDiagnosticKind {
+    OnSuccessActivation,
+    OnFailureActivation,
+    Trigger,
+    TriggeredBy,
+    NonDefaultOnSuccessJobMode,
+    NonDefaultOnFailureJobMode,
+    SuccessManagerAction,
+    FailureManagerAction,
+    UnsupportedEnumerant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum StopImpactJobMode {
+    Fail,
+    Replace,
+    ReplaceIrreversibly,
+    Isolate,
+    Flush,
+    IgnoreDependencies,
+    IgnoreRequirements,
+    Trigger,
+    RestartDependencies,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum StopImpactManagerAction {
+    None,
+    Reboot,
+    RebootForce,
+    RebootImmediate,
+    Poweroff,
+    PoweroffForce,
+    PoweroffImmediate,
+    Exit,
+    ExitForce,
+    SoftReboot,
+    SoftRebootForce,
+    Kexec,
+    KexecForce,
+    Halt,
+    HaltForce,
+    HaltImmediate,
+    Rescue,
+    Emergency,
+    FactoryReset,
+}
+
+/// Bounded, validated, passive systemd context. It carries no command,
+/// environment, mutation target, or authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemdStopImpactDiagnostic {
+    pub canonical_unit: String,
+    pub kind: StopImpactDiagnosticKind,
+    pub related_unit: Option<String>,
+    pub job_mode: Option<StopImpactJobMode>,
+    pub manager_action: Option<StopImpactManagerAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -139,6 +204,7 @@ pub struct SystemdStopImpactAssessment {
     pub units: Vec<SystemdStopImpactUnit>,
     pub edges: Vec<SystemdStopImpactEdge>,
     pub conditional_consequences: Vec<SystemdStopImpactConditionalConsequence>,
+    pub conditional_diagnostics: Vec<SystemdStopImpactDiagnostic>,
     pub accounting: SystemdStopImpactAccounting,
     pub warnings: Vec<StopImpactWarning>,
     pub limitations: Vec<String>,

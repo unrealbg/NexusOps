@@ -1,8 +1,9 @@
 use nexus_model::{
     AppError, ErrorCode, HostId, HostSessionId, StopImpactCompleteness,
-    StopImpactConditionalClassification, StopImpactProvenance, StopImpactRelationship,
-    StopImpactUncertainty, StopImpactWarning, SystemdStopImpactAccounting,
-    SystemdStopImpactAssessment, SystemdStopImpactConditionalConsequence, SystemdStopImpactEdge,
+    StopImpactConditionalClassification, StopImpactDiagnosticKind, StopImpactJobMode,
+    StopImpactManagerAction, StopImpactProvenance, StopImpactRelationship, StopImpactUncertainty,
+    StopImpactWarning, SystemdStopImpactAccounting, SystemdStopImpactAssessment,
+    SystemdStopImpactConditionalConsequence, SystemdStopImpactDiagnostic, SystemdStopImpactEdge,
     SystemdStopImpactUnit,
 };
 use nexus_operations::{RemoteSession, SystemdStopImpactEngine, SystemdStopImpactQuery};
@@ -58,7 +59,10 @@ pub struct ParsedStopImpactUnit {
     on_failure_job_mode: String,
     success_action: String,
     failure_action: String,
-    unsupported_enumerant: bool,
+    unsupported_on_success_job_mode: bool,
+    unsupported_on_failure_job_mode: bool,
+    unsupported_success_action: bool,
+    unsupported_failure_action: bool,
 }
 
 impl ParsedStopImpactUnit {
@@ -72,10 +76,95 @@ impl ParsedStopImpactUnit {
     fn conditional_effects_present(&self) -> bool {
         !self.related("OnSuccess").is_empty()
             || !self.related("OnFailure").is_empty()
+            || !self.related("Triggers").is_empty()
+            || !self.related("TriggeredBy").is_empty()
             || self.on_success_job_mode != "fail"
             || self.on_failure_job_mode != "replace"
             || self.success_action != "none"
             || self.failure_action != "none"
+    }
+
+    fn has_unsupported_enumerant(&self) -> bool {
+        self.unsupported_on_success_job_mode
+            || self.unsupported_on_failure_job_mode
+            || self.unsupported_success_action
+            || self.unsupported_failure_action
+    }
+
+    fn conditional_diagnostics(&self) -> Vec<SystemdStopImpactDiagnostic> {
+        let mut diagnostics = Vec::new();
+        for (property, kind) in [
+            ("OnSuccess", StopImpactDiagnosticKind::OnSuccessActivation),
+            ("OnFailure", StopImpactDiagnosticKind::OnFailureActivation),
+            ("Triggers", StopImpactDiagnosticKind::Trigger),
+            ("TriggeredBy", StopImpactDiagnosticKind::TriggeredBy),
+        ] {
+            diagnostics.extend(self.related(property).iter().map(|related_unit| {
+                SystemdStopImpactDiagnostic {
+                    canonical_unit: self.id.clone(),
+                    kind,
+                    related_unit: Some(related_unit.clone()),
+                    job_mode: None,
+                    manager_action: None,
+                }
+            }));
+        }
+        if self.has_unsupported_enumerant() {
+            diagnostics.push(SystemdStopImpactDiagnostic {
+                canonical_unit: self.id.clone(),
+                kind: StopImpactDiagnosticKind::UnsupportedEnumerant,
+                related_unit: None,
+                job_mode: None,
+                manager_action: None,
+            });
+        }
+        for (value, default, unsupported, kind) in [
+            (
+                self.on_success_job_mode.as_str(),
+                "fail",
+                self.unsupported_on_success_job_mode,
+                StopImpactDiagnosticKind::NonDefaultOnSuccessJobMode,
+            ),
+            (
+                self.on_failure_job_mode.as_str(),
+                "replace",
+                self.unsupported_on_failure_job_mode,
+                StopImpactDiagnosticKind::NonDefaultOnFailureJobMode,
+            ),
+        ] {
+            if !unsupported && value != default {
+                diagnostics.push(SystemdStopImpactDiagnostic {
+                    canonical_unit: self.id.clone(),
+                    kind,
+                    related_unit: None,
+                    job_mode: stop_impact_job_mode(value),
+                    manager_action: None,
+                });
+            }
+        }
+        for (value, unsupported, kind) in [
+            (
+                self.success_action.as_str(),
+                self.unsupported_success_action,
+                StopImpactDiagnosticKind::SuccessManagerAction,
+            ),
+            (
+                self.failure_action.as_str(),
+                self.unsupported_failure_action,
+                StopImpactDiagnosticKind::FailureManagerAction,
+            ),
+        ] {
+            if !unsupported && value != "none" {
+                diagnostics.push(SystemdStopImpactDiagnostic {
+                    canonical_unit: self.id.clone(),
+                    kind,
+                    related_unit: None,
+                    job_mode: None,
+                    manager_action: stop_impact_manager_action(value),
+                });
+            }
+        }
+        diagnostics
     }
 }
 
@@ -184,10 +273,10 @@ pub fn parse_systemd_stop_impact(output: &str) -> Result<Vec<ParsedStopImpactUni
             on_failure_job_mode: on_failure_job_mode.0,
             success_action: success_action.0,
             failure_action: failure_action.0,
-            unsupported_enumerant: on_success_job_mode.1
-                || on_failure_job_mode.1
-                || success_action.1
-                || failure_action.1,
+            unsupported_on_success_job_mode: on_success_job_mode.1,
+            unsupported_on_failure_job_mode: on_failure_job_mode.1,
+            unsupported_success_action: success_action.1,
+            unsupported_failure_action: failure_action.1,
         });
     }
     Ok(result)
@@ -268,6 +357,46 @@ const MANAGER_ACTIONS: &[&str] = &[
     "emergency",
     "factory-reset",
 ];
+
+fn stop_impact_job_mode(value: &str) -> Option<StopImpactJobMode> {
+    Some(match value {
+        "fail" => StopImpactJobMode::Fail,
+        "replace" => StopImpactJobMode::Replace,
+        "replace-irreversibly" => StopImpactJobMode::ReplaceIrreversibly,
+        "isolate" => StopImpactJobMode::Isolate,
+        "flush" => StopImpactJobMode::Flush,
+        "ignore-dependencies" => StopImpactJobMode::IgnoreDependencies,
+        "ignore-requirements" => StopImpactJobMode::IgnoreRequirements,
+        "trigger" => StopImpactJobMode::Trigger,
+        "restart-dependencies" => StopImpactJobMode::RestartDependencies,
+        _ => return None,
+    })
+}
+
+fn stop_impact_manager_action(value: &str) -> Option<StopImpactManagerAction> {
+    Some(match value {
+        "none" => StopImpactManagerAction::None,
+        "reboot" => StopImpactManagerAction::Reboot,
+        "reboot-force" => StopImpactManagerAction::RebootForce,
+        "reboot-immediate" => StopImpactManagerAction::RebootImmediate,
+        "poweroff" => StopImpactManagerAction::Poweroff,
+        "poweroff-force" => StopImpactManagerAction::PoweroffForce,
+        "poweroff-immediate" => StopImpactManagerAction::PoweroffImmediate,
+        "exit" => StopImpactManagerAction::Exit,
+        "exit-force" => StopImpactManagerAction::ExitForce,
+        "soft-reboot" => StopImpactManagerAction::SoftReboot,
+        "soft-reboot-force" => StopImpactManagerAction::SoftRebootForce,
+        "kexec" => StopImpactManagerAction::Kexec,
+        "kexec-force" => StopImpactManagerAction::KexecForce,
+        "halt" => StopImpactManagerAction::Halt,
+        "halt-force" => StopImpactManagerAction::HaltForce,
+        "halt-immediate" => StopImpactManagerAction::HaltImmediate,
+        "rescue" => StopImpactManagerAction::Rescue,
+        "emergency" => StopImpactManagerAction::Emergency,
+        "factory-reset" => StopImpactManagerAction::FactoryReset,
+        _ => return None,
+    })
+}
 
 fn enumerant(value: &str, supported: &[&str]) -> Result<(String, bool), AppError> {
     let value = token(value, 64)?;
@@ -361,6 +490,7 @@ struct Pending {
     provenance: StopImpactProvenance,
     candidate: bool,
     candidate_sources: BTreeSet<String>,
+    relationship_order: u8,
 }
 
 #[derive(Clone)]
@@ -556,9 +686,10 @@ impl Builder {
         {
             self.unknown = true;
         }
-        if retained.record.unsupported_enumerant {
+        if retained.record.has_unsupported_enumerant() {
+            self.incomplete = true;
             self.unknown = true;
-            self.warning(StopImpactWarning::UnsupportedProperty);
+            self.warning(StopImpactWarning::UnsupportedEnumerant);
         }
         self.accounting.observed_relationship_references = self
             .accounting
@@ -584,7 +715,7 @@ impl Builder {
             }
         }
         if !retained.candidate || retained.record.stop_when_unneeded {
-            for property in CANDIDATE_FORWARD {
+            for (candidate_index, property) in CANDIDATE_FORWARD.into_iter().enumerate() {
                 for target in retained.record.related(property) {
                     self.accounting.observed_candidate_references = self
                         .accounting
@@ -596,6 +727,7 @@ impl Builder {
                         StopImpactProvenance::Conditional,
                         true,
                         Some(canonical),
+                        5 + u8::try_from(candidate_index).unwrap_or(u8::MAX),
                     );
                 }
             }
@@ -617,7 +749,14 @@ impl Builder {
             self.incomplete = true;
             self.unknown = true;
             self.warning(StopImpactWarning::AliasAmbiguity);
-            self.admit_query(target, depth, provenance, candidate, None);
+            self.admit_query(
+                target,
+                depth,
+                provenance,
+                candidate,
+                None,
+                relationship_code(relationship),
+            );
             return;
         }
         let canonical_target = self
@@ -643,7 +782,14 @@ impl Builder {
                 provenance,
             });
         }
-        self.admit_query(&canonical_target, depth, provenance, candidate, None);
+        self.admit_query(
+            &canonical_target,
+            depth,
+            provenance,
+            candidate,
+            None,
+            relationship_code(relationship),
+        );
     }
 
     fn admit_query(
@@ -653,6 +799,7 @@ impl Builder {
         provenance: StopImpactProvenance,
         candidate: bool,
         candidate_source: Option<&str>,
+        relationship_order: u8,
     ) {
         if depth > MAX_DEPTH {
             self.accounting.unresolved_frontier_references = self
@@ -692,7 +839,12 @@ impl Builder {
             if provenance > existing.provenance {
                 existing.provenance = provenance;
             }
-            existing.depth = existing.depth.min(depth);
+            if depth < existing.depth {
+                existing.depth = depth;
+                existing.relationship_order = relationship_order;
+            } else if depth == existing.depth {
+                existing.relationship_order = existing.relationship_order.min(relationship_order);
+            }
             existing.candidate &= candidate;
             if let Some(source) = candidate_source {
                 existing.candidate_sources.insert(source.to_owned());
@@ -709,6 +861,7 @@ impl Builder {
             provenance,
             candidate,
             candidate_sources,
+            relationship_order,
         });
     }
 
@@ -797,20 +950,31 @@ impl Builder {
         } else {
             StopImpactProvenance::Conditional
         };
-        let mut batch = Vec::new();
-        while batch.len() < 16 {
-            let Some(index) = self
-                .pending
-                .iter()
-                .position(|pending| pending.provenance == priority)
-            else {
-                break;
-            };
-            if let Some(pending) = self.pending.remove(index) {
-                batch.push(pending);
+        let mut eligible = Vec::new();
+        let mut deferred = VecDeque::new();
+        while let Some(pending) = self.pending.pop_front() {
+            if pending.provenance == priority {
+                eligible.push(pending);
+            } else {
+                deferred.push_back(pending);
             }
         }
-        batch
+        eligible.sort_by(|left, right| {
+            let left_name = self.aliases.get(&left.requested).unwrap_or(&left.requested);
+            let right_name = self
+                .aliases
+                .get(&right.requested)
+                .unwrap_or(&right.requested);
+            (left.depth, left_name, left.relationship_order).cmp(&(
+                right.depth,
+                right_name,
+                right.relationship_order,
+            ))
+        });
+        let remainder = eligible.split_off(eligible.len().min(16));
+        self.pending.extend(remainder);
+        self.pending.extend(deferred);
+        eligible
     }
 
     fn retain_batch(
@@ -1070,7 +1234,7 @@ impl Builder {
                 StopImpactConditionalClassification::NotStopWhenUnneeded
             } else if traversal_incomplete
                 || !unresolved_reverse.is_empty()
-                || candidate.record.unsupported_enumerant
+                || candidate.record.has_unsupported_enumerant()
             {
                 self.incomplete = true;
                 self.unknown = true;
@@ -1089,9 +1253,10 @@ impl Builder {
                 self.warning(StopImpactWarning::CandidateCoverageIncomplete);
                 StopImpactConditionalClassification::CoverageUnknown
             };
-            if candidate.record.unsupported_enumerant {
+            if candidate.record.has_unsupported_enumerant() {
+                self.incomplete = true;
                 self.unknown = true;
-                self.warning(StopImpactWarning::UnsupportedProperty);
+                self.warning(StopImpactWarning::UnsupportedEnumerant);
             }
             self.conditional_consequences.insert(
                 canonical.clone(),
@@ -1101,6 +1266,46 @@ impl Builder {
         if self.incomplete {
             self.unknown = true;
         }
+        let mut diagnostic_map = BTreeMap::new();
+        for record in self
+            .records
+            .values()
+            .map(|retained| &retained.record)
+            .chain(
+                remaining_candidates
+                    .values()
+                    .map(|candidate| &candidate.record),
+            )
+        {
+            for mut diagnostic in record.conditional_diagnostics() {
+                if let Some(related) = diagnostic.related_unit.as_mut()
+                    && !self.ambiguous_aliases.contains(related)
+                    && let Some(canonical) = self.aliases.get(related)
+                {
+                    *related = canonical.clone();
+                }
+                let key = (
+                    diagnostic.canonical_unit.clone(),
+                    diagnostic_code(diagnostic.kind),
+                    diagnostic.related_unit.clone().unwrap_or_default(),
+                );
+                diagnostic_map.entry(key).or_insert(diagnostic);
+            }
+        }
+        let omitted_diagnostics = diagnostic_map.len().saturating_sub(MAX_EDGES);
+        if omitted_diagnostics > 0 {
+            self.accounting.omitted_known_edges = self
+                .accounting
+                .omitted_known_edges
+                .saturating_add(u32::try_from(omitted_diagnostics).unwrap_or(u32::MAX));
+            self.incomplete = true;
+            self.unknown = true;
+            self.warning(StopImpactWarning::EdgeLimit);
+        }
+        let conditional_diagnostics = diagnostic_map
+            .into_values()
+            .take(MAX_EDGES)
+            .collect::<Vec<_>>();
         let mut units = self
             .records
             .into_values()
@@ -1158,6 +1363,7 @@ impl Builder {
             units,
             edges,
             conditional_consequences,
+            conditional_diagnostics,
             accounting: self.accounting,
             warnings,
             limitations: vec![
@@ -1382,6 +1588,20 @@ fn relationship_code(value: StopImpactRelationship) -> u8 {
     }
 }
 
+fn diagnostic_code(value: StopImpactDiagnosticKind) -> u8 {
+    match value {
+        StopImpactDiagnosticKind::OnSuccessActivation => 0,
+        StopImpactDiagnosticKind::OnFailureActivation => 1,
+        StopImpactDiagnosticKind::Trigger => 2,
+        StopImpactDiagnosticKind::TriggeredBy => 3,
+        StopImpactDiagnosticKind::NonDefaultOnSuccessJobMode => 4,
+        StopImpactDiagnosticKind::NonDefaultOnFailureJobMode => 5,
+        StopImpactDiagnosticKind::SuccessManagerAction => 6,
+        StopImpactDiagnosticKind::FailureManagerAction => 7,
+        StopImpactDiagnosticKind::UnsupportedEnumerant => 8,
+    }
+}
+
 fn warning_code(value: StopImpactWarning) -> u8 {
     match value {
         StopImpactWarning::NodeLimit => 0,
@@ -1392,8 +1612,9 @@ fn warning_code(value: StopImpactWarning) -> u8 {
         StopImpactWarning::OutputLimit => 5,
         StopImpactWarning::AliasAmbiguity => 6,
         StopImpactWarning::UnsupportedProperty => 7,
-        StopImpactWarning::ConcurrentTopologyChange => 8,
-        StopImpactWarning::CandidateCoverageIncomplete => 9,
+        StopImpactWarning::UnsupportedEnumerant => 8,
+        StopImpactWarning::ConcurrentTopologyChange => 9,
+        StopImpactWarning::CandidateCoverageIncomplete => 10,
     }
 }
 
@@ -1407,8 +1628,9 @@ fn warning_from_code(value: u8) -> Option<StopImpactWarning> {
         5 => StopImpactWarning::OutputLimit,
         6 => StopImpactWarning::AliasAmbiguity,
         7 => StopImpactWarning::UnsupportedProperty,
-        8 => StopImpactWarning::ConcurrentTopologyChange,
-        9 => StopImpactWarning::CandidateCoverageIncomplete,
+        8 => StopImpactWarning::UnsupportedEnumerant,
+        9 => StopImpactWarning::ConcurrentTopologyChange,
+        10 => StopImpactWarning::CandidateCoverageIncomplete,
         _ => return None,
     })
 }
@@ -1516,6 +1738,7 @@ mod tests {
             provenance: StopImpactProvenance::Direct,
             candidate: false,
             candidate_sources: BTreeSet::new(),
+            relationship_order: 0,
         }
     }
 
@@ -1541,6 +1764,57 @@ mod tests {
         );
         let ambiguous = parse_systemd_stop_impact(&aliases).unwrap().remove(0);
         assert!(match_batch_by_identity(&requested, vec![ambiguous, b]).is_err());
+    }
+
+    #[test]
+    fn pending_frontier_upgrades_and_orders_by_depth_name_and_relationship() {
+        let root = parse_systemd_stop_impact(&record("root.service", "", "", false))
+            .unwrap()
+            .remove(0);
+        let mut builder = Builder::new(
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+            root,
+            0,
+        );
+        builder.admit_query(
+            "shared.service",
+            2,
+            StopImpactProvenance::Conditional,
+            true,
+            Some("root.service"),
+            9,
+        );
+        builder.admit_query(
+            "shared.service",
+            1,
+            StopImpactProvenance::Direct,
+            false,
+            None,
+            3,
+        );
+        builder.admit_query(
+            "shared.service",
+            1,
+            StopImpactProvenance::Direct,
+            false,
+            None,
+            1,
+        );
+        builder.admit_query("z.service", 1, StopImpactProvenance::Direct, false, None, 0);
+        builder.admit_query("a.service", 2, StopImpactProvenance::Direct, false, None, 0);
+        let batch = builder.take_batch();
+        assert_eq!(
+            batch
+                .iter()
+                .map(|pending| pending.requested.as_str())
+                .collect::<Vec<_>>(),
+            ["shared.service", "z.service", "a.service"]
+        );
+        assert_eq!(batch[0].relationship_order, 1);
+        assert_eq!(batch[0].provenance, StopImpactProvenance::Direct);
+        assert!(!batch[0].candidate);
     }
 
     struct Session {
@@ -1846,7 +2120,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_modes_and_actions_are_retained_as_conservative_unknowns() {
+    async fn unsupported_modes_and_actions_are_partial_with_explicit_diagnostic_evidence() {
         let root = record("root.service", "", "", false)
             .replace("OnSuccessJobMode=fail", "OnSuccessJobMode=future-mode");
         let session = Session {
@@ -1862,13 +2136,73 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result.completeness, StopImpactCompleteness::Complete);
+        assert_eq!(result.completeness, StopImpactCompleteness::Partial);
         assert_eq!(result.uncertainty, StopImpactUncertainty::UnknownImpact);
         assert!(
             result
                 .warnings
-                .contains(&StopImpactWarning::UnsupportedProperty)
+                .contains(&StopImpactWarning::UnsupportedEnumerant)
         );
+        assert_eq!(
+            result.conditional_diagnostics,
+            [SystemdStopImpactDiagnostic {
+                canonical_unit: "root.service".into(),
+                kind: StopImpactDiagnosticKind::UnsupportedEnumerant,
+                related_unit: None,
+                job_mode: None,
+                manager_action: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn publishes_typed_passive_conditional_context_without_raw_enumerants() {
+        let root = record("root.service", "", "", false)
+            .replace("OnSuccess=", "OnSuccess=next.service")
+            .replace("OnFailure=", "OnFailure=recover.service")
+            .replace("Triggers=", "Triggers=timer.timer")
+            .replace("TriggeredBy=", "TriggeredBy=watch.path")
+            .replace(
+                "OnFailureJobMode=replace",
+                "OnFailureJobMode=restart-dependencies",
+            )
+            .replace("SuccessAction=none", "SuccessAction=reboot");
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([root.clone(), root])),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Complete);
+        assert_eq!(result.uncertainty, StopImpactUncertainty::UnknownImpact);
+        assert_eq!(result.conditional_diagnostics.len(), 6);
+        assert!(result.conditional_diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == StopImpactDiagnosticKind::OnSuccessActivation
+                && diagnostic.related_unit.as_deref() == Some("next.service")
+        }));
+        assert!(result.conditional_diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == StopImpactDiagnosticKind::TriggeredBy
+                && diagnostic.related_unit.as_deref() == Some("watch.path")
+        }));
+        assert!(result.conditional_diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == StopImpactDiagnosticKind::SuccessManagerAction
+                && diagnostic.manager_action == Some(StopImpactManagerAction::Reboot)
+        }));
+        assert!(result.conditional_diagnostics.iter().any(|diagnostic| {
+            diagnostic.kind == StopImpactDiagnosticKind::NonDefaultOnFailureJobMode
+                && diagnostic.job_mode == Some(StopImpactJobMode::RestartDependencies)
+        }));
+        assert!(result.conditional_diagnostics.iter().all(|diagnostic| {
+            diagnostic.related_unit.as_deref() != Some("reboot")
+                && diagnostic.related_unit.as_deref() != Some("restart-dependencies")
+        }));
     }
 
     #[tokio::test]
@@ -1895,7 +2229,7 @@ mod tests {
     #[tokio::test]
     async fn query_frontier_is_bounded_and_final_query_remains_root_revalidation() {
         let names = (0..65)
-            .map(|index| format!("child-{index}.service"))
+            .map(|index| format!("child-{index:02}.service"))
             .collect::<Vec<_>>();
         let root = record("root.service", &names.join(" "), "", false);
         let responses = (0..4)
@@ -1938,6 +2272,87 @@ mod tests {
                 .last()
                 .unwrap()
                 .ends_with(" show -- 'root.service'")
+        );
+    }
+
+    #[tokio::test]
+    async fn frontier_order_is_stable_across_input_permutations_when_budget_is_exhausted() {
+        let names = (0..65)
+            .map(|index| format!("child-{index:02}.service"))
+            .collect::<Vec<_>>();
+        let sorted_outputs = names[..64]
+            .chunks(16)
+            .map(|batch| {
+                batch
+                    .iter()
+                    .map(|name| record(name, "", "", false))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            })
+            .collect::<Vec<_>>();
+        let ordered_root = record(
+            "root.service",
+            &names.join(" "),
+            "conditional.service",
+            false,
+        );
+        let mut reversed = names.clone();
+        reversed.reverse();
+        let reversed_root = record(
+            "root.service",
+            &reversed.join(" "),
+            "conditional.service",
+            false,
+        );
+
+        let run = |root: String| {
+            let commands = Arc::new(Mutex::new(Vec::new()));
+            let session = Session {
+                responses: Mutex::new(VecDeque::from([
+                    root.clone(),
+                    sorted_outputs[0].clone(),
+                    sorted_outputs[1].clone(),
+                    sorted_outputs[2].clone(),
+                    sorted_outputs[3].clone(),
+                    root,
+                ])),
+                commands: commands.clone(),
+            };
+            (session, commands)
+        };
+        let (ordered_session, ordered_commands) = run(ordered_root);
+        let (reversed_session, reversed_commands) = run(reversed_root);
+        let ordered = assess_systemd_stop_impact(
+            &ordered_session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        let reversed = assess_systemd_stop_impact(
+            &reversed_session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *ordered_commands.lock().unwrap(),
+            *reversed_commands.lock().unwrap()
+        );
+        assert_eq!(ordered.accounting.actual_ssh_queries, 6);
+        assert_eq!(reversed.accounting.actual_ssh_queries, 6);
+        assert!(
+            ordered_commands
+                .lock()
+                .unwrap()
+                .iter()
+                .take(5)
+                .all(|command| !command.contains("conditional.service"))
         );
     }
 

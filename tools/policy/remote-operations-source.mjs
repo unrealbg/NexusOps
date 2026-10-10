@@ -1092,6 +1092,10 @@ export function verifyRemoteOperationsSourceText({
     'fn has_direct_frontier(&self) -> bool',
     'fn promote_eligible_candidates(&mut self)',
     'StopImpactConditionalClassification::CoverageUnknown',
+    'StopImpactWarning::UnsupportedEnumerant',
+    'relationship_order',
+    'eligible.sort_by',
+    'fn conditional_diagnostics(&self)',
     'std::num::NonZeroU32::new',
   ]) {
     if (!stopImpactDiscoverySource.includes(required)) {
@@ -1131,6 +1135,11 @@ export function verifyRemoteOperationsSourceText({
   }
   if (!stopImpactModelSource.includes('pub struct SystemdStopImpactInspectionId')
       || !stopImpactModelSource.includes('pub canonical_unit: String')
+      || !stopImpactModelSource.includes('pub struct SystemdStopImpactDiagnostic')
+      || !stopImpactModelSource.includes('pub related_unit: Option<String>')
+      || !stopImpactModelSource.includes('pub job_mode: Option<StopImpactJobMode>')
+      || !stopImpactModelSource.includes('pub manager_action: Option<StopImpactManagerAction>')
+      || !stopImpactModelSource.includes('pub conditional_diagnostics: Vec<SystemdStopImpactDiagnostic>')
       || /RemoteOperationPlanId|NativeOperation|SystemdStop\b/.test(stopImpactModelSource)) {
     fail('Goal 05G diagnostic DTO boundary changed or gained mutation authority');
   }

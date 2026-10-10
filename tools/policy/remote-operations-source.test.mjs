@@ -850,6 +850,10 @@ test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds',
     'fn match_batch_by_identity(',
     'fn has_direct_frontier(&self) -> bool',
     'StopImpactConditionalClassification::CoverageUnknown',
+    'StopImpactWarning::UnsupportedEnumerant',
+    'relationship_order',
+    'eligible.sort_by',
+    'fn conditional_diagnostics(&self)',
     'std::num::NonZeroU32::new',
   ]) {
     assert.throws(
@@ -873,6 +877,16 @@ test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds',
 
 test('policy rejects Goal 05G renderer targets and inspection-to-mutation bridges', async () => {
   const fixture = await remoteOperationsSourceFixture(repositoryRoot);
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      stopImpactModelSource: fixture.stopImpactModelSource.replace(
+        'pub conditional_diagnostics: Vec<SystemdStopImpactDiagnostic>,',
+        '',
+      ),
+    }),
+    /diagnostic DTO boundary changed/,
+  );
   assert.throws(
     () => verifyRemoteOperationsSourceText({
       ...fixture,

@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { Host, ServiceSnapshot } from '@nexusops/protocol';
+import type { Host, ServiceSnapshot, SystemdStopImpactAssessment } from '@nexusops/protocol';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -54,6 +54,19 @@ function snapshot(hostId = host.id, hostSessionId = A): ServiceSnapshot {
       { unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running', description: 'OpenSSH server', canStart: false, canReload: false, resetFailedObservationId: null , tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null},
       { unit: 'future.service', loadState: 'loaded', activeState: 'repairing', subState: 'unknown', description: '<script>bad</script> text', canStart: false, canReload: false, resetFailedObservationId: null , tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null},
     ],
+  };
+}
+function stopImpactAssessment(hostSessionId = A): SystemdStopImpactAssessment {
+  return {
+    hostId: host.id, hostSessionId, rootUnit: 'ssh.service', observedAt: '2026-10-10T00:00:00Z',
+    completeness: 'complete', uncertainty: 'directOnly', rootConsistent: true,
+    units: [], edges: [], conditionalConsequences: [], conditionalDiagnostics: [], warnings: [], limitations: [],
+    accounting: {
+      observedUnitRecords: 1, observedRelationshipReferences: 0, observedCandidateReferences: 0,
+      retainedUnits: 1, retainedEdges: 0, retainedCandidates: 0, omittedKnownUnits: 0,
+      omittedKnownEdges: 0, omittedKnownCandidates: 0, unresolvedFrontierReferences: 0,
+      actualSshQueries: 2,
+    },
   };
 }
 function deferred<T>() {
@@ -137,6 +150,10 @@ describe('session-bound Services workspace', () => {
         canonicalUnit: 'cache.service', sources: ['ssh.service'],
         classification: 'retainedByUnaffectedReference',
       }],
+      conditionalDiagnostics: [
+        { canonicalUnit: 'ssh.service', kind: 'onFailureActivation', relatedUnit: 'recovery.service', jobMode: null, managerAction: null },
+        { canonicalUnit: 'ssh.service', kind: 'successManagerAction', relatedUnit: null, jobMode: null, managerAction: 'reboot' },
+      ],
       accounting: {
         observedUnitRecords: 1, observedRelationshipReferences: 0,
         observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0,
@@ -152,11 +169,16 @@ describe('session-bound Services workspace', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Read-only stop impact' });
     expect(within(dialog).getByText(/does not authorize or perform a stop/)).toBeInTheDocument();
     expect(within(dialog).getByText(/Absence of an observed relationship/)).toBeInTheDocument();
-    expect(within(dialog).getAllByText('ssh.service')).toHaveLength(4);
+    expect(within(dialog).getAllByText('ssh.service')).toHaveLength(6);
     expect(within(dialog).getByText('requiredBy')).toBeInTheDocument();
     expect(within(dialog).getByText('worker.service')).toBeInTheDocument();
     expect(within(dialog).getByText('retainedByUnaffectedReference')).toBeInTheDocument();
     expect(within(dialog).getByText('cache.service')).toBeInTheDocument();
+    expect(within(dialog).getByText('onFailureActivation')).toBeInTheDocument();
+    expect(within(dialog).getByText('recovery.service')).toBeInTheDocument();
+    expect(within(dialog).getByText('successManagerAction')).toBeInTheDocument();
+    expect(within(dialog).getByText('reboot')).toBeInTheDocument();
+    expect(within(dialog).getByText(/do not prove causation/)).toBeInTheDocument();
     expect(within(dialog).getByText(/concurrentTopologyChange/)).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
     expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
@@ -176,13 +198,65 @@ describe('session-bound Services workspace', () => {
     await act(async () => { delayed.resolve({
       hostId: host.id, hostSessionId: A, rootUnit: 'ssh.service', observedAt: '',
       completeness: 'complete', uncertainty: 'directOnly', rootConsistent: true,
-      units: [], edges: [], conditionalConsequences: [], warnings: [], limitations: [], accounting: {
+      units: [], edges: [], conditionalConsequences: [], conditionalDiagnostics: [], warnings: [], limitations: [], accounting: {
         observedUnitRecords: 1, observedRelationshipReferences: 0,
         observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0,
         retainedCandidates: 0, omittedKnownUnits: 0, omittedKnownEdges: 0,
         omittedKnownCandidates: 0, unresolvedFrontierReferences: 0, actualSshQueries: 2,
       },
     }); });
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+  });
+
+  it('does not reopen diagnostics when assessment settles before an in-flight refresh', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    const value = snapshot();
+    value.entries[0]!.stopImpactInspectionId = 'inspection-a';
+    const assessment = deferred<SystemdStopImpactAssessment>();
+    const refresh = deferred<ServiceSnapshot>();
+    mocks.list.mockResolvedValueOnce(value).mockReturnValueOnce(refresh.promise);
+    mocks.assessStopImpact.mockReturnValueOnce(assessment.promise);
+    render(<ServicesWorkspace host={host} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await act(async () => { assessment.resolve(stopImpactAssessment()); });
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+    await act(async () => { refresh.resolve(value); });
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+  });
+
+  it('dismisses a visible assessment as soon as refresh begins', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    const value = snapshot();
+    value.entries[0]!.stopImpactInspectionId = 'inspection-a';
+    const refresh = deferred<ServiceSnapshot>();
+    mocks.list.mockResolvedValueOnce(value).mockReturnValueOnce(refresh.promise);
+    mocks.assessStopImpact.mockResolvedValueOnce(stopImpactAssessment());
+    render(<ServicesWorkspace host={host} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    expect(await screen.findByRole('dialog', { name: 'Read-only stop impact' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+    await act(async () => { refresh.resolve(value); });
+  });
+
+  it('does not reopen diagnostics when refresh settles before the invalidated assessment', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    const value = snapshot();
+    value.entries[0]!.stopImpactInspectionId = 'inspection-a';
+    const assessment = deferred<SystemdStopImpactAssessment>();
+    const refresh = deferred<ServiceSnapshot>();
+    mocks.list.mockResolvedValueOnce(value).mockReturnValueOnce(refresh.promise);
+    mocks.assessStopImpact.mockReturnValueOnce(assessment.promise);
+    render(<ServicesWorkspace host={host} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    const assessButton = screen.getByRole('button', { name: 'Assess stop impact' });
+    expect(assessButton).toBeDisabled();
+    await userEvent.click(assessButton);
+    expect(mocks.assessStopImpact).toHaveBeenCalledTimes(1);
+    await act(async () => { refresh.resolve(value); });
+    await act(async () => { assessment.resolve(stopImpactAssessment()); });
     expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
   });
 
