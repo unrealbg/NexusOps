@@ -52,6 +52,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         StopImpactWarning::decl(&config),
         SystemdStopImpactUnit::decl(&config),
         SystemdStopImpactEdge::decl(&config),
+        StopImpactConditionalClassification::decl(&config),
+        SystemdStopImpactConditionalConsequence::decl(&config),
         SystemdStopImpactAccounting::decl(&config),
         SystemdStopImpactAssessment::decl(&config),
         RemoteOperationPlanId::decl(&config),

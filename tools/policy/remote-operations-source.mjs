@@ -1087,6 +1087,12 @@ export function verifyRemoteOperationsSourceText({
     'engine.execute(session, &root_query, cancellation.clone())',
     'self.promote_cached_descendants(canonical);',
     'candidate_affected(',
+    'fn match_batch_by_identity(',
+    'identities.len() != 1',
+    'fn has_direct_frontier(&self) -> bool',
+    'fn promote_eligible_candidates(&mut self)',
+    'StopImpactConditionalClassification::CoverageUnknown',
+    'std::num::NonZeroU32::new',
   ]) {
     if (!stopImpactDiscoverySource.includes(required)) {
       fail(`Goal 05G bounded graph implementation is missing ${required}`);
@@ -1104,6 +1110,9 @@ export function verifyRemoteOperationsSourceText({
     'StopImpact(&',
     'SystemdStopImpactQuery)',
     'ReviewedReadOnlyCommand::StopImpact(query)',
+    'fn rejects_stderr(&self) -> bool',
+    'collect_stop_impact_output(&mut reader)',
+    'if reject_stderr',
   ]) {
     if (!sshSessionSource.includes(required)) {
       fail(`Goal 05G SSH transport must remain closed over typed read-only commands: ${required}`);

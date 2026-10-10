@@ -435,6 +435,14 @@ export function ServicesWorkspace({ host }: { host: Host }) {
             <div className="files-table-wrap"><table className="files-table"><thead><tr><th scope="col">Affected unit</th><th scope="col">State</th><th scope="col">Provenance</th><th scope="col">Depth</th></tr></thead><tbody>
               {visibleAssessment.units.map((unit) => <tr key={unit.canonicalUnit}><td><code>{unit.canonicalUnit}</code></td><td>{unit.loadState} / {unit.activeState} / {unit.subState}</td><td>{unit.provenance}</td><td>{unit.depth}</td></tr>)}
             </tbody></table></div>
+            <h3>Validated relationships</h3>
+            {visibleAssessment.edges.length === 0 ? <p>No relationship edges were retained.</p> : <div className="files-table-wrap"><table className="files-table"><thead><tr><th scope="col">Source</th><th scope="col">Relationship</th><th scope="col">Target</th><th scope="col">Provenance</th></tr></thead><tbody>
+              {visibleAssessment.edges.map((edge) => <tr key={`${edge.source}:${edge.relationship}:${edge.target}`}><td><code>{edge.source}</code></td><td>{edge.relationship}</td><td><code>{edge.target}</code></td><td>{edge.provenance}</td></tr>)}
+            </tbody></table></div>}
+            <h3>Conditional consequences</h3>
+            {visibleAssessment.conditionalConsequences.length === 0 ? <p>No conditional consequences were classified.</p> : <div className="files-table-wrap"><table className="files-table"><thead><tr><th scope="col">Unit</th><th scope="col">Classification</th><th scope="col">Observed from</th></tr></thead><tbody>
+              {visibleAssessment.conditionalConsequences.map((consequence) => <tr key={consequence.canonicalUnit}><td><code>{consequence.canonicalUnit}</code></td><td>{consequence.classification}</td><td>{consequence.sources.join(', ') || '—'}</td></tr>)}
+            </tbody></table></div>}
             <div className="modal-actions"><Button onClick={() => setAssessment(null)}>Close</Button></div>
           </Modal>}
           {livePlan && <Modal title="Approve systemd operation" onClose={cancelPlan}>

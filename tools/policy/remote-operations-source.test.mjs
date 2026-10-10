@@ -846,6 +846,29 @@ test('policy pins the Goal 05G fixed query, 37 properties and traversal bounds',
     }),
     /bounded graph implementation is missing/,
   );
+  for (const fragment of [
+    'fn match_batch_by_identity(',
+    'fn has_direct_frontier(&self) -> bool',
+    'StopImpactConditionalClassification::CoverageUnknown',
+    'std::num::NonZeroU32::new',
+  ]) {
+    assert.throws(
+      () => verifyRemoteOperationsSourceText({
+        ...fixture,
+        stopImpactDiscoverySource: fixture.stopImpactDiscoverySource.replaceAll(fragment, 'removed_policy_fragment'),
+      }),
+      /bounded graph implementation is missing/,
+    );
+  }
+  assert.throws(
+    () => verifyRemoteOperationsSourceText({
+      ...fixture,
+      sshProductionSources: fixture.sshProductionSources.map((file) => file.path.endsWith('session.rs')
+        ? { ...file, source: file.source.replace('collect_stop_impact_output(&mut reader)', 'collect_output(&mut reader)') }
+        : file),
+    }),
+    /SSH transport must remain closed over typed read-only commands/,
+  );
 });
 
 test('policy rejects Goal 05G renderer targets and inspection-to-mutation bridges', async () => {

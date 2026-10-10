@@ -43,6 +43,10 @@ impl ReviewedReadOnlyCommand<'_> {
             Self::StopImpact(query) => query.command(),
         }
     }
+
+    fn rejects_stderr(&self) -> bool {
+        matches!(self, Self::StopImpact(_))
+    }
 }
 
 impl SshSession {
@@ -77,7 +81,11 @@ impl SshSession {
                     .exec(true, command.command())
                     .await
                     .map_err(|error| transport_error("command_start", &error))?;
-                collect_output(&mut reader).await
+                if command.rejects_stderr() {
+                    collect_stop_impact_output(&mut reader).await
+                } else {
+                    collect_output(&mut reader).await
+                }
             })
             .await;
             guard.close().await;
@@ -501,6 +509,17 @@ async fn close_channel(writer: &ChannelWriteHalf<client::Msg>) {
 }
 
 async fn collect_output(channel: &mut ChannelReadHalf) -> Result<String, AppError> {
+    collect_output_with_policy(channel, false).await
+}
+
+async fn collect_stop_impact_output(channel: &mut ChannelReadHalf) -> Result<String, AppError> {
+    collect_output_with_policy(channel, true).await
+}
+
+async fn collect_output_with_policy(
+    channel: &mut ChannelReadHalf,
+    reject_stderr: bool,
+) -> Result<String, AppError> {
     let mut output = Vec::new();
     let mut total = 0usize;
     let mut exit_status = None;
@@ -513,6 +532,12 @@ async fn collect_output(channel: &mut ChannelReadHalf) -> Result<String, AppErro
             ChannelMsg::ExtendedData { data, .. } => {
                 // stderr counts toward the limit but is never exposed or logged.
                 count_output(&mut total, data.len())?;
+                if reject_stderr {
+                    return Err(AppError::new(
+                        ErrorCode::Discovery,
+                        "The systemd stop-impact query produced unexpected diagnostic output.",
+                    ));
+                }
             }
             ChannelMsg::ExitStatus {
                 exit_status: status,

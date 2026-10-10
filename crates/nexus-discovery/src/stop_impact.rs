@@ -1,7 +1,9 @@
 use nexus_model::{
-    AppError, ErrorCode, HostId, HostSessionId, StopImpactCompleteness, StopImpactProvenance,
-    StopImpactRelationship, StopImpactUncertainty, StopImpactWarning, SystemdStopImpactAccounting,
-    SystemdStopImpactAssessment, SystemdStopImpactEdge, SystemdStopImpactUnit,
+    AppError, ErrorCode, HostId, HostSessionId, StopImpactCompleteness,
+    StopImpactConditionalClassification, StopImpactProvenance, StopImpactRelationship,
+    StopImpactUncertainty, StopImpactWarning, SystemdStopImpactAccounting,
+    SystemdStopImpactAssessment, SystemdStopImpactConditionalConsequence, SystemdStopImpactEdge,
+    SystemdStopImpactUnit,
 };
 use nexus_operations::{RemoteSession, SystemdStopImpactEngine, SystemdStopImpactQuery};
 use std::{
@@ -56,6 +58,7 @@ pub struct ParsedStopImpactUnit {
     on_failure_job_mode: String,
     success_action: String,
     failure_action: String,
+    unsupported_enumerant: bool,
 }
 
 impl ParsedStopImpactUnit {
@@ -160,6 +163,10 @@ pub fn parse_systemd_stop_impact(output: &str) -> Result<Vec<ParsedStopImpactUni
         .into_iter()
         .map(|key| Ok((key.to_owned(), unit_list(fields[key])?)))
         .collect::<Result<BTreeMap<_, _>, AppError>>()?;
+        let on_success_job_mode = enumerant(fields["OnSuccessJobMode"], JOB_MODES)?;
+        let on_failure_job_mode = enumerant(fields["OnFailureJobMode"], JOB_MODES)?;
+        let success_action = enumerant(fields["SuccessAction"], MANAGER_ACTIONS)?;
+        let failure_action = enumerant(fields["FailureAction"], MANAGER_ACTIONS)?;
         result.push(ParsedStopImpactUnit {
             id,
             names,
@@ -173,10 +180,14 @@ pub fn parse_systemd_stop_impact(output: &str) -> Result<Vec<ParsedStopImpactUni
             need_daemon_reload: yes_no(fields["NeedDaemonReload"])?,
             stop_when_unneeded: yes_no(fields["StopWhenUnneeded"])?,
             relationships,
-            on_success_job_mode: token(fields["OnSuccessJobMode"], 64)?,
-            on_failure_job_mode: token(fields["OnFailureJobMode"], 64)?,
-            success_action: token(fields["SuccessAction"], 64)?,
-            failure_action: token(fields["FailureAction"], 64)?,
+            on_success_job_mode: on_success_job_mode.0,
+            on_failure_job_mode: on_failure_job_mode.0,
+            success_action: success_action.0,
+            failure_action: failure_action.0,
+            unsupported_enumerant: on_success_job_mode.1
+                || on_failure_job_mode.1
+                || success_action.1
+                || failure_action.1,
         });
     }
     Ok(result)
@@ -213,12 +224,55 @@ fn job(value: &str) -> Result<bool, AppError> {
     if value.is_empty() {
         return Ok(false);
     }
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
     value
-        .parse::<u64>()
+        .parse::<u32>()
         .ok()
-        .filter(|value| *value > 0)
+        .and_then(std::num::NonZeroU32::new)
         .map(|_| true)
         .ok_or_else(invalid)
+}
+
+const JOB_MODES: &[&str] = &[
+    "fail",
+    "replace",
+    "replace-irreversibly",
+    "isolate",
+    "flush",
+    "ignore-dependencies",
+    "ignore-requirements",
+    "trigger",
+    "restart-dependencies",
+];
+
+const MANAGER_ACTIONS: &[&str] = &[
+    "none",
+    "reboot",
+    "reboot-force",
+    "reboot-immediate",
+    "poweroff",
+    "poweroff-force",
+    "poweroff-immediate",
+    "exit",
+    "exit-force",
+    "soft-reboot",
+    "soft-reboot-force",
+    "kexec",
+    "kexec-force",
+    "halt",
+    "halt-force",
+    "halt-immediate",
+    "rescue",
+    "emergency",
+    "factory-reset",
+];
+
+fn enumerant(value: &str, supported: &[&str]) -> Result<(String, bool), AppError> {
+    let value = token(value, 64)?;
+    let unsupported = !supported.contains(&value.as_str());
+    Ok((value, unsupported))
 }
 
 fn unit_list(value: &str) -> Result<Vec<String>, AppError> {
@@ -317,11 +371,21 @@ struct Retained {
     candidate: bool,
 }
 
+#[derive(Clone)]
+struct CandidateObservation {
+    record: ParsedStopImpactUnit,
+    depth: u8,
+    sources: BTreeSet<String>,
+}
+
 struct Builder {
     host_id: HostId,
     host_session_id: HostSessionId,
     root_initial: ParsedStopImpactUnit,
     records: HashMap<String, Retained>,
+    candidates: HashMap<String, CandidateObservation>,
+    conditional_consequences:
+        BTreeMap<String, (BTreeSet<String>, StopImpactConditionalClassification)>,
     aliases: HashMap<String, String>,
     ambiguous_aliases: HashSet<String>,
     queried: HashSet<String>,
@@ -365,6 +429,8 @@ impl Builder {
             host_session_id,
             root_initial: root,
             records,
+            candidates: HashMap::new(),
+            conditional_consequences: BTreeMap::new(),
             aliases,
             ambiguous_aliases: HashSet::new(),
             queried,
@@ -423,6 +489,21 @@ impl Builder {
                 .saturating_add(edge.source.len())
                 .saturating_add(edge.target.len())
         });
+        let candidate_bytes = self.candidates.values().fold(0usize, |total, candidate| {
+            total
+                .saturating_add(1024)
+                .saturating_add(candidate.record.id.len())
+                .saturating_add(
+                    candidate
+                        .record
+                        .relationships
+                        .values()
+                        .flatten()
+                        .map(String::len)
+                        .sum::<usize>(),
+                )
+                .saturating_add(candidate.sources.iter().map(String::len).sum::<usize>())
+        });
         let alias_bytes = self
             .aliases
             .iter()
@@ -447,6 +528,7 @@ impl Builder {
         let estimate = 64usize
             .saturating_mul(1024)
             .saturating_add(record_bytes)
+            .saturating_add(candidate_bytes)
             .saturating_add(edge_bytes)
             .saturating_add(alias_bytes)
             .saturating_add(pending_bytes);
@@ -473,6 +555,10 @@ impl Builder {
             || retained.record.conditional_effects_present()
         {
             self.unknown = true;
+        }
+        if retained.record.unsupported_enumerant {
+            self.unknown = true;
+            self.warning(StopImpactWarning::UnsupportedProperty);
         }
         self.accounting.observed_relationship_references = self
             .accounting
@@ -634,6 +720,22 @@ impl Builder {
         candidate: bool,
     ) {
         let mut needs_propagation = false;
+        let mut needs_inspection = false;
+        if !self.records.contains_key(canonical)
+            && let Some(candidate_observation) = self.candidates.remove(canonical)
+        {
+            self.records.insert(
+                canonical.to_owned(),
+                Retained {
+                    record: candidate_observation.record,
+                    depth: candidate_observation.depth.min(depth),
+                    provenance,
+                    candidate: false,
+                },
+            );
+            needs_propagation = true;
+            needs_inspection = true;
+        }
         if let Some(existing) = self.records.get_mut(canonical) {
             if provenance > existing.provenance {
                 existing.provenance = provenance;
@@ -647,6 +749,9 @@ impl Builder {
         }
         if needs_propagation {
             self.promote_cached_descendants(canonical);
+        }
+        if needs_inspection {
+            self.inspect_record(canonical);
         }
     }
 
@@ -683,7 +788,29 @@ impl Builder {
     }
 
     fn take_batch(&mut self) -> Vec<Pending> {
-        (0..16).filter_map(|_| self.pending.pop_front()).collect()
+        let priority = if self
+            .pending
+            .iter()
+            .any(|pending| pending.provenance == StopImpactProvenance::Direct)
+        {
+            StopImpactProvenance::Direct
+        } else {
+            StopImpactProvenance::Conditional
+        };
+        let mut batch = Vec::new();
+        while batch.len() < 16 {
+            let Some(index) = self
+                .pending
+                .iter()
+                .position(|pending| pending.provenance == priority)
+            else {
+                break;
+            };
+            if let Some(pending) = self.pending.remove(index) {
+                batch.push(pending);
+            }
+        }
+        batch
     }
 
     fn retain_batch(
@@ -691,11 +818,10 @@ impl Builder {
         requested: Vec<Pending>,
         parsed: Vec<ParsedStopImpactUnit>,
     ) -> Result<(), AppError> {
-        if requested.len() != parsed.len() {
-            return Err(invalid());
-        }
+        let mut parsed = match_batch_by_identity(&requested, parsed)?;
         let mut inspect = Vec::new();
-        for (pending, record) in requested.into_iter().zip(parsed) {
+        for pending in requested {
+            let record = parsed.remove(&pending.requested).ok_or_else(invalid)?;
             self.queried.insert(pending.requested.clone());
             self.accounting.observed_unit_records =
                 self.accounting.observed_unit_records.saturating_add(1);
@@ -732,7 +858,26 @@ impl Builder {
                 );
                 continue;
             }
-            if self.records.len() >= MAX_NODES {
+            if let Some(existing) = self.candidates.get_mut(&canonical) {
+                if existing.record != record {
+                    self.incomplete = true;
+                    self.unknown = true;
+                    self.warning(StopImpactWarning::AliasAmbiguity);
+                    continue;
+                }
+                existing.depth = existing.depth.min(pending.depth);
+                existing.sources.extend(pending.candidate_sources);
+                if pending.provenance == StopImpactProvenance::Direct || !pending.candidate {
+                    self.promote(
+                        &canonical,
+                        pending.depth,
+                        StopImpactProvenance::Direct,
+                        false,
+                    );
+                }
+                continue;
+            }
+            if self.records.len().saturating_add(self.candidates.len()) >= MAX_NODES {
                 self.accounting.omitted_known_units =
                     self.accounting.omitted_known_units.saturating_add(1);
                 if pending.candidate {
@@ -745,44 +890,16 @@ impl Builder {
                 self.warning(StopImpactWarning::NodeLimit);
                 continue;
             }
-            if pending.candidate
-                && !candidate_affected(
-                    &record,
-                    &self.records,
-                    &self.aliases,
-                    &self.ambiguous_aliases,
-                )
-            {
-                self.accounting.omitted_known_candidates =
-                    self.accounting.omitted_known_candidates.saturating_add(1);
+            if pending.candidate && pending.provenance == StopImpactProvenance::Conditional {
+                self.candidates.insert(
+                    canonical,
+                    CandidateObservation {
+                        record,
+                        depth: pending.depth,
+                        sources: pending.candidate_sources,
+                    },
+                );
                 continue;
-            }
-            if pending.candidate {
-                self.conditional = true;
-                self.accounting.retained_candidates =
-                    self.accounting.retained_candidates.saturating_add(1);
-                for source in pending.candidate_sources {
-                    if self.edges.len() >= MAX_EDGES {
-                        self.accounting.omitted_known_edges =
-                            self.accounting.omitted_known_edges.saturating_add(1);
-                        self.incomplete = true;
-                        self.warning(StopImpactWarning::EdgeLimit);
-                        continue;
-                    }
-                    self.edges.insert(
-                        (
-                            source.clone(),
-                            canonical.clone(),
-                            relationship_code(StopImpactRelationship::StopWhenUnneededCandidate),
-                        ),
-                        SystemdStopImpactEdge {
-                            source,
-                            target: canonical.clone(),
-                            relationship: StopImpactRelationship::StopWhenUnneededCandidate,
-                            provenance: StopImpactProvenance::Conditional,
-                        },
-                    );
-                }
             }
             self.records.insert(
                 canonical.clone(),
@@ -798,7 +915,87 @@ impl Builder {
         for canonical in inspect {
             self.inspect_record(&canonical);
         }
+        if !self.has_direct_frontier() {
+            self.promote_eligible_candidates();
+        }
         Ok(())
+    }
+
+    fn has_direct_frontier(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| pending.provenance == StopImpactProvenance::Direct)
+    }
+
+    fn promote_eligible_candidates(&mut self) {
+        loop {
+            let eligible = self
+                .candidates
+                .iter()
+                .filter(|(_, candidate)| {
+                    candidate_affected(
+                        &candidate.record,
+                        &self.records,
+                        &self.aliases,
+                        &self.ambiguous_aliases,
+                    )
+                })
+                .map(|(canonical, _)| canonical.clone())
+                .collect::<Vec<_>>();
+            if eligible.is_empty() {
+                break;
+            }
+            for canonical in eligible {
+                let Some(candidate) = self.candidates.remove(&canonical) else {
+                    continue;
+                };
+                self.conditional = true;
+                self.accounting.retained_candidates =
+                    self.accounting.retained_candidates.saturating_add(1);
+                self.conditional_consequences.insert(
+                    canonical.clone(),
+                    (
+                        candidate.sources.clone(),
+                        StopImpactConditionalClassification::ConditionallyAffected,
+                    ),
+                );
+                for source in &candidate.sources {
+                    if self.edges.len() >= MAX_EDGES {
+                        self.accounting.omitted_known_edges =
+                            self.accounting.omitted_known_edges.saturating_add(1);
+                        self.incomplete = true;
+                        self.warning(StopImpactWarning::EdgeLimit);
+                        continue;
+                    }
+                    self.edges.insert(
+                        (
+                            source.clone(),
+                            canonical.clone(),
+                            relationship_code(StopImpactRelationship::StopWhenUnneededCandidate),
+                        ),
+                        SystemdStopImpactEdge {
+                            source: source.clone(),
+                            target: canonical.clone(),
+                            relationship: StopImpactRelationship::StopWhenUnneededCandidate,
+                            provenance: StopImpactProvenance::Conditional,
+                        },
+                    );
+                }
+                self.records.insert(
+                    canonical.clone(),
+                    Retained {
+                        record: candidate.record,
+                        depth: candidate.depth,
+                        provenance: StopImpactProvenance::Conditional,
+                        candidate: true,
+                    },
+                );
+                self.inspect_record(&canonical);
+            }
+            if self.has_direct_frontier() {
+                break;
+            }
+        }
     }
 
     fn canonicalize_edges(&mut self, requested: &str, canonical: &str) {
@@ -844,6 +1041,63 @@ impl Builder {
             self.incomplete = true;
             self.warning(StopImpactWarning::QueryLimit);
         }
+        let remaining_candidates = std::mem::take(&mut self.candidates);
+        let traversal_incomplete = self.incomplete;
+        for (canonical, candidate) in &remaining_candidates {
+            self.accounting.omitted_known_candidates =
+                self.accounting.omitted_known_candidates.saturating_add(1);
+            let mut unresolved_reverse = BTreeSet::new();
+            let mut observed_unaffected_reverse = false;
+            for name in CANDIDATE_REVERSE
+                .iter()
+                .flat_map(|property| candidate.record.related(property))
+            {
+                if self.ambiguous_aliases.contains(name) {
+                    unresolved_reverse.insert(name.clone());
+                    continue;
+                }
+                let resolved = self.aliases.get(name).unwrap_or(name);
+                if self.records.contains_key(resolved) {
+                    continue;
+                }
+                if remaining_candidates.contains_key(resolved) {
+                    observed_unaffected_reverse = true;
+                } else {
+                    unresolved_reverse.insert(name.clone());
+                }
+            }
+            let classification = if !candidate.record.stop_when_unneeded {
+                StopImpactConditionalClassification::NotStopWhenUnneeded
+            } else if traversal_incomplete
+                || !unresolved_reverse.is_empty()
+                || candidate.record.unsupported_enumerant
+            {
+                self.incomplete = true;
+                self.unknown = true;
+                self.accounting.unresolved_frontier_references = self
+                    .accounting
+                    .unresolved_frontier_references
+                    .saturating_add(u32::try_from(unresolved_reverse.len()).unwrap_or(u32::MAX));
+                self.warning(StopImpactWarning::CandidateCoverageIncomplete);
+                StopImpactConditionalClassification::CoverageUnknown
+            } else if observed_unaffected_reverse {
+                self.conditional = true;
+                StopImpactConditionalClassification::RetainedByUnaffectedReference
+            } else {
+                self.incomplete = true;
+                self.unknown = true;
+                self.warning(StopImpactWarning::CandidateCoverageIncomplete);
+                StopImpactConditionalClassification::CoverageUnknown
+            };
+            if candidate.record.unsupported_enumerant {
+                self.unknown = true;
+                self.warning(StopImpactWarning::UnsupportedProperty);
+            }
+            self.conditional_consequences.insert(
+                canonical.clone(),
+                (candidate.sources.clone(), classification),
+            );
+        }
         if self.incomplete {
             self.unknown = true;
         }
@@ -865,6 +1119,17 @@ impl Builder {
             .collect::<Vec<_>>();
         units.sort_by(|left, right| left.canonical_unit.cmp(&right.canonical_unit));
         let edges = self.edges.into_values().collect::<Vec<_>>();
+        let conditional_consequences = self
+            .conditional_consequences
+            .into_iter()
+            .map(|(canonical_unit, (sources, classification))| {
+                SystemdStopImpactConditionalConsequence {
+                    canonical_unit,
+                    sources: sources.into_iter().collect(),
+                    classification,
+                }
+            })
+            .collect::<Vec<_>>();
         self.accounting.retained_units = u32::try_from(units.len()).unwrap_or(u32::MAX);
         self.accounting.retained_edges = u32::try_from(edges.len()).unwrap_or(u32::MAX);
         let warnings = self
@@ -892,6 +1157,7 @@ impl Builder {
             root_consistent,
             units,
             edges,
+            conditional_consequences,
             accounting: self.accounting,
             warnings,
             limitations: vec![
@@ -900,6 +1166,44 @@ impl Builder {
             ],
         }
     }
+}
+
+fn match_batch_by_identity(
+    requested: &[Pending],
+    parsed: Vec<ParsedStopImpactUnit>,
+) -> Result<HashMap<String, ParsedStopImpactUnit>, AppError> {
+    if requested.len() != parsed.len() {
+        return Err(invalid());
+    }
+    let mut matched = HashMap::new();
+    let mut canonical_ids = HashSet::new();
+    for record in parsed {
+        if !canonical_ids.insert(record.id.clone()) {
+            return Err(invalid());
+        }
+        let identities = requested
+            .iter()
+            .enumerate()
+            .filter(|(_, pending)| {
+                record.id == pending.requested || record.names.contains(&pending.requested)
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if identities.len() != 1 {
+            return Err(invalid());
+        }
+        let requested_identity = requested[identities[0]].requested.clone();
+        if matched.insert(requested_identity, record).is_some() {
+            return Err(invalid());
+        }
+    }
+    if requested
+        .iter()
+        .any(|pending| !matched.contains_key(&pending.requested))
+    {
+        return Err(invalid());
+    }
+    Ok(matched)
 }
 
 fn candidate_affected(
@@ -992,8 +1296,21 @@ pub async fn assess_systemd_stop_impact(
                     break;
                 }
                 builder.aggregate_output_bytes += output.len();
-                let parsed = parse_systemd_stop_impact(&output)?;
-                builder.retain_batch(batch, parsed)?;
+                let parsed = parse_systemd_stop_impact(&output)
+                    .and_then(|parsed| builder.retain_batch(batch.clone(), parsed));
+                if parsed.is_err() {
+                    builder.incomplete = true;
+                    builder.unknown = true;
+                    builder.accounting.unresolved_frontier_references = builder
+                        .accounting
+                        .unresolved_frontier_references
+                        .saturating_add(u32::try_from(batch.len()).unwrap_or(u32::MAX));
+                    if batch.iter().any(|pending| pending.candidate) {
+                        builder.warning(StopImpactWarning::CandidateCoverageIncomplete);
+                    }
+                    builder.warning(StopImpactWarning::UnsupportedProperty);
+                    break;
+                }
                 if !builder.enforce_working_set() {
                     break;
                 }
@@ -1010,6 +1327,7 @@ pub async fn assess_systemd_stop_impact(
                     .unresolved_frontier_references
                     .saturating_add(u32::try_from(batch.len()).unwrap_or(u32::MAX));
                 builder.warning(StopImpactWarning::QueryLimit);
+                break;
             }
         }
     }
@@ -1038,11 +1356,14 @@ pub async fn assess_systemd_stop_impact(
                 return Ok(builder.finish(None));
             }
             builder.aggregate_output_bytes += output.len();
-            let mut parsed = parse_systemd_stop_impact(&output)?;
-            if parsed.len() == 1 {
-                Some(parsed.remove(0))
-            } else {
-                None
+            match parse_systemd_stop_impact(&output) {
+                Ok(mut parsed) if parsed.len() == 1 => Some(parsed.remove(0)),
+                Ok(_) | Err(_) => {
+                    builder.warning(StopImpactWarning::UnsupportedProperty);
+                    builder.incomplete = true;
+                    builder.unknown = true;
+                    None
+                }
             }
         }
         Ok(Err(error)) if error.code == ErrorCode::Cancelled => return Err(error),
@@ -1165,6 +1486,13 @@ mod tests {
         let raw_job_path = record("root.service", "", "", false)
             .replace("Job=", "Job=/org/freedesktop/systemd1/job/42");
         assert!(parse_systemd_stop_impact(&raw_job_path).is_err());
+        for invalid_job in ["0", "4294967296", "+1", "-1", "1.0"] {
+            let invalid = record("root.service", "", "", false)
+                .replace("Job=", &format!("Job={invalid_job}"));
+            assert!(parse_systemd_stop_impact(&invalid).is_err());
+        }
+        let valid_job = record("root.service", "", "", false).replace("Job=", "Job=4294967295");
+        assert!(parse_systemd_stop_impact(&valid_job).unwrap()[0].has_pending_job);
 
         let quoted = record("canonical.service", "", "", false)
             .replace(
@@ -1181,8 +1509,47 @@ mod tests {
         assert!(parse_systemd_stop_impact(&unterminated).is_err());
     }
 
+    fn pending(requested: &str) -> Pending {
+        Pending {
+            requested: requested.into(),
+            depth: 1,
+            provenance: StopImpactProvenance::Direct,
+            candidate: false,
+            candidate_sources: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn identity_matching_rejects_missing_extra_duplicate_and_ambiguous_records() {
+        let requested = vec![pending("a.service"), pending("b.service")];
+        let a = parse_systemd_stop_impact(&record("a.service", "", "", false))
+            .unwrap()
+            .remove(0);
+        let b = parse_systemd_stop_impact(&record("b.service", "", "", false))
+            .unwrap()
+            .remove(0);
+        let c = parse_systemd_stop_impact(&record("c.service", "", "", false))
+            .unwrap()
+            .remove(0);
+        assert!(match_batch_by_identity(&requested, vec![a.clone()]).is_err());
+        assert!(match_batch_by_identity(&requested, vec![a.clone(), b.clone(), c]).is_err());
+        assert!(match_batch_by_identity(&requested, vec![a.clone(), a]).is_err());
+
+        let aliases = record("canonical.service", "", "", false).replace(
+            "Names=canonical.service",
+            "Names=a.service b.service canonical.service",
+        );
+        let ambiguous = parse_systemd_stop_impact(&aliases).unwrap().remove(0);
+        assert!(match_batch_by_identity(&requested, vec![ambiguous, b]).is_err());
+    }
+
     struct Session {
         responses: Mutex<VecDeque<String>>,
+        commands: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct FallibleSession {
+        responses: Mutex<VecDeque<Result<String, AppError>>>,
         commands: Arc<Mutex<Vec<String>>>,
     }
 
@@ -1218,6 +1585,38 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl RemoteSession for FallibleSession {
+        async fn execute(
+            &self,
+            _: nexus_operations::ReadOnlyCommand,
+            _: CancellationToken,
+        ) -> Result<String, AppError> {
+            unreachable!()
+        }
+
+        async fn execute_stop_impact(
+            &self,
+            query: &SystemdStopImpactQuery,
+            _: CancellationToken,
+        ) -> Result<String, AppError> {
+            self.commands.lock().unwrap().push(query.command().into());
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(invalid)?
+        }
+
+        async fn disconnect(&self) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+    }
+
     #[tokio::test]
     async fn schedules_nonempty_batches_and_final_root_query_last() {
         let root = record("root.service", "child.service", "helper.service", false);
@@ -1225,11 +1624,7 @@ mod tests {
         let helper = record("helper.service", "", "", true);
         let commands = Arc::new(Mutex::new(Vec::new()));
         let session = Session {
-            responses: Mutex::new(VecDeque::from([
-                root.clone(),
-                [child, helper].join("\n\n"),
-                root,
-            ])),
+            responses: Mutex::new(VecDeque::from([root.clone(), child, helper, root])),
             commands: commands.clone(),
         };
         let result = assess_systemd_stop_impact(
@@ -1242,9 +1637,33 @@ mod tests {
         .await
         .unwrap();
         assert!(result.root_consistent);
-        assert_eq!(result.accounting.actual_ssh_queries, 3);
-        assert_eq!(commands.lock().unwrap().len(), 3);
-        assert!(commands.lock().unwrap()[2].ends_with(" show -- 'root.service'"));
+        assert_eq!(result.accounting.actual_ssh_queries, 4);
+        assert_eq!(commands.lock().unwrap().len(), 4);
+        assert!(commands.lock().unwrap()[1].ends_with(" show -- 'child.service'"));
+        assert!(commands.lock().unwrap()[2].ends_with(" show -- 'helper.service'"));
+        assert!(commands.lock().unwrap()[3].ends_with(" show -- 'root.service'"));
+    }
+
+    #[tokio::test]
+    async fn matches_reversed_multi_unit_response_by_validated_identity() {
+        let root = record("root.service", "b.service a.service", "", false);
+        let a = record("a.service", "", "", false);
+        let b = record("b.service", "", "", false);
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([root.clone(), [a, b].join("\n\n"), root])),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Complete);
+        assert_eq!(result.accounting.retained_units, 3);
     }
 
     #[tokio::test]
@@ -1254,11 +1673,7 @@ mod tests {
         let helper = record("helper.service", "root.service child.service", "", true);
         let commands = Arc::new(Mutex::new(Vec::new()));
         let session = Session {
-            responses: Mutex::new(VecDeque::from([
-                root.clone(),
-                [child, helper].join("\n\n"),
-                root,
-            ])),
+            responses: Mutex::new(VecDeque::from([root.clone(), child, helper, root])),
             commands: commands.clone(),
         };
         let result = assess_systemd_stop_impact(
@@ -1276,8 +1691,12 @@ mod tests {
             .find(|unit| unit.canonical_unit == "helper.service")
             .unwrap();
         assert_eq!(helper.provenance, StopImpactProvenance::Direct);
-        assert_eq!(result.accounting.actual_ssh_queries, 3);
-        assert_eq!(commands.lock().unwrap().len(), 3);
+        assert_eq!(result.accounting.actual_ssh_queries, 4);
+        let commands = commands.lock().unwrap();
+        assert_eq!(commands.len(), 4);
+        assert!(commands[1].ends_with(" show -- 'child.service'"));
+        assert!(commands[2].ends_with(" show -- 'helper.service'"));
+        assert!(commands[3].ends_with(" show -- 'root.service'"));
     }
 
     #[tokio::test]
@@ -1302,6 +1721,175 @@ mod tests {
         assert_eq!(result.accounting.omitted_known_candidates, 1);
         assert_eq!(result.accounting.retained_candidates, 0);
         assert_eq!(result.accounting.retained_units, 1);
+        assert_eq!(result.conditional_consequences.len(), 1);
+        assert_eq!(
+            result.conditional_consequences[0].classification,
+            StopImpactConditionalClassification::NotStopWhenUnneeded
+        );
+    }
+
+    #[tokio::test]
+    async fn classifies_unknown_reverse_reference_as_incomplete_coverage() {
+        let root = record("root.service", "", "helper.service", false);
+        let helper = record("helper.service", "external.service", "", true);
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([root.clone(), helper, root])),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Partial);
+        assert_eq!(result.uncertainty, StopImpactUncertainty::UnknownImpact);
+        assert_eq!(result.accounting.unresolved_frontier_references, 1);
+        assert_eq!(
+            result.conditional_consequences[0].classification,
+            StopImpactConditionalClassification::CoverageUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn classifies_observed_unaffected_reverse_reference_explicitly() {
+        let root = record("root.service", "", "helper.service external.service", false);
+        let helper = record("helper.service", "external.service", "", true);
+        let external = record("external.service", "", "", false);
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([
+                root.clone(),
+                [helper, external].join("\n\n"),
+                root,
+            ])),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Complete);
+        assert_eq!(result.uncertainty, StopImpactUncertainty::ConditionalImpact);
+        let helper = result
+            .conditional_consequences
+            .iter()
+            .find(|consequence| consequence.canonical_unit == "helper.service")
+            .unwrap();
+        assert_eq!(
+            helper.classification,
+            StopImpactConditionalClassification::RetainedByUnaffectedReference
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_non_root_batch_stops_traversal_and_final_root_is_still_revalidated() {
+        let root = record("root.service", "child.service later.service", "", false);
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([
+                root.clone(),
+                "Id=malformed.service".into(),
+                root,
+            ])),
+            commands: commands.clone(),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Partial);
+        assert!(result.root_consistent);
+        assert_eq!(commands.lock().unwrap().len(), 3);
+        assert!(commands.lock().unwrap()[2].ends_with(" show -- 'root.service'"));
+    }
+
+    #[tokio::test]
+    async fn failed_non_root_batch_stops_traversal_and_final_root_is_still_revalidated() {
+        let root = record("root.service", "child.service later.service", "", false);
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let session = FallibleSession {
+            responses: Mutex::new(VecDeque::from([
+                Ok(root.clone()),
+                Err(AppError::new(ErrorCode::Discovery, "query failed")),
+                Ok(root),
+            ])),
+            commands: commands.clone(),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Partial);
+        assert_eq!(result.uncertainty, StopImpactUncertainty::UnknownImpact);
+        assert!(result.root_consistent);
+        let commands = commands.lock().unwrap();
+        assert_eq!(commands.len(), 3);
+        assert!(commands[2].ends_with(" show -- 'root.service'"));
+    }
+
+    #[tokio::test]
+    async fn unsupported_modes_and_actions_are_retained_as_conservative_unknowns() {
+        let root = record("root.service", "", "", false)
+            .replace("OnSuccessJobMode=fail", "OnSuccessJobMode=future-mode");
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([root.clone(), root])),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Complete);
+        assert_eq!(result.uncertainty, StopImpactUncertainty::UnknownImpact);
+        assert!(
+            result
+                .warnings
+                .contains(&StopImpactWarning::UnsupportedProperty)
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_final_root_is_partial_unknown_instead_of_aborting_assessment() {
+        let root = record("root.service", "", "", false);
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([root, "Id=malformed.service".into()])),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        };
+        let result = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completeness, StopImpactCompleteness::Partial);
+        assert_eq!(result.uncertainty, StopImpactUncertainty::UnknownImpact);
+        assert!(!result.root_consistent);
     }
 
     #[tokio::test]

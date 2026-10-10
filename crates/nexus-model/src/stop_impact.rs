@@ -56,6 +56,15 @@ pub enum StopImpactRelationship {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub enum StopImpactConditionalClassification {
+    ConditionallyAffected,
+    NotStopWhenUnneeded,
+    RetainedByUnaffectedReference,
+    CoverageUnknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub enum StopImpactWarning {
     NodeLimit,
     EdgeLimit,
@@ -95,6 +104,14 @@ pub struct SystemdStopImpactEdge {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+pub struct SystemdStopImpactConditionalConsequence {
+    pub canonical_unit: String,
+    pub sources: Vec<String>,
+    pub classification: StopImpactConditionalClassification,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct SystemdStopImpactAccounting {
     pub observed_unit_records: u32,
     pub observed_relationship_references: u32,
@@ -121,6 +138,7 @@ pub struct SystemdStopImpactAssessment {
     pub root_consistent: bool,
     pub units: Vec<SystemdStopImpactUnit>,
     pub edges: Vec<SystemdStopImpactEdge>,
+    pub conditional_consequences: Vec<SystemdStopImpactConditionalConsequence>,
     pub accounting: SystemdStopImpactAccounting,
     pub warnings: Vec<StopImpactWarning>,
     pub limitations: Vec<String>,

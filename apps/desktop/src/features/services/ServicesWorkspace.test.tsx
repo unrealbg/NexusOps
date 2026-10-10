@@ -129,7 +129,14 @@ describe('session-bound Services workspace', () => {
         subState: 'running', canStop: true, refuseManualStop: false,
         stopWhenUnneeded: false, hasPendingJob: false, depth: 0, provenance: 'direct',
       }],
-      edges: [],
+      edges: [{
+        source: 'ssh.service', target: 'worker.service', relationship: 'requiredBy',
+        provenance: 'direct',
+      }],
+      conditionalConsequences: [{
+        canonicalUnit: 'cache.service', sources: ['ssh.service'],
+        classification: 'retainedByUnaffectedReference',
+      }],
       accounting: {
         observedUnitRecords: 1, observedRelationshipReferences: 0,
         observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0,
@@ -145,7 +152,11 @@ describe('session-bound Services workspace', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Read-only stop impact' });
     expect(within(dialog).getByText(/does not authorize or perform a stop/)).toBeInTheDocument();
     expect(within(dialog).getByText(/Absence of an observed relationship/)).toBeInTheDocument();
-    expect(within(dialog).getAllByText('ssh.service')).toHaveLength(2);
+    expect(within(dialog).getAllByText('ssh.service')).toHaveLength(4);
+    expect(within(dialog).getByText('requiredBy')).toBeInTheDocument();
+    expect(within(dialog).getByText('worker.service')).toBeInTheDocument();
+    expect(within(dialog).getByText('retainedByUnaffectedReference')).toBeInTheDocument();
+    expect(within(dialog).getByText('cache.service')).toBeInTheDocument();
     expect(within(dialog).getByText(/concurrentTopologyChange/)).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
     expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
@@ -165,7 +176,7 @@ describe('session-bound Services workspace', () => {
     await act(async () => { delayed.resolve({
       hostId: host.id, hostSessionId: A, rootUnit: 'ssh.service', observedAt: '',
       completeness: 'complete', uncertainty: 'directOnly', rootConsistent: true,
-      units: [], edges: [], warnings: [], limitations: [], accounting: {
+      units: [], edges: [], conditionalConsequences: [], warnings: [], limitations: [], accounting: {
         observedUnitRecords: 1, observedRelationshipReferences: 0,
         observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0,
         retainedCandidates: 0, omittedKnownUnits: 0, omittedKnownEdges: 0,
