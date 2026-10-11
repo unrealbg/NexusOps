@@ -760,8 +760,25 @@ impl Builder {
                         .map(String::len)
                         .sum::<usize>(),
                 )
-                .saturating_add(candidate.sources.iter().map(String::len).sum::<usize>())
+                .saturating_add(
+                    candidate
+                        .sources
+                        .iter()
+                        .map(|source| 128 + source.len())
+                        .sum::<usize>(),
+                )
         });
+        let consequence_bytes = self.conditional_consequences.iter().fold(
+            0usize,
+            |total, (canonical, (sources, _))| {
+                total.saturating_add(512 + canonical.len()).saturating_add(
+                    sources
+                        .iter()
+                        .map(|source| 128 + source.len())
+                        .sum::<usize>(),
+                )
+            },
+        );
         let alias_bytes = self
             .aliases
             .iter()
@@ -779,7 +796,7 @@ impl Builder {
                     pending
                         .candidate_sources
                         .iter()
-                        .map(String::len)
+                        .map(|source| 128 + source.len())
                         .sum::<usize>(),
                 )
         });
@@ -787,6 +804,7 @@ impl Builder {
             .saturating_mul(1024)
             .saturating_add(record_bytes)
             .saturating_add(candidate_bytes)
+            .saturating_add(consequence_bytes)
             .saturating_add(edge_bytes)
             .saturating_add(alias_bytes)
             .saturating_add(pending_bytes)
@@ -957,6 +975,27 @@ impl Builder {
             return;
         }
         if let Some(canonical) = self.aliases.get(requested).cloned() {
+            if candidate {
+                // A repeated probe is not an affected relationship. Keep cached
+                // observations behind the same reverse-coverage eligibility gate.
+                if let Some(observation) = self.candidates.get_mut(&canonical) {
+                    observation.depth = observation.depth.min(depth);
+                    if let Some(source) = candidate_source {
+                        observation.sources.insert(source.to_owned());
+                    }
+                } else if let Some(source) = candidate_source
+                    && let Some((sources, classification)) =
+                        self.conditional_consequences.get_mut(&canonical)
+                    && *classification == StopImpactConditionalClassification::ConditionallyAffected
+                {
+                    // Already admitted candidates still need every validated
+                    // source, including references discovered after admission.
+                    if sources.insert(source.to_owned()) {
+                        self.admit_candidate_edge(source, &canonical);
+                    }
+                }
+                return;
+            }
             self.promote(&canonical, depth, provenance, candidate);
             return;
         }
@@ -1006,7 +1045,8 @@ impl Builder {
     ) {
         let mut needs_propagation = false;
         let mut needs_inspection = false;
-        if !self.records.contains_key(canonical)
+        if !candidate
+            && !self.records.contains_key(canonical)
             && let Some(candidate_observation) = self.candidates.remove(canonical)
         {
             self.records.insert(
@@ -1018,7 +1058,7 @@ impl Builder {
                     candidate: false,
                 },
             );
-            needs_propagation = true;
+            needs_propagation = provenance == StopImpactProvenance::Direct;
             needs_inspection = true;
         }
         if let Some(existing) = self.records.get_mut(canonical) {
@@ -1146,12 +1186,22 @@ impl Builder {
                     self.unknown = true;
                     self.warning(StopImpactWarning::AliasAmbiguity);
                 }
-                self.promote(
-                    &canonical,
-                    pending.depth,
-                    pending.provenance,
-                    pending.candidate,
-                );
+                if pending.candidate {
+                    // This alias may have been queued before the canonical
+                    // observation was admitted by an earlier batch.
+                    for source in &pending.candidate_sources {
+                        self.admit_query(
+                            &canonical,
+                            pending.depth,
+                            pending.provenance,
+                            true,
+                            Some(source),
+                            pending.relationship_order,
+                        );
+                    }
+                } else {
+                    self.promote(&canonical, pending.depth, pending.provenance, false);
+                }
                 continue;
             }
             if let Some(existing) = self.candidates.get_mut(&canonical) {
@@ -1164,12 +1214,7 @@ impl Builder {
                 existing.depth = existing.depth.min(pending.depth);
                 existing.sources.extend(pending.candidate_sources);
                 if pending.provenance == StopImpactProvenance::Direct || !pending.candidate {
-                    self.promote(
-                        &canonical,
-                        pending.depth,
-                        StopImpactProvenance::Direct,
-                        false,
-                    );
+                    self.promote(&canonical, pending.depth, pending.provenance, false);
                 }
                 continue;
             }
@@ -1211,10 +1256,48 @@ impl Builder {
         for canonical in inspect {
             self.inspect_record(&canonical);
         }
+        self.resolve_cached_frontier();
         if !self.has_direct_frontier() {
             self.promote_eligible_candidates();
         }
         Ok(())
+    }
+
+    fn resolve_cached_frontier(&mut self) {
+        // Aliases queued before this batch may now identify observations already
+        // in memory. Resolve their relationships without another SSH request.
+        // Rotate only the existing frontier; inspection can append new work.
+        for _ in 0..self.pending.len() {
+            let Some(pending) = self.pending.pop_front() else {
+                break;
+            };
+            let Some(canonical) = self.aliases.get(&pending.requested).cloned() else {
+                self.pending.push_back(pending);
+                continue;
+            };
+            self.canonicalize_edges(&pending.requested, &canonical);
+            if pending.candidate {
+                for source in &pending.candidate_sources {
+                    self.admit_query(
+                        &canonical,
+                        pending.depth,
+                        pending.provenance,
+                        true,
+                        Some(source),
+                        pending.relationship_order,
+                    );
+                }
+            } else {
+                self.admit_query(
+                    &canonical,
+                    pending.depth,
+                    pending.provenance,
+                    false,
+                    None,
+                    pending.relationship_order,
+                );
+            }
+        }
     }
 
     fn has_direct_frontier(&self) -> bool {
@@ -1225,7 +1308,7 @@ impl Builder {
 
     fn promote_eligible_candidates(&mut self) {
         loop {
-            let eligible = self
+            let mut eligible = self
                 .candidates
                 .iter()
                 .filter(|(_, candidate)| {
@@ -1238,6 +1321,7 @@ impl Builder {
                 })
                 .map(|(canonical, _)| canonical.clone())
                 .collect::<Vec<_>>();
+            eligible.sort();
             if eligible.is_empty() {
                 break;
             }
@@ -1256,26 +1340,7 @@ impl Builder {
                     ),
                 );
                 for source in &candidate.sources {
-                    if self.edges.len() >= MAX_EDGES {
-                        self.accounting.omitted_known_edges =
-                            self.accounting.omitted_known_edges.saturating_add(1);
-                        self.incomplete = true;
-                        self.warning(StopImpactWarning::EdgeLimit);
-                        continue;
-                    }
-                    self.edges.insert(
-                        (
-                            source.clone(),
-                            canonical.clone(),
-                            relationship_code(StopImpactRelationship::StopWhenUnneededCandidate),
-                        ),
-                        SystemdStopImpactEdge {
-                            source: source.clone(),
-                            target: canonical.clone(),
-                            relationship: StopImpactRelationship::StopWhenUnneededCandidate,
-                            provenance: StopImpactProvenance::Conditional,
-                        },
-                    );
+                    self.admit_candidate_edge(source, &canonical);
                 }
                 self.records.insert(
                     canonical.clone(),
@@ -1292,6 +1357,33 @@ impl Builder {
                 break;
             }
         }
+    }
+
+    fn admit_candidate_edge(&mut self, source: &str, target: &str) {
+        let key = (
+            source.to_owned(),
+            target.to_owned(),
+            relationship_code(StopImpactRelationship::StopWhenUnneededCandidate),
+        );
+        if self.edges.contains_key(&key) {
+            return;
+        }
+        if self.edges.len() >= MAX_EDGES {
+            self.accounting.omitted_known_edges =
+                self.accounting.omitted_known_edges.saturating_add(1);
+            self.incomplete = true;
+            self.warning(StopImpactWarning::EdgeLimit);
+            return;
+        }
+        self.edges.insert(
+            key,
+            SystemdStopImpactEdge {
+                source: source.to_owned(),
+                target: target.to_owned(),
+                relationship: StopImpactRelationship::StopWhenUnneededCandidate,
+                provenance: StopImpactProvenance::Conditional,
+            },
+        );
     }
 
     fn canonicalize_edges(&mut self, requested: &str, canonical: &str) {
@@ -1492,6 +1584,10 @@ impl Builder {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "stop_impact_cache_tests.rs"]
+mod cache_tests;
 
 fn match_batch_by_identity(
     requested: &[Pending],
