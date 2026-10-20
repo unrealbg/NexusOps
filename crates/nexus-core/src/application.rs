@@ -1,4 +1,5 @@
 use crate::service_observations::ServiceObservationStore;
+use crate::stop_impact_inspections::StopImpactInspectionStore;
 use crate::{ConnectionProvider, HostRepository, StoredHost, sessions::SessionSlot};
 use nexus_audit::{AuditActor, AuditEvent, AuditLog, AuditOutcome};
 use nexus_model::*;
@@ -29,6 +30,7 @@ pub struct Application {
     pub(crate) service_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
     pub(crate) service_limit: Semaphore,
     pub(crate) service_observations: ServiceObservationStore,
+    pub(crate) stop_impact_inspections: StopImpactInspectionStore,
     pub(crate) network_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
     pub(crate) network_limit: Semaphore,
     pub(crate) log_gates: Mutex<HashMap<HostId, Arc<Mutex<()>>>>,
@@ -130,6 +132,7 @@ impl Application {
             service_gates: Mutex::new(HashMap::new()),
             service_limit: Semaphore::new(4),
             service_observations: ServiceObservationStore::default(),
+            stop_impact_inspections: StopImpactInspectionStore::default(),
             network_gates: Mutex::new(HashMap::new()),
             network_limit: Semaphore::new(4),
             log_gates: Mutex::new(HashMap::new()),
@@ -207,6 +210,7 @@ impl Application {
     pub async fn shutdown(&self) -> Result<(), AppError> {
         self.remote_operations.begin_shutdown()?;
         self.service_observations.seal_and_revoke_all()?;
+        self.stop_impact_inspections.seal_and_revoke_all()?;
         let slots = {
             let _mutation = self.mutation.lock().await;
             self.rotation_plans.lock().await.clear();

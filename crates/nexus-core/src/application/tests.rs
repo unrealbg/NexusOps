@@ -352,6 +352,8 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         service_gates: Mutex::new(HashMap::new()),
         service_limit: Semaphore::new(4),
         service_observations: crate::service_observations::ServiceObservationStore::default(),
+        stop_impact_inspections: crate::stop_impact_inspections::StopImpactInspectionStore::default(
+        ),
         network_gates: Mutex::new(HashMap::new()),
         network_limit: Semaphore::new(4),
         log_gates: Mutex::new(HashMap::new()),

@@ -9,8 +9,9 @@ use nexus_model::{
     RemoteOperationPlanId, ServiceObservationId, ServiceReloadPlan, ServiceReloadResult,
     ServiceResetFailedPlan, ServiceResetFailedResult, ServiceSnapshot, ServiceStartPlan,
     ServiceStartResult, ServiceTryRestartPlan, ServiceTryRestartResult, SshEndpointTrust,
-    SystemJournalSnapshot, TerminalOutputBatch, TerminalSession, TerminalSessionId, TerminalSize,
-    UpdateAnnouncementId, UpdateOperationSnapshot, VerifiedArtifactId,
+    SystemJournalSnapshot, SystemdStopImpactAssessment, SystemdStopImpactInspectionId,
+    TerminalOutputBatch, TerminalSession, TerminalSessionId, TerminalSize, UpdateAnnouncementId,
+    UpdateOperationSnapshot, VerifiedArtifactId,
 };
 use nexus_model::{
     ConflictPolicy, DirectoryListing, FileOperationPlan, FilePlanId, LocalGrantId,
@@ -224,6 +225,19 @@ pub async fn list_host_services(
 ) -> Result<ServiceSnapshot, AppError> {
     let _permit = lifecycle.admit()?;
     app.list_host_services(host_id, host_session_id).await
+}
+
+#[tauri::command]
+pub async fn assess_service_stop_impact(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+    inspection_id: SystemdStopImpactInspectionId,
+) -> Result<SystemdStopImpactAssessment, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.assess_service_stop_impact(host_id, host_session_id, inspection_id)
+        .await
 }
 
 #[tauri::command]

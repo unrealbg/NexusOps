@@ -15,6 +15,7 @@ fn main() {
             "refresh_host",
             "sample_host_monitor",
             "list_host_services",
+            "assess_service_stop_impact",
             "plan_service_reset_failed",
             "discard_service_reset_failed",
             "execute_service_reset_failed",
