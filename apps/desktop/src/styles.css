@@ -805,6 +805,44 @@ h1 {
   font-size: 10px;
   color: var(--subtle);
 }
+.host-list-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin: 20px 0 12px;
+}
+.host-list-controls .field {
+  flex: 1 1 180px;
+  min-width: 0;
+  margin: 0;
+}
+.host-list-controls .host-list-search {
+  flex: 2 1 240px;
+}
+.host-list-controls .field input,
+.host-list-controls .field select {
+  min-width: 0;
+  background: var(--surface-raised);
+  border-color: var(--border);
+}
+.host-list-summary {
+  color: var(--muted);
+  font-size: 11px;
+  margin: 12px 0;
+}
+.host-list-empty {
+  padding: 28px 20px;
+  text-align: center;
+}
+.host-list-empty h2 {
+  font-size: 16px;
+  margin: 0 0 10px;
+}
+.host-list-empty p {
+  color: var(--muted);
+  font-size: 12px;
+}
 .host-table-panel {
   overflow: auto;
 }
