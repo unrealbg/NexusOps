@@ -7,6 +7,7 @@ mod monitoring;
 mod network;
 mod parsers;
 mod probes;
+mod routes;
 mod services;
 
 pub use capabilities::{CapabilityRegistry, capabilities};
@@ -15,6 +16,7 @@ pub use logs::{observe_system_journal, parse_system_journal};
 pub use monitoring::{MonitorBaseline, MonitorReading, derive_sample, observe_monitor};
 pub use network::{observe_network, parse_network};
 pub use probes::{HostProbe, builtin_probes};
+pub use routes::{observe_routes, parse_routes};
 pub use services::{observe_services, parse_services};
 
 use nexus_model::{AppError, DiscoverySnapshot, ErrorCode};

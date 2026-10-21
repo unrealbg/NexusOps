@@ -1865,3 +1865,8 @@ h1 {
     display: none;
   }
 }
+
+.network-routes { margin-top: 2rem; }
+.network-route-controls { display: flex; flex-wrap: wrap; gap: 1rem; }
+.network-route-controls label { display: flex; flex: 1 1 200px; min-width: 0; flex-direction: column; gap: 0.5rem; }
+.network-route-controls input, .network-route-controls select { min-width: 0; padding: 0.65rem; color: var(--text); background: var(--surface-raised); border: 1px solid var(--border); border-radius: var(--radius); }

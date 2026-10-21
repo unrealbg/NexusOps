@@ -1,17 +1,19 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { Host, NetworkSnapshot } from '@nexusops/protocol';
+import type { Host, NetworkRouteSnapshot, NetworkSnapshot } from '@nexusops/protocol';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   state: 'disconnected',
   sessionId: null as string | null,
   list: vi.fn(),
+  routes: vi.fn(),
 }));
 vi.mock('../../api/queries', () => ({
   useHostSession: () => ({ data: { state: mocks.state, hostSessionId: mocks.sessionId } }),
 }));
-vi.mock('../../api/client', () => ({ networkApi: { list: mocks.list } }));
+vi.mock('../../api/client', () => ({ networkApi: { list: mocks.list, routes: mocks.routes } }));
 
 import { NetworkWorkspace } from './NetworkWorkspace';
 
@@ -21,43 +23,74 @@ const host = { id: 'host-a', displayName: 'Alpha' } as Host;
 const otherHost = { id: 'host-b', displayName: 'Beta' } as Host;
 function snapshot(hostId = host.id, hostSessionId = A): NetworkSnapshot {
   return {
-    hostId, hostSessionId, observedAt: '2026-09-26T12:00:00Z',
+    hostId,
+    hostSessionId,
+    observedAt: '2026-09-26T12:00:00Z',
     entries: [
-      { ifindex: 1, name: 'lo', operState: null, mtu: null,
-        addresses: [{ family: 'ipv4', address: '127.0.0.1', prefixLength: 8 }] },
-      { ifindex: 2, name: '<img src=x>', operState: 'FUTURE_STATE', mtu: 1500,
-        addresses: [{ family: 'ipv6', address: '2001:db8::10', prefixLength: 64 }] },
+      {
+        ifindex: 1,
+        name: 'lo',
+        operState: null,
+        mtu: null,
+        addresses: [{ family: 'ipv4', address: '127.0.0.1', prefixLength: 8 }],
+      },
+      {
+        ifindex: 2,
+        name: '<img src=x>',
+        operState: 'FUTURE_STATE',
+        mtu: 1500,
+        addresses: [{ family: 'ipv6', address: '2001:db8::10', prefixLength: 64 }],
+      },
     ],
   };
 }
 function freshSnapshot(hostSessionId: string): NetworkSnapshot {
   const result = snapshot(host.id, hostSessionId);
-  result.entries[0] = { ifindex: 1, name: 'lo', operState: null, mtu: null,
-    addresses: [{ family: 'ipv4', address: '127.0.0.2', prefixLength: 8 }] };
+  result.entries[0] = {
+    ifindex: 1,
+    name: 'lo',
+    operState: null,
+    mtu: null,
+    addresses: [{ family: 'ipv4', address: '127.0.0.2', prefixLength: 8 }],
+  };
   return result;
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
   return { promise, resolve, reject };
 }
 beforeEach(() => {
   mocks.state = 'disconnected';
   mocks.sessionId = null;
   mocks.list.mockReset();
+  mocks.routes
+    .mockReset()
+    .mockResolvedValue({
+      hostId: host.id,
+      hostSessionId: A,
+      observedAt: '2026-10-21T00:00:00Z',
+      entries: [],
+    });
 });
 
 describe('session-bound Network workspace', () => {
   it('makes no request for a disconnected host', () => {
     render(<NetworkWorkspace host={host} />);
-    expect(screen.getByText('Connect this host to inspect network interfaces.')).toBeInTheDocument();
+    expect(
+      screen.getByText('Connect this host to inspect network interfaces.'),
+    ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
     expect(mocks.list).not.toHaveBeenCalled();
   });
 
   it('loads once, renders validated text and optional fields, and filters without remote calls', async () => {
-    mocks.state = 'connected'; mocks.sessionId = A;
+    mocks.state = 'connected';
+    mocks.sessionId = A;
     mocks.list.mockResolvedValue(snapshot());
     render(<NetworkWorkspace host={host} />);
     expect(await screen.findByText('<img src=x>')).toBeInTheDocument();
@@ -67,17 +100,26 @@ describe('session-bound Network workspace', () => {
     expect(screen.getByText('2 interfaces · 2 addresses', { exact: false })).toBeInTheDocument();
     expect(screen.getAllByText('—')).toHaveLength(2);
     expect(mocks.list).toHaveBeenCalledExactlyOnceWith(host.id, A);
-    await userEvent.type(screen.getByRole('searchbox', { name: 'Filter interfaces and addresses' }), '2001:db8');
+    await userEvent.type(
+      screen.getByRole('searchbox', { name: 'Filter interfaces and addresses' }),
+      '2001:db8',
+    );
     expect(screen.queryByText('lo')).not.toBeInTheDocument();
     expect(screen.getByText('<img src=x>')).toBeInTheDocument();
     expect(mocks.list).toHaveBeenCalledTimes(1);
-    await userEvent.clear(screen.getByRole('searchbox'));
-    await userEvent.type(screen.getByRole('searchbox'), 'no-match');
+    await userEvent.clear(
+      screen.getByRole('searchbox', { name: 'Filter interfaces and addresses' }),
+    );
+    await userEvent.type(
+      screen.getByRole('searchbox', { name: 'Filter interfaces and addresses' }),
+      'no-match',
+    );
     expect(screen.getByText('No interfaces match this filter.')).toBeInTheDocument();
   });
 
   it('refreshes once while pending and keeps only a same-session snapshot on failure', async () => {
-    mocks.state = 'connected'; mocks.sessionId = A;
+    mocks.state = 'connected';
+    mocks.sessionId = A;
     const refresh = deferred<NetworkSnapshot>();
     mocks.list.mockResolvedValueOnce(snapshot()).mockReturnValueOnce(refresh.promise);
     render(<NetworkWorkspace host={host} />);
@@ -87,35 +129,50 @@ describe('session-bound Network workspace', () => {
     expect(button).toBeDisabled();
     await userEvent.click(button);
     expect(mocks.list).toHaveBeenCalledTimes(2);
-    await act(async () => { refresh.reject(new Error('unavailable')); });
-    expect(await screen.findByText('Refresh failed — showing the last successful snapshot.')).toBeInTheDocument();
+    await act(async () => {
+      refresh.reject(new Error('unavailable'));
+    });
+    expect(
+      await screen.findByText('Refresh failed — showing the last successful snapshot.'),
+    ).toBeInTheDocument();
     expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
     await waitFor(() => expect(button).toBeEnabled());
   });
 
   it('distinguishes an empty success from initial unavailability', async () => {
-    mocks.state = 'connected'; mocks.sessionId = A;
+    mocks.state = 'connected';
+    mocks.sessionId = A;
     mocks.list.mockResolvedValueOnce({ ...snapshot(), entries: [] });
     const view = render(<NetworkWorkspace host={host} />);
     expect(await screen.findByText('No network interfaces were returned.')).toBeInTheDocument();
     view.unmount();
     mocks.list.mockRejectedValueOnce(new Error('unsupported'));
     render(<NetworkWorkspace host={host} />);
-    expect(await screen.findByText('Network inventory is unavailable on this host.')).toBeInTheDocument();
+    expect(
+      await screen.findByText('Network inventory is unavailable on this host.'),
+    ).toBeInTheDocument();
   });
 
   it('hides disconnected data, requests a new session, and drops delayed old-session data', async () => {
-    mocks.state = 'connected'; mocks.sessionId = A;
+    mocks.state = 'connected';
+    mocks.sessionId = A;
     const old = deferred<NetworkSnapshot>();
     const fresh = freshSnapshot(B);
     mocks.list.mockReturnValueOnce(old.promise).mockResolvedValueOnce(fresh);
     const view = render(<NetworkWorkspace host={host} />);
-    mocks.state = 'disconnected'; mocks.sessionId = null;
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(1));
+    mocks.state = 'disconnected';
+    mocks.sessionId = null;
     view.rerender(<NetworkWorkspace host={host} />);
-    expect(screen.getByText('Connect this host to inspect network interfaces.')).toBeInTheDocument();
-    mocks.state = 'connected'; mocks.sessionId = B;
+    expect(
+      screen.getByText('Connect this host to inspect network interfaces.'),
+    ).toBeInTheDocument();
+    mocks.state = 'connected';
+    mocks.sessionId = B;
     view.rerender(<NetworkWorkspace host={host} />);
-    await act(async () => { old.resolve(snapshot()); });
+    await act(async () => {
+      old.resolve(snapshot());
+    });
     expect(await screen.findByText('IPv4 127.0.0.2/8')).toBeInTheDocument();
     expect(screen.queryByText('IPv4 127.0.0.1/8')).not.toBeInTheDocument();
     expect(mocks.list).toHaveBeenLastCalledWith(host.id, B);
@@ -123,46 +180,358 @@ describe('session-bound Network workspace', () => {
   });
 
   it('removes a visible snapshot on disconnect and does not reuse it on reconnect', async () => {
-    mocks.state = 'connected'; mocks.sessionId = A;
+    mocks.state = 'connected';
+    mocks.sessionId = A;
     const next = deferred<NetworkSnapshot>();
     mocks.list.mockResolvedValueOnce(snapshot()).mockReturnValueOnce(next.promise);
     const view = render(<NetworkWorkspace host={host} />);
     expect(await screen.findByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
-    mocks.state = 'disconnected'; mocks.sessionId = null;
+    mocks.state = 'disconnected';
+    mocks.sessionId = null;
     view.rerender(<NetworkWorkspace host={host} />);
     expect(screen.queryByText('IPv4 127.0.0.1/8')).not.toBeInTheDocument();
-    mocks.state = 'connected'; mocks.sessionId = B;
+    mocks.state = 'connected';
+    mocks.sessionId = B;
     view.rerender(<NetworkWorkspace host={host} />);
     expect(screen.queryByText('IPv4 127.0.0.1/8')).not.toBeInTheDocument();
-    await act(async () => { next.resolve(freshSnapshot(B)); });
+    await act(async () => {
+      next.resolve(freshSnapshot(B));
+    });
     expect(screen.getByText('IPv4 127.0.0.2/8')).toBeInTheDocument();
     expect(mocks.list).toHaveBeenCalledTimes(2);
   });
 
   it('drops old-host and unmounted responses', async () => {
-    mocks.state = 'connected'; mocks.sessionId = A;
+    mocks.state = 'connected';
+    mocks.sessionId = A;
     const oldHost = deferred<NetworkSnapshot>();
     const unmounted = deferred<NetworkSnapshot>();
     mocks.list.mockReturnValueOnce(oldHost.promise).mockReturnValueOnce(unmounted.promise);
     const view = render(<NetworkWorkspace host={host} />);
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(1));
     view.rerender(<NetworkWorkspace host={otherHost} />);
-    await act(async () => { oldHost.resolve(snapshot()); });
+    await act(async () => {
+      oldHost.resolve(snapshot());
+    });
     expect(screen.queryByText('IPv4 127.0.0.1/8')).not.toBeInTheDocument();
     expect(mocks.list).toHaveBeenLastCalledWith(otherHost.id, A);
     view.unmount();
-    await act(async () => { unmounted.resolve(snapshot(otherHost.id)); });
+    await act(async () => {
+      unmounted.resolve(snapshot(otherHost.id));
+    });
   });
 
   it('rejects mismatched host and session identities from the backend', async () => {
-    mocks.state = 'connected'; mocks.sessionId = A;
+    mocks.state = 'connected';
+    mocks.sessionId = A;
     mocks.list.mockResolvedValueOnce(snapshot(otherHost.id, A));
     const view = render(<NetworkWorkspace host={host} />);
-    expect(await screen.findByText('Network inventory is unavailable on this host.')).toBeInTheDocument();
+    expect(
+      await screen.findByText('Network inventory is unavailable on this host.'),
+    ).toBeInTheDocument();
     expect(screen.queryByText('IPv4 127.0.0.1/8')).not.toBeInTheDocument();
     view.unmount();
     mocks.list.mockResolvedValueOnce(snapshot(host.id, B));
     render(<NetworkWorkspace host={host} />);
-    expect(await screen.findByText('Network inventory is unavailable on this host.')).toBeInTheDocument();
+    expect(
+      await screen.findByText('Network inventory is unavailable on this host.'),
+    ).toBeInTheDocument();
     expect(screen.queryByText('IPv4 127.0.0.1/8')).not.toBeInTheDocument();
+  });
+});
+
+function routeSnapshot(hostId = host.id, hostSessionId = A): NetworkRouteSnapshot {
+  return {
+    hostId,
+    hostSessionId,
+    observedAt: '2026-10-21T00:00:00Z',
+    entries: [
+      {
+        family: 'ipv4',
+        destination: 'default',
+        gateway: '192.0.2.1',
+        interface: 'eth0',
+        metric: null,
+        onLink: false,
+        linkDown: false,
+        preference: null,
+      },
+      {
+        family: 'ipv4',
+        destination: 'default',
+        gateway: '198.51.100.1',
+        interface: 'eth1',
+        metric: 200,
+        onLink: true,
+        linkDown: false,
+        preference: null,
+      },
+      {
+        family: 'ipv6',
+        destination: '2001:db8::/64',
+        gateway: null,
+        interface: 'eth0',
+        metric: 0,
+        onLink: false,
+        linkDown: true,
+        preference: 'medium',
+      },
+    ],
+  };
+}
+function routeSection() {
+  return within(screen.getByRole('region', { name: 'Routes & Gateway' }));
+}
+
+describe('Routes & Gateway', () => {
+  beforeEach(() => {
+    mocks.state = 'connected';
+    mocks.sessionId = A;
+    mocks.list.mockResolvedValue(snapshot());
+    mocks.routes.mockResolvedValue(routeSnapshot());
+  });
+
+  it('serializes initial and manual observations and prevents overlapping Refresh', async () => {
+    const addresses = deferred<NetworkSnapshot>();
+    const routes = deferred<NetworkRouteSnapshot>();
+    mocks.list.mockReturnValueOnce(addresses.promise);
+    mocks.routes.mockReturnValueOnce(routes.promise);
+    render(<NetworkWorkspace host={host} />);
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledExactlyOnceWith(host.id, A));
+    expect(mocks.routes).not.toHaveBeenCalled();
+    await act(async () => {
+      addresses.resolve(snapshot());
+    });
+    expect(mocks.routes).toHaveBeenCalledExactlyOnceWith(host.id, A);
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
+    expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
+    await act(async () => {
+      routes.resolve(routeSnapshot());
+    });
+    expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled();
+    const refreshAddresses = deferred<NetworkSnapshot>();
+    mocks.list.mockReturnValueOnce(refreshAddresses.promise);
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    expect(mocks.routes).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      refreshAddresses.resolve(snapshot());
+    });
+    await waitFor(() => expect(mocks.routes).toHaveBeenCalledTimes(2));
+  });
+
+  it('renders actual multiple defaults, absent versus zero metrics, direct routes, flags and preference', async () => {
+    render(<NetworkWorkspace host={host} />);
+    expect(await screen.findByText('192.0.2.1')).toBeInTheDocument();
+    const section = routeSection();
+    expect(section.getByText('198.51.100.1 (on-link)')).toBeInTheDocument();
+    expect(section.getAllByText('default')).toHaveLength(2);
+    expect(
+      section.getByText('2 default route(s) observed; no uniquely preferred gateway is inferred.'),
+    ).toBeInTheDocument();
+    expect(section.getByText('Direct / on-link')).toBeInTheDocument();
+    expect(section.getByText('0')).toBeInTheDocument();
+    expect(section.getByText('eth0 (link down)')).toBeInTheDocument();
+    expect(section.getByText('medium')).toBeInTheDocument();
+    expect(section.getAllByText('Not reported')).toHaveLength(3);
+    expect(section.getByText('Routes observed', { exact: false })).toHaveTextContent(
+      '2026-10-21T00:00:00Z',
+    );
+    expect(section.getByRole('table', { name: 'Main routing table routes' })).toBeInTheDocument();
+  });
+
+  it.each([' ETH1 ', '198.51.100', 'defAULT', '2001:DB8'])(
+    'searches routes locally by %s with family filtering',
+    async (term) => {
+      render(<NetworkWorkspace host={host} />);
+      await screen.findByText('192.0.2.1');
+      const search = routeSection().getByRole('searchbox', { name: 'Search routes' });
+      await userEvent.type(search, term);
+      expect(routeSection().getByRole('status')).toHaveTextContent(
+        term.trim().toLowerCase() === 'default' ? 'Showing 2 of 3 routes' : 'Showing 1 of 3 routes',
+      );
+      await userEvent.clear(search);
+      await userEvent.selectOptions(
+        routeSection().getByRole('combobox', { name: 'Route address family' }),
+        'ipv6',
+      );
+      expect(routeSection().getByRole('status')).toHaveTextContent('Showing 1 of 3 routes');
+      expect(routeSection().queryByText('192.0.2.1')).not.toBeInTheDocument();
+      await userEvent.type(search, 'no-match');
+      expect(routeSection().getByText('No routes match these filters.')).toBeInTheDocument();
+      expect(mocks.list).toHaveBeenCalledTimes(1);
+      expect(mocks.routes).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
+    },
+  );
+
+  it.each(['ipv4', 'ipv6', 'empty'])(
+    'explains missing families and absent defaults for %s inventory',
+    async (family) => {
+      const data = routeSnapshot();
+      data.entries =
+        family === 'empty'
+          ? []
+          : data.entries.filter(
+              (entry) => entry.family === family && entry.destination !== 'default',
+            );
+      mocks.routes.mockResolvedValue(data);
+      render(<NetworkWorkspace host={host} />);
+      expect(
+        await screen.findByText(
+          'No default gateway is observed in the main table. This does not establish whether external connectivity is available.',
+        ),
+      ).toBeInTheDocument();
+      if (!data.entries.some((entry) => entry.family === 'ipv4'))
+        expect(
+          routeSection().getByText('No IPv4 routes were returned from the main table.'),
+        ).toBeInTheDocument();
+      if (!data.entries.some((entry) => entry.family === 'ipv6'))
+        expect(
+          routeSection().getByText('No IPv6 routes were returned from the main table.'),
+        ).toBeInTheDocument();
+      if (!data.entries.length)
+        expect(routeSection().getByText('No main-table routes were returned.')).toBeInTheDocument();
+    },
+  );
+
+  it('keeps successful interfaces when routes fail initially, and retries only on manual Refresh', async () => {
+    mocks.routes.mockRejectedValueOnce(new Error('Do not display remote failure details'));
+    render(<NetworkWorkspace host={host} />);
+    expect(
+      await screen.findByText('Route inventory is unavailable on this host.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
+    expect(screen.queryByText('Do not display remote failure details')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText('192.0.2.1')).toBeInTheDocument();
+    expect(mocks.routes).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads routes even when the preceding interface observation fails', async () => {
+    mocks.list.mockRejectedValueOnce(new Error('Synthetic interface failure'));
+    render(<NetworkWorkspace host={host} />);
+    expect(
+      await screen.findByText('Network inventory is unavailable on this host.'),
+    ).toBeInTheDocument();
+    expect(await screen.findByText('192.0.2.1')).toBeInTheDocument();
+    expect(mocks.routes).toHaveBeenCalledExactlyOnceWith(host.id, A);
+  });
+
+  it.each(['interfaces', 'routes', 'both'])(
+    'preserves independent same-session snapshots when %s refresh fails',
+    async (failure) => {
+      render(<NetworkWorkspace host={host} />);
+      await screen.findByText('192.0.2.1');
+      if (failure !== 'routes') mocks.list.mockRejectedValueOnce(new Error('Synthetic failure'));
+      if (failure !== 'interfaces')
+        mocks.routes.mockRejectedValueOnce(new Error('Synthetic failure'));
+      await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
+      expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
+      expect(routeSection().getByText('192.0.2.1')).toBeInTheDocument();
+      if (failure !== 'interfaces')
+        expect(
+          routeSection().getByText(
+            'Route refresh failed — showing the last successful same-session route snapshot.',
+          ),
+        ).toBeInTheDocument();
+      if (failure !== 'routes')
+        expect(
+          screen.getByText('Refresh failed — showing the last successful snapshot.'),
+        ).toBeInTheDocument();
+    },
+  );
+
+  it.each([routeSnapshot(otherHost.id), routeSnapshot(host.id, B)])(
+    'rejects wrong route ownership',
+    async (data) => {
+      mocks.routes.mockResolvedValueOnce(data);
+      render(<NetworkWorkspace host={host} />);
+      expect(
+        await screen.findByText('Route inventory is unavailable on this host.'),
+      ).toBeInTheDocument();
+      expect(routeSection().queryByText('192.0.2.1')).not.toBeInTheDocument();
+      expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
+    },
+  );
+
+  it('discards delayed routes on session replacement and never renders or requests old ownership again', async () => {
+    const old = deferred<NetworkRouteSnapshot>();
+    const fresh = deferred<NetworkRouteSnapshot>();
+    mocks.routes.mockReturnValueOnce(old.promise).mockReturnValueOnce(fresh.promise);
+    const view = render(<NetworkWorkspace host={host} />);
+    await waitFor(() => expect(mocks.routes).toHaveBeenCalledTimes(1));
+    mocks.sessionId = B;
+    mocks.list.mockResolvedValue(freshSnapshot(B));
+    view.rerender(<NetworkWorkspace host={host} />);
+    expect(screen.queryByText('IPv4 127.0.0.1/8')).not.toBeInTheDocument();
+    await waitFor(() => expect(mocks.routes).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      old.resolve(routeSnapshot());
+    });
+    expect(routeSection().queryByText('192.0.2.1')).not.toBeInTheDocument();
+    const result = routeSnapshot(host.id, B);
+    result.entries = [];
+    await act(async () => {
+      fresh.resolve(result);
+    });
+    expect(routeSection().getByText('No main-table routes were returned.')).toBeInTheDocument();
+    expect(mocks.routes).toHaveBeenLastCalledWith(host.id, B);
+  });
+
+  it.each(['host', 'disconnect', 'unmount'])(
+    'drops pending route responses after %s turnover',
+    async (turnover) => {
+      const old = deferred<NetworkRouteSnapshot>();
+      mocks.routes.mockReturnValueOnce(old.promise);
+      const view = render(<NetworkWorkspace host={host} />);
+      await waitFor(() => expect(mocks.routes).toHaveBeenCalledTimes(1));
+      if (turnover === 'unmount') view.unmount();
+      else if (turnover === 'disconnect') {
+        mocks.state = 'disconnected';
+        mocks.sessionId = null;
+        view.rerender(<NetworkWorkspace host={host} />);
+      } else {
+        mocks.list.mockResolvedValue(snapshot(otherHost.id));
+        mocks.routes.mockResolvedValue({ ...routeSnapshot(otherHost.id), entries: [] });
+        view.rerender(<NetworkWorkspace host={otherHost} />);
+      }
+      await act(async () => {
+        old.resolve(routeSnapshot());
+      });
+      expect(screen.queryByText('192.0.2.1')).not.toBeInTheDocument();
+      if (turnover !== 'host') expect(mocks.routes).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('does not start routes after an old address response settles following unmount', async () => {
+    const old = deferred<NetworkSnapshot>();
+    mocks.list.mockReturnValueOnce(old.promise);
+    const view = render(<NetworkWorkspace host={host} />);
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(1));
+    view.unmount();
+    await act(async () => {
+      old.resolve(snapshot());
+    });
+    expect(mocks.routes).not.toHaveBeenCalled();
+  });
+
+  it('has one request sequence under StrictMode and keeps local keyboard controls from refetching', async () => {
+    render(
+      <StrictMode>
+        <NetworkWorkspace host={host} />
+      </StrictMode>,
+    );
+    await screen.findByText('192.0.2.1');
+    const search = routeSection().getByRole('searchbox', { name: 'Search routes' });
+    search.focus();
+    await userEvent.keyboard('eth1');
+    expect(routeSection().getByRole('status')).toHaveTextContent('Showing 1 of 3 routes');
+    await userEvent.tab();
+    expect(routeSection().getByRole('combobox', { name: 'Route address family' })).toHaveFocus();
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.routes).toHaveBeenCalledTimes(1);
   });
 });

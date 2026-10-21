@@ -48,6 +48,8 @@ impl HostProbe for LinuxProbe {
             }
             ReadOnlyCommand::CpuStat
             | ReadOnlyCommand::NetworkDevices
+            | ReadOnlyCommand::NetworkRoutesV4
+            | ReadOnlyCommand::NetworkRoutesV6
             | ReadOnlyCommand::NetworkAddresses
             | ReadOnlyCommand::SystemJournal
             | ReadOnlyCommand::DockerContainers

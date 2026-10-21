@@ -33,6 +33,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         NetworkAddressEntry::decl(&config),
         NetworkInterfaceEntry::decl(&config),
         NetworkSnapshot::decl(&config),
+        NetworkRouteEntry::decl(&config),
+        NetworkRouteSnapshot::decl(&config),
         JournalPriority::decl(&config),
         SystemJournalMessageState::decl(&config),
         SystemJournalEntry::decl(&config),
