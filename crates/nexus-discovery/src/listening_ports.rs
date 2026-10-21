@@ -69,7 +69,7 @@ fn address(value: &str, bracketed: bool) -> Result<(String, Family), AppError> {
     }
     let ip: IpAddr = raw.parse().map_err(|_| invalid())?;
     let family = match ip {
-        IpAddr::V4(_) if !bracketed && scope.is_none() => Family::Ipv4,
+        IpAddr::V4(_) if !bracketed => Family::Ipv4,
         IpAddr::V6(_) => Family::Ipv6,
         _ => return Err(invalid()),
     };
@@ -233,6 +233,99 @@ mod tests {
         assert_eq!(rows[2].port, 65535);
     }
 
+    #[test]
+    fn accepts_ipv4_and_ipv6_local_interface_suffixes() {
+        let rows = parse_listening_ports("udp UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:*\nudp UNCONN 0 0 192.168.122.37%enp1s0:68 0.0.0.0:*\ntcp LISTEN 0 1 [::1%lo]:53 [::]:*\nudp UNCONN 0 0 2001:0db8::1%enp1s0:68 :::*").unwrap();
+        for (row, (address, family, port)) in rows.iter().zip([
+            ("127.0.0.53%lo", Family::Ipv4, 53),
+            ("192.168.122.37%enp1s0", Family::Ipv4, 68),
+            ("::1%lo", Family::Ipv6, 53),
+            ("2001:db8::1%enp1s0", Family::Ipv6, 68),
+        ]) {
+            assert_eq!(row.local_address, address);
+            assert_eq!(row.family, family);
+            assert_eq!(row.port, port);
+        }
+        assert_eq!(rows.len(), 4);
+    }
+
+    #[test]
+    fn interface_suffixes_distinguish_identities_and_numeric_scopes_are_canonical() {
+        for ip in ["192.0.2.1", "2001:db8::1"] {
+            let rows = parse_listening_ports(&format!("tcp LISTEN 0 1 {ip}%eth0:80 *:*\ntcp LISTEN 0 1 {ip}%eth1:80 *:*\ntcp LISTEN 0 1 {ip}:80 *:*")).unwrap();
+            assert_eq!(rows.len(), 3);
+            assert_eq!(rows[0].local_address, format!("{ip}%eth0"));
+            assert_eq!(rows[1].local_address, format!("{ip}%eth1"));
+            assert_eq!(rows[2].local_address, ip);
+            bad(&format!(
+                "tcp LISTEN 0 1 {ip}%eth0:80 *:*\ntcp LISTEN 1 2 {ip}%eth0:080 *:*"
+            ));
+            bad(&format!(
+                "tcp LISTEN 0 1 {ip}%0001:80 *:*\ntcp LISTEN 0 1 {ip}%1:80 *:*"
+            ));
+            let rows = parse_listening_ports(&format!(
+                "tcp LISTEN 0 1 {ip}%0001:80 *:*\ntcp LISTEN 0 1 {ip}%4294967295:80 *:*"
+            ))
+            .unwrap();
+            assert_eq!(rows[0].local_address, format!("{ip}%1"));
+            assert_eq!(rows[1].local_address, format!("{ip}%4294967295"));
+        }
+        bad(
+            "tcp LISTEN 0 1 [2001:0db8::1%eth0]:80 [::]:*\ntcp LISTEN 0 1 2001:db8::1%eth0:080 :::*",
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_interface_suffixes_and_preserves_scope_length_bounds() {
+        for ip in ["192.0.2.1", "2001:db8::1"] {
+            for scope in [
+                "",
+                "eth/0",
+                "eth:0",
+                "a%b",
+                "0",
+                "0000",
+                "4294967296",
+                "+1",
+                "eth 0",
+                "eth\t0",
+                "eth\n0",
+                "eth\r0",
+                "eth\0",
+                "eth\x1b[31m",
+                "eth\x7f",
+                "eth\u{202e}",
+                "eth\u{200b}",
+                "éth0",
+            ] {
+                bad(&format!("tcp LISTEN 0 1 {ip}%{scope}:80 *:*"));
+            }
+            bad(&format!("tcp LISTEN 0 1 {ip}%{}:80 *:*", "a".repeat(33)));
+            let scope = format!("a_-.{}", "b".repeat(28));
+            let rows =
+                parse_listening_ports(&format!("tcp LISTEN 0 1 {ip}%{scope}:80 *:*")).unwrap();
+            assert_eq!(rows[0].local_address, format!("{ip}%{scope}"));
+        }
+    }
+
+    #[test]
+    fn scoped_local_addresses_do_not_relax_brackets_peer_or_family_checks() {
+        for local in [
+            "[192.0.2.1%eth0]:80",
+            "[192.0.2.1]:80",
+            "*%eth0:80",
+            "[*%eth0]:80",
+            "[::ffff:192.0.2.999%eth0]:80",
+        ] {
+            bad(&format!("tcp LISTEN 0 1 {local} *:*"));
+        }
+        bad("tcp LISTEN 0 1 192.0.2.1%eth0:80 [::]:*");
+        bad("tcp LISTEN 0 1 [2001:db8::1%eth0]:80 0.0.0.0:*");
+        for peer in ["0.0.0.0%lo:*", "[::%lo]:*", "*%lo:*", "192.0.2.1%eth0:*"] {
+            bad(&format!("tcp LISTEN 0 1 192.0.2.1%eth0:80 {peer}"));
+        }
+    }
+
     fn bad(input: &str) {
         let error = parse_listening_ports(input).unwrap_err();
         assert_eq!(error.code, ErrorCode::Discovery);
@@ -284,7 +377,6 @@ mod tests {
             "[::1]:22junk",
             "[::1]:22:33",
             "::22",
-            "192.0.2.1%eth0:22",
             "[::1%]:22",
             "[::1%eth/0]:22",
             "[::1%a%b]:22",
