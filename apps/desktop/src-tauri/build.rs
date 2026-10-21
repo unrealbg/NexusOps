@@ -29,6 +29,7 @@ fn main() {
             "execute_service_start",
             "list_host_network",
             "list_host_routes",
+            "list_host_listening_ports",
             "list_host_logs",
             "list_host_containers",
             "list_terminals",

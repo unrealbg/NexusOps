@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-host-listening-ports"
+description = "Enables the list_host_listening_ports command without any pre-configured scope."
+commands.allow = ["list_host_listening_ports"]
+
+[[permission]]
+identifier = "deny-list-host-listening-ports"
+description = "Denies the list_host_listening_ports command without any pre-configured scope."
+commands.deny = ["list_host_listening_ports"]

@@ -1,7 +1,12 @@
 import { StrictMode } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { Host, NetworkRouteSnapshot, NetworkSnapshot } from '@nexusops/protocol';
+import type {
+  Host,
+  ListeningPortSnapshot,
+  NetworkRouteSnapshot,
+  NetworkSnapshot,
+} from '@nexusops/protocol';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -9,11 +14,14 @@ const mocks = vi.hoisted(() => ({
   sessionId: null as string | null,
   list: vi.fn(),
   routes: vi.fn(),
+  listeningPorts: vi.fn(),
 }));
 vi.mock('../../api/queries', () => ({
   useHostSession: () => ({ data: { state: mocks.state, hostSessionId: mocks.sessionId } }),
 }));
-vi.mock('../../api/client', () => ({ networkApi: { list: mocks.list, routes: mocks.routes } }));
+vi.mock('../../api/client', () => ({
+  networkApi: { list: mocks.list, routes: mocks.routes, listeningPorts: mocks.listeningPorts },
+}));
 
 import { NetworkWorkspace } from './NetworkWorkspace';
 
@@ -68,14 +76,20 @@ beforeEach(() => {
   mocks.state = 'disconnected';
   mocks.sessionId = null;
   mocks.list.mockReset();
-  mocks.routes
+  mocks.listeningPorts
     .mockReset()
     .mockResolvedValue({
       hostId: host.id,
       hostSessionId: A,
-      observedAt: '2026-10-21T00:00:00Z',
+      observedAt: '2026-10-21T12:00:00Z',
       entries: [],
     });
+  mocks.routes.mockReset().mockResolvedValue({
+    hostId: host.id,
+    hostSessionId: A,
+    observedAt: '2026-10-21T00:00:00Z',
+    entries: [],
+  });
 });
 
 describe('session-bound Network workspace', () => {
@@ -533,5 +547,259 @@ describe('Routes & Gateway', () => {
     expect(routeSection().getByRole('combobox', { name: 'Route address family' })).toHaveFocus();
     expect(mocks.list).toHaveBeenCalledTimes(1);
     expect(mocks.routes).toHaveBeenCalledTimes(1);
+  });
+});
+
+function portSnapshot(hostId = host.id, hostSessionId = A): ListeningPortSnapshot {
+  return {
+    hostId,
+    hostSessionId,
+    observedAt: '2026-10-21T12:00:00Z',
+    entries: [
+      { protocol: 'tcp', family: 'ipv4', localAddress: '192.0.2.10', port: 8080, state: 'listen' },
+      {
+        protocol: 'udp',
+        family: 'ipv6',
+        localAddress: '2001:db8::1%eth0',
+        port: 5353,
+        state: 'unconn',
+      },
+      { protocol: 'tcp', family: 'unknown', localAddress: '*', port: 8443, state: 'listen' },
+    ],
+  };
+}
+function portSection() {
+  return within(screen.getByRole('region', { name: 'Listening Ports' }));
+}
+describe('Listening Ports', () => {
+  beforeEach(() => {
+    mocks.state = 'connected';
+    mocks.sessionId = A;
+    mocks.list.mockResolvedValue(snapshot());
+    mocks.routes.mockResolvedValue(routeSnapshot());
+    mocks.listeningPorts.mockResolvedValue(portSnapshot());
+  });
+  it('runs exactly one address-route-socket sequence and keeps Refresh disabled through the socket request', async () => {
+    const addresses = deferred<NetworkSnapshot>();
+    const routes = deferred<NetworkRouteSnapshot>();
+    const ports = deferred<ListeningPortSnapshot>();
+    mocks.list.mockReturnValueOnce(addresses.promise);
+    mocks.routes.mockReturnValueOnce(routes.promise);
+    mocks.listeningPorts.mockReturnValueOnce(ports.promise);
+    render(<NetworkWorkspace host={host} />);
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledExactlyOnceWith(host.id, A));
+    expect(mocks.routes).not.toHaveBeenCalled();
+    expect(mocks.listeningPorts).not.toHaveBeenCalled();
+    await act(async () => {
+      addresses.resolve(snapshot());
+    });
+    expect(mocks.routes).toHaveBeenCalledExactlyOnceWith(host.id, A);
+    expect(mocks.listeningPorts).not.toHaveBeenCalled();
+    await act(async () => {
+      routes.resolve(routeSnapshot());
+    });
+    expect(mocks.listeningPorts).toHaveBeenCalledExactlyOnceWith(host.id, A);
+    const button = screen.getByRole('button', { name: 'Refresh' });
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      ports.resolve(portSnapshot());
+    });
+    expect(button).toBeEnabled();
+    expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
+    expect(screen.getByText('192.0.2.1')).toBeInTheDocument();
+  });
+  it('renders counts, explicit unknown family, reported state, timestamp and reachability limits', async () => {
+    render(<NetworkWorkspace host={host} />);
+    await screen.findByText('192.0.2.10');
+    const section = portSection();
+    expect(section.getByText('TCP listening: 2 · UDP bound sockets: 1')).toBeInTheDocument();
+    expect(section.getByText('Unknown')).toBeInTheDocument();
+    expect(section.getByText('*')).toBeInTheDocument();
+    expect(section.getByText('UNCONN')).toBeInTheDocument();
+    expect(section.getAllByText('LISTEN')).toHaveLength(2);
+    expect(section.getByText('2001:db8::1%eth0')).toBeInTheDocument();
+    expect(section.getByText('Listening ports observed', { exact: false })).toHaveTextContent(
+      '2026-10-21T12:00:00Z',
+    );
+    expect(
+      section.getByText(/does not prove external reachability or firewall exposure/),
+    ).toHaveTextContent('UDP bound sockets do not prove');
+    expect(section.getByRole('table', { name: 'Listening and bound sockets' })).toBeInTheDocument();
+  });
+  it.each(['192.0.2', ' 5353 ', 'UDP', 'UNCONN'])(
+    'searches locally for %s, combines TCP/UDP filters and restores rows',
+    async (term) => {
+      render(<NetworkWorkspace host={host} />);
+      await screen.findByText('192.0.2.10');
+      const section = portSection();
+      const search = section.getByRole('searchbox', { name: 'Search listening ports' });
+      await userEvent.type(search, term);
+      expect(section.getByRole('status')).toHaveTextContent('Showing 1 of 3 sockets');
+      await userEvent.clear(search);
+      const protocol = section.getByRole('combobox', { name: 'Socket protocol' });
+      await userEvent.selectOptions(protocol, 'tcp');
+      expect(section.getByRole('status')).toHaveTextContent('Showing 2 of 3 sockets');
+      expect(section.getByText('Unknown')).toBeInTheDocument();
+      await userEvent.selectOptions(protocol, 'udp');
+      expect(section.getByRole('status')).toHaveTextContent('Showing 1 of 3 sockets');
+      await userEvent.type(search, 'no-match');
+      expect(section.getByText('No sockets match these filters.')).toBeInTheDocument();
+      await userEvent.clear(search);
+      await userEvent.selectOptions(protocol, 'all');
+      expect(section.getByRole('status')).toHaveTextContent('Showing 3 of 3 sockets');
+      expect(mocks.list).toHaveBeenCalledTimes(1);
+      expect(mocks.routes).toHaveBeenCalledTimes(1);
+      expect(mocks.listeningPorts).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('distinguishes empty socket success from unavailability and preserves the first two sections', async () => {
+    mocks.listeningPorts.mockResolvedValueOnce({ ...portSnapshot(), entries: [] });
+    const view = render(<NetworkWorkspace host={host} />);
+    expect(
+      await screen.findByText('No supported listening or bound sockets were returned.'),
+    ).toBeInTheDocument();
+    expect(portSection().getByText('TCP listening: 0 · UDP bound sockets: 0')).toBeInTheDocument();
+    view.unmount();
+    mocks.listeningPorts.mockRejectedValueOnce(new Error('Private remote failure details'));
+    render(<NetworkWorkspace host={host} />);
+    expect(
+      await screen.findByText('Listening-port inventory is unavailable on this host.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Private remote failure details')).not.toBeInTheDocument();
+    expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
+    expect(screen.getByText('192.0.2.1')).toBeInTheDocument();
+    expect(
+      screen.queryByText('No supported listening or bound sockets were returned.'),
+    ).not.toBeInTheDocument();
+  });
+  it.each(['interfaces', 'routes', 'sockets', 'all'])(
+    'keeps independent snapshots after %s Refresh failure',
+    async (failure) => {
+      render(<NetworkWorkspace host={host} />);
+      await screen.findByText('192.0.2.10');
+      if (failure === 'interfaces' || failure === 'all')
+        mocks.list.mockRejectedValueOnce(new Error('Synthetic failure'));
+      if (failure === 'routes' || failure === 'all')
+        mocks.routes.mockRejectedValueOnce(new Error('Synthetic failure'));
+      if (failure === 'sockets' || failure === 'all')
+        mocks.listeningPorts.mockRejectedValueOnce(new Error('Synthetic failure'));
+      await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh' })).toBeEnabled());
+      expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
+      expect(screen.getByText('192.0.2.1')).toBeInTheDocument();
+      expect(portSection().getByText('192.0.2.10')).toBeInTheDocument();
+      if (failure === 'sockets' || failure === 'all')
+        expect(
+          portSection().getByText(
+            'Listening-port refresh failed — showing the last successful same-session socket snapshot.',
+          ),
+        ).toBeInTheDocument();
+      expect(mocks.listeningPorts).toHaveBeenCalledTimes(2);
+    },
+  );
+  it.each(['interfaces', 'routes', 'both'])(
+    'still observes sockets when earlier %s initial reads fail',
+    async (failure) => {
+      if (failure !== 'routes') mocks.list.mockRejectedValueOnce(new Error('Synthetic failure'));
+      if (failure !== 'interfaces')
+        mocks.routes.mockRejectedValueOnce(new Error('Synthetic failure'));
+      render(<NetworkWorkspace host={host} />);
+      expect(await screen.findByText('192.0.2.10')).toBeInTheDocument();
+      expect(mocks.listeningPorts).toHaveBeenCalledExactlyOnceWith(host.id, A);
+    },
+  );
+  it.each([portSnapshot(otherHost.id), portSnapshot(host.id, B)])(
+    'rejects mismatched socket ownership',
+    async (data) => {
+      mocks.listeningPorts.mockResolvedValueOnce(data);
+      render(<NetworkWorkspace host={host} />);
+      expect(
+        await screen.findByText('Listening-port inventory is unavailable on this host.'),
+      ).toBeInTheDocument();
+      expect(portSection().queryByText('192.0.2.10')).not.toBeInTheDocument();
+    },
+  );
+  it('clears visible sockets on disconnect and reconnects with a fresh session', async () => {
+    const view = render(<NetworkWorkspace host={host} />);
+    await screen.findByText('192.0.2.10');
+    mocks.state = 'disconnected';
+    mocks.sessionId = null;
+    view.rerender(<NetworkWorkspace host={host} />);
+    expect(screen.queryByText('192.0.2.10')).not.toBeInTheDocument();
+    mocks.state = 'connected';
+    mocks.sessionId = B;
+    mocks.list.mockResolvedValue(freshSnapshot(B));
+    mocks.routes.mockResolvedValue(routeSnapshot(host.id, B));
+    const next = deferred<ListeningPortSnapshot>();
+    mocks.listeningPorts.mockReturnValueOnce(next.promise);
+    view.rerender(<NetworkWorkspace host={host} />);
+    expect(screen.queryByText('192.0.2.10')).not.toBeInTheDocument();
+    await waitFor(() => expect(mocks.listeningPorts).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      next.resolve({ ...portSnapshot(host.id, B), entries: [] });
+    });
+    expect(
+      portSection().getByText('No supported listening or bound sockets were returned.'),
+    ).toBeInTheDocument();
+    expect(mocks.listeningPorts).toHaveBeenLastCalledWith(host.id, B);
+  });
+  it.each(['host', 'session', 'disconnect', 'unmount'])(
+    'drops delayed socket responses after %s turnover',
+    async (turnover) => {
+      const old = deferred<ListeningPortSnapshot>();
+      mocks.listeningPorts.mockReturnValueOnce(old.promise);
+      const view = render(<NetworkWorkspace host={host} />);
+      await waitFor(() => expect(mocks.listeningPorts).toHaveBeenCalledTimes(1));
+      if (turnover === 'unmount') view.unmount();
+      else if (turnover === 'disconnect') {
+        mocks.state = 'disconnected';
+        mocks.sessionId = null;
+        view.rerender(<NetworkWorkspace host={host} />);
+      } else {
+        const nextHost = turnover === 'host' ? otherHost : host;
+        const nextSession = turnover === 'session' ? B : A;
+        mocks.sessionId = nextSession;
+        mocks.list.mockResolvedValue(snapshot(nextHost.id, nextSession));
+        mocks.routes.mockResolvedValue(routeSnapshot(nextHost.id, nextSession));
+        mocks.listeningPorts.mockResolvedValue({
+          ...portSnapshot(nextHost.id, nextSession),
+          entries: [],
+        });
+        view.rerender(<NetworkWorkspace host={nextHost} />);
+      }
+      await act(async () => {
+        old.resolve(portSnapshot());
+      });
+      expect(screen.queryByText('192.0.2.10')).not.toBeInTheDocument();
+    },
+  );
+  it('does not start the socket read after an old route response settles on unmount', async () => {
+    const old = deferred<NetworkRouteSnapshot>();
+    mocks.routes.mockReturnValueOnce(old.promise);
+    const view = render(<NetworkWorkspace host={host} />);
+    await waitFor(() => expect(mocks.routes).toHaveBeenCalledTimes(1));
+    view.unmount();
+    await act(async () => {
+      old.resolve(routeSnapshot());
+    });
+    expect(mocks.listeningPorts).not.toHaveBeenCalled();
+  });
+  it('has one three-section sequence under StrictMode and keyboard filters cause no remote calls', async () => {
+    render(
+      <StrictMode>
+        <NetworkWorkspace host={host} />
+      </StrictMode>,
+    );
+    await screen.findByText('192.0.2.10');
+    portSection().getByRole('searchbox', { name: 'Search listening ports' }).focus();
+    await userEvent.keyboard('8443');
+    await userEvent.tab();
+    expect(portSection().getByRole('combobox', { name: 'Socket protocol' })).toHaveFocus();
+    expect(portSection().getByRole('status')).toHaveTextContent('Showing 1 of 3 sockets');
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.routes).toHaveBeenCalledTimes(1);
+    expect(mocks.listeningPorts).toHaveBeenCalledTimes(1);
   });
 });
