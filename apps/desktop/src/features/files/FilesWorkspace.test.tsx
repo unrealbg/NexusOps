@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { StrictMode } from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -22,15 +23,15 @@ vi.mock('../../api/client', async (original) => ({
 }));
 
 const session: SftpSessionInfo = {
-  id: 'sftp-1', hostId: host.id, hostSessionId: 'connection-1', protocolVersion: 3,
+  id: 'sftp-1', hostId: host.id, hostSessionId: connected.hostSessionId!, protocolVersion: 3,
   extensions: [{ name: 'posix-rename@openssh.com', version: '1' }],
   limits: { maxPacketBytes: '262144', maxReadBytes: '65536', maxWriteBytes: '65536', maxOpenHandles: '64', clientChunkBytes: '65536', listingEntryCap: 5000 },
   rootPath: '/home/test',
 };
 
-function listing(path: string): DirectoryListing {
+function listing(path: string, owner: Pick<SftpSessionInfo, 'id' | 'hostId' | 'hostSessionId'> = session): DirectoryListing {
   return {
-    hostId: host.id, hostSessionId: session.hostSessionId, sftpSessionId: session.id,
+    hostId: owner.hostId, hostSessionId: owner.hostSessionId, sftpSessionId: owner.id,
     path, partial: false, entryCap: 5000,
     entries: [{ name: 'данни.bin', displayName: 'данни.bin', path: `${path}/данни.bin`, kind: 'file', sizeBytes: '9007199254740993', modifiedAt: null, permissions: '100600', uid: 1000, gid: 1000 }],
   };
@@ -64,15 +65,128 @@ function renderFiles(visible = true) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   vi.mocked(hostApi.session).mockResolvedValue(connected);
   vi.mocked(filesApi.open).mockResolvedValue(session);
-  vi.mocked(filesApi.list).mockImplementation(async (_, path) => listing(path));
+  vi.mocked(filesApi.list).mockImplementation(async (owner, path) => listing(path, owner));
   vi.mocked(filesApi.transfers).mockResolvedValue([]);
   vi.mocked(filesApi.discardTextDocument).mockResolvedValue();
 });
 
 describe('Files workspace boundaries', () => {
+  it('preserves one SFTP owner, directory, selection and history across full, compact and hidden modes', async () => {
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    const input = screen.getByLabelText('Remote path');
+    await userEvent.clear(input);
+    await userEvent.type(input, '/synthetic/sub{Enter}');
+    const selection = await screen.findByRole('checkbox', { name: 'Select данни.bin' });
+    await userEvent.click(selection);
+    const workspace = screen.getByRole('region', { name: `Files on ${host.displayName}` });
+    const showFull = vi.fn();
+    const pane = (visible: boolean, presentation: 'full' | 'compact') => <QueryClientProvider client={view.client}>
+      <FilesWorkspace host={host} visible={visible} presentation={presentation} onShowOverview={vi.fn()} onShowFull={showFull} />
+    </QueryClientProvider>;
+    view.rerender(pane(true, 'compact'));
+    expect(screen.getByLabelText('Remote path')).toHaveValue('/synthetic/sub');
+    expect(selection).toBeChecked();
+    expect(screen.getByRole('button', { name: 'Back' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Upload files…' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Open full Files view' }));
+    expect(showFull).toHaveBeenCalledOnce();
+    view.rerender(pane(false, 'compact'));
+    expect(workspace).not.toBeVisible();
+    view.rerender(pane(true, 'full'));
+    expect(screen.getByRole('region', { name: `Files on ${host.displayName}` })).toBe(workspace);
+    expect(selection).toBeChecked();
+    expect(filesApi.open).toHaveBeenCalledOnce();
+    expect(filesApi.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps hidden approvals out of the native modal layer without executing or rebinding them', async () => {
+    vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
+    vi.mocked(filesApi.planUpload).mockResolvedValue(uploadPlan());
+    vi.mocked(filesApi.execute).mockResolvedValue([]);
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Approve file operation' });
+    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible={false} onShowOverview={vi.fn()} /></QueryClientProvider>);
+    expect(dialog).not.toHaveAttribute('open');
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    expect(filesApi.execute).not.toHaveBeenCalled();
+    expect(filesApi.discardPlan).not.toHaveBeenCalled();
+    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible presentation="compact" onShowOverview={vi.fn()} /></QueryClientProvider>);
+    await userEvent.click(await screen.findByRole('button', { name: 'Approve and execute' }));
+    expect(filesApi.execute).toHaveBeenCalledExactlyOnceWith(session, 'plan-upload');
+    expect(filesApi.open).toHaveBeenCalledOnce();
+    expect(filesApi.cancel).not.toHaveBeenCalled();
+  });
+
+  it('reuses an in-flight SFTP open across StrictMode and hidden transitions', async () => {
+    const opening = deferred<SftpSessionInfo>();
+    vi.mocked(filesApi.open).mockReturnValueOnce(opening.promise);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    const pane = (visible: boolean) => <StrictMode><QueryClientProvider client={client}>
+      <FilesWorkspace host={host} visible={visible} onShowOverview={vi.fn()} />
+    </QueryClientProvider></StrictMode>;
+    const view = render(pane(true));
+    await waitFor(() => expect(filesApi.open).toHaveBeenCalledOnce());
+    view.rerender(pane(false));
+    await act(async () => { opening.resolve(session); });
+    expect(filesApi.list).not.toHaveBeenCalled();
+    view.rerender(pane(true));
+    await screen.findByDisplayValue('/home/test');
+    expect(filesApi.open).toHaveBeenCalledOnce();
+    expect(filesApi.list).toHaveBeenCalledOnce();
+  });
+
+  it('stops transfer polling on hide without cancelling accepted backend work', async () => {
+    vi.useFakeTimers();
+    try {
+      const view = renderFiles();
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(filesApi.transfers).toHaveBeenCalled();
+      const calls = vi.mocked(filesApi.transfers).mock.calls.length;
+      view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible={false} onShowOverview={vi.fn()} /></QueryClientProvider>);
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(filesApi.transfers).toHaveBeenCalledTimes(calls);
+      expect(filesApi.cancel).not.toHaveBeenCalled();
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('rejects an SFTP open returned for a different SSH connection', async () => {
+    vi.mocked(filesApi.open).mockResolvedValueOnce(nextSession);
+    renderFiles();
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(filesApi.list).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Upload files…' })).toBeDisabled();
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('does not publish a directory listing returned under another SFTP owner', async () => {
+    vi.mocked(filesApi.list).mockResolvedValueOnce({ ...listing('/synthetic'), sftpSessionId: 'other-sftp' });
+    renderFiles();
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    expect(screen.queryByRole('checkbox', { name: 'Select данни.bin' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Remote path')).toHaveValue('');
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
+  it('keeps the old listing read-only when a replacement connection cannot refresh it', async () => {
+    vi.mocked(filesApi.open).mockResolvedValueOnce(session).mockResolvedValueOnce(nextSession);
+    const view = renderFiles();
+    await screen.findByDisplayValue('/home/test');
+    vi.mocked(filesApi.list).mockRejectedValueOnce(new Error('synthetic listing failure'));
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), { ...connected, hostSessionId: nextSession.hostSessionId }); });
+    await waitFor(() => expect(filesApi.list).toHaveBeenCalledWith(nextSession, '/home/test'));
+    expect(await screen.findByText(/This listing belongs to an old connection/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Upload files…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'New directory' })).toBeDisabled();
+    expect(filesApi.execute).not.toHaveBeenCalled();
+  });
+
   it('places the focused editor in the primary Files slot and restores the listing on Close', async () => {
     vi.mocked(filesApi.openText).mockResolvedValue(textDocument);
     renderFiles();
@@ -190,7 +304,7 @@ describe('Files workspace boundaries', () => {
     await waitFor(() => expect(filesApi.planUpload).toHaveBeenCalledOnce());
     await act(async () => { view.client.setQueryData(hostKeys.session(host.id), disconnected); });
     await screen.findByText(/Connect this host to browse files/);
-    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), connected); });
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), { ...connected, hostSessionId: nextSession.hostSessionId }); });
     await waitFor(() => expect(filesApi.list).toHaveBeenCalledWith(nextSession, '/home/test'));
     await act(async () => { planning.resolve(uploadPlan()); await planning.promise; });
     expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
@@ -199,7 +313,7 @@ describe('Files workspace boundaries', () => {
     expect(filesApi.execute).not.toHaveBeenCalled();
   });
 
-  it('ignores an old planning response when a visible reopen replaces SFTP identity', async () => {
+  it('ignores an old planning response when the connected SSH identity changes', async () => {
     const planning = deferred<FileOperationPlan>();
     vi.mocked(filesApi.open).mockResolvedValueOnce(session).mockResolvedValueOnce(nextSession);
     vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
@@ -208,8 +322,7 @@ describe('Files workspace boundaries', () => {
     await screen.findByDisplayValue('/home/test');
     await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
     await waitFor(() => expect(filesApi.planUpload).toHaveBeenCalledOnce());
-    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible={false} onShowOverview={vi.fn()} /></QueryClientProvider>);
-    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible onShowOverview={vi.fn()} /></QueryClientProvider>);
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), { ...connected, hostSessionId: nextSession.hostSessionId }); });
     await waitFor(() => expect(filesApi.list).toHaveBeenCalledWith(nextSession, '/home/test'));
     await act(async () => { planning.resolve(uploadPlan()); await planning.promise; });
     expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
@@ -281,7 +394,7 @@ describe('Files workspace boundaries', () => {
     expect(filesApi.execute).toHaveBeenCalledTimes(1);
   });
 
-  it('drops a visible old approval when SFTP identity changes on reopen', async () => {
+  it('drops a visible old approval when the connected SSH identity changes', async () => {
     vi.mocked(filesApi.open).mockResolvedValueOnce(session).mockResolvedValueOnce(nextSession);
     vi.mocked(filesApi.chooseUploadFiles).mockResolvedValue(uploadGrant);
     vi.mocked(filesApi.planUpload).mockResolvedValue(uploadPlan());
@@ -289,8 +402,7 @@ describe('Files workspace boundaries', () => {
     await screen.findByDisplayValue('/home/test');
     await userEvent.click(screen.getByRole('button', { name: 'Upload files…' }));
     expect(await screen.findByRole('dialog', { name: 'Approve file operation' })).toBeInTheDocument();
-    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible={false} onShowOverview={vi.fn()} /></QueryClientProvider>);
-    view.rerender(<QueryClientProvider client={view.client}><FilesWorkspace host={host} visible onShowOverview={vi.fn()} /></QueryClientProvider>);
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), { ...connected, hostSessionId: nextSession.hostSessionId }); });
     await waitFor(() => expect(filesApi.list).toHaveBeenCalledWith(nextSession, '/home/test'));
     expect(screen.queryByRole('dialog', { name: 'Approve file operation' })).not.toBeInTheDocument();
     expect(filesApi.execute).not.toHaveBeenCalled();

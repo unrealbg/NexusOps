@@ -60,6 +60,7 @@ describe('live monitoring lifecycle', () => {
     );
     expect(mocks.sample).not.toHaveBeenCalled();
     view.rerender(<LiveMonitoring hostId="host-a" hostSessionId={SESSION_A} connected visible />);
+    await act(async () => { await Promise.resolve(); });
     expect(mocks.sample).toHaveBeenCalledTimes(1);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(MONITOR_INTERVAL_MS * 3);
@@ -95,6 +96,7 @@ describe('live monitoring lifecycle', () => {
     const view = render(
       <LiveMonitoring hostId="host-a" hostSessionId={SESSION_A} connected visible />,
     );
+    await act(async () => { await Promise.resolve(); });
     view.rerender(<LiveMonitoring hostId="host-a" hostSessionId={SESSION_B} connected visible />);
     await act(async () => {
       old.resolve(sample({ cpuUsagePercent: 99 }));
@@ -157,6 +159,7 @@ describe('live monitoring lifecycle', () => {
     const view = render(
       <LiveMonitoring hostId="host-a" hostSessionId={SESSION_A} connected visible />,
     );
+    await act(async () => { await Promise.resolve(); });
     view.unmount();
     await act(async () => {
       pending.resolve(sample({ cpuUsagePercent: 88 }));

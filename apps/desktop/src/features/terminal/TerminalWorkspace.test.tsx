@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   poll: vi.fn(),
   write: vi.fn(),
   resize: vi.fn(),
+  fit: vi.fn(),
   close: vi.fn(),
   rename: vi.fn(),
   searchNext: vi.fn(),
@@ -60,7 +61,7 @@ vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({
 
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
-    fit() {}
+    fit = mocks.fit;
     dispose() {}
   },
 }));
@@ -177,6 +178,7 @@ beforeEach(() => {
   });
   mocks.write.mockReset().mockResolvedValue(undefined);
   mocks.resize.mockReset().mockResolvedValue(undefined);
+  mocks.fit.mockReset();
   mocks.close.mockReset().mockImplementation((session: TerminalSession) => {
     mocks.sessions.set(
       session.hostId,
@@ -209,6 +211,69 @@ beforeEach(() => {
 });
 
 describe('TerminalWorkspace', () => {
+  test('keeps the same xterm, scrollback and one poll consumer through layout and visibility changes', async () => {
+    const original = terminal('host-a', 'terminal-a', 'Shell');
+    mocks.sessions.set('host-a', [original]);
+    mocks.poll.mockResolvedValueOnce({ session: original, chunksBase64: [bytesToBase64(new TextEncoder().encode('synthetic scrollback'))], outputDrained: false })
+      .mockImplementation(() => new Promise(() => {}));
+    const pane = (visible: boolean, combined: boolean) => <TerminalWorkspace host={host('host-a', 'Alpha')} visible={visible}
+      combined={combined} onToggleFiles={vi.fn()} onShowOverview={() => {}} />;
+    const view = render(pane(true, false));
+    const input = await activeTerminalInput();
+    await waitFor(() => expect(mocks.xtermWrites).toHaveLength(1));
+    act(() => mocks.xtermWriteCallbacks.shift()?.());
+    await waitFor(() => expect(mocks.poll).toHaveBeenCalledTimes(2));
+    view.rerender(pane(true, true));
+    expect(screen.getByRole('button', { name: 'Hide files panel' })).toHaveAttribute('aria-pressed', 'true');
+    view.rerender(pane(false, true));
+    view.rerender(pane(true, false));
+    expect(await activeTerminalInput()).toBe(input);
+    expect(mocks.xtermDataHandlers).toHaveLength(1);
+    expect(mocks.xtermDisposals).toBe(0);
+    expect(mocks.xtermWrites).toHaveLength(1);
+    expect(new TextDecoder().decode(mocks.xtermWrites[0])).toBe('synthetic scrollback');
+    expect(mocks.poll).toHaveBeenCalledTimes(2);
+    expect(mocks.openCount).toBe(0);
+    view.unmount();
+    expect(mocks.xtermDisposals).toBe(1);
+  });
+
+  test('fits resized and reshown panes, coalesces SSH sizes and cancels an unsent resize on hide', async () => {
+    const observers: Array<{ notify: () => void; disconnect: ReturnType<typeof vi.fn> }> = [];
+    vi.stubGlobal('ResizeObserver', class {
+      disconnect = vi.fn();
+      constructor(notify: () => void) { observers.push({ notify, disconnect: this.disconnect }); }
+      observe() {}
+    });
+    try {
+      mocks.sessions.set('host-a', [terminal('host-a', 'terminal-a', 'Shell')]);
+      mocks.poll.mockImplementation(() => new Promise(() => {}));
+      const pane = (visible: boolean) => <TerminalWorkspace host={host('host-a', 'Alpha')} visible={visible} onShowOverview={() => {}} />;
+      const view = render(pane(true));
+      const input = await activeTerminalInput();
+      const canvas = input.closest('.terminal-canvas')!;
+      Object.defineProperty(canvas, 'clientWidth', { configurable: true, value: 600 });
+      Object.defineProperty(canvas, 'clientHeight', { configurable: true, value: 300 });
+      act(() => { observers.at(-1)!.notify(); observers.at(-1)!.notify(); });
+      expect(mocks.fit).toHaveBeenCalled();
+      view.rerender(pane(false));
+      await new Promise((resolve) => window.setTimeout(resolve, 120));
+      expect(mocks.resize).not.toHaveBeenCalled();
+      expect(observers[0]!.disconnect).toHaveBeenCalledOnce();
+      view.rerender(pane(true));
+      await waitFor(() => expect(mocks.resize).toHaveBeenCalledTimes(1));
+      expect(mocks.resize).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'terminal-a' }),
+        expect.objectContaining({ pixelWidth: 600 * window.devicePixelRatio, pixelHeight: 300 * window.devicePixelRatio }));
+      Object.defineProperty(canvas, 'clientWidth', { configurable: true, value: 500 });
+      act(() => { observers.at(-1)!.notify(); observers.at(-1)!.notify(); observers.at(-1)!.notify(); });
+      await waitFor(() => expect(mocks.resize).toHaveBeenCalledTimes(2));
+      expect(mocks.xtermDataHandlers).toHaveLength(1);
+      expect(mocks.xtermDisposals).toBe(0);
+      view.unmount();
+      expect(observers.at(-1)!.disconnect).toHaveBeenCalledOnce();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   async function openContextMenu() {
     const input = await activeTerminalInput();
     const canvas = input.closest('.terminal-canvas');
