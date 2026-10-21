@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type {
+  DnsConfigurationSnapshot,
   Host,
   ListeningPortSnapshot,
   NetworkRouteSnapshot,
@@ -15,12 +16,18 @@ const mocks = vi.hoisted(() => ({
   list: vi.fn(),
   routes: vi.fn(),
   listeningPorts: vi.fn(),
+  dnsConfiguration: vi.fn(),
 }));
 vi.mock('../../api/queries', () => ({
   useHostSession: () => ({ data: { state: mocks.state, hostSessionId: mocks.sessionId } }),
 }));
 vi.mock('../../api/client', () => ({
-  networkApi: { list: mocks.list, routes: mocks.routes, listeningPorts: mocks.listeningPorts },
+  networkApi: {
+    list: mocks.list,
+    routes: mocks.routes,
+    listeningPorts: mocks.listeningPorts,
+    dnsConfiguration: mocks.dnsConfiguration,
+  },
 }));
 
 import { NetworkWorkspace } from './NetworkWorkspace';
@@ -76,14 +83,22 @@ beforeEach(() => {
   mocks.state = 'disconnected';
   mocks.sessionId = null;
   mocks.list.mockReset();
-  mocks.listeningPorts
-    .mockReset()
-    .mockResolvedValue({
-      hostId: host.id,
-      hostSessionId: A,
-      observedAt: '2026-10-21T12:00:00Z',
-      entries: [],
-    });
+  mocks.listeningPorts.mockReset().mockResolvedValue({
+    hostId: host.id,
+    hostSessionId: A,
+    observedAt: '2026-10-21T12:00:00Z',
+    entries: [],
+  });
+  mocks.dnsConfiguration.mockReset().mockResolvedValue({
+    hostId: host.id,
+    hostSessionId: A,
+    observedAt: '2026-10-21T12:01:00Z',
+    nameservers: [],
+    searchDirective: null,
+    searchDomains: [],
+    options: [],
+    sortlist: [],
+  });
   mocks.routes.mockReset().mockResolvedValue({
     hostId: host.id,
     hostSessionId: A,
@@ -100,6 +115,7 @@ describe('session-bound Network workspace', () => {
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
     expect(mocks.list).not.toHaveBeenCalled();
+    expect(mocks.dnsConfiguration).not.toHaveBeenCalled();
   });
 
   it('loads once, renders validated text and optional fields, and filters without remote calls', async () => {
@@ -571,6 +587,26 @@ function portSnapshot(hostId = host.id, hostSessionId = A): ListeningPortSnapsho
 function portSection() {
   return within(screen.getByRole('region', { name: 'Listening Ports' }));
 }
+
+function dnsSnapshot(hostId = host.id, hostSessionId = A): DnsConfigurationSnapshot {
+  return {
+    hostId,
+    hostSessionId,
+    observedAt: '2026-10-21T12:01:00Z',
+    nameservers: [
+      { address: '127.0.0.53', family: 'ipv4' },
+      { address: '2001:db8::53', family: 'ipv6' },
+    ],
+    searchDirective: 'search',
+    searchDomains: ['example.test', 'xn--bcher-kva.example'],
+    options: ['edns0', 'ndots:5'],
+    sortlist: [{ address: '192.0.2.0', family: 'ipv4', netmask: '255.255.255.0' }],
+  };
+}
+
+function dnsSection() {
+  return within(screen.getByRole('region', { name: 'DNS Configuration — `/etc/resolv.conf`' }));
+}
 describe('Listening Ports', () => {
   beforeEach(() => {
     mocks.state = 'connected';
@@ -578,33 +614,44 @@ describe('Listening Ports', () => {
     mocks.list.mockResolvedValue(snapshot());
     mocks.routes.mockResolvedValue(routeSnapshot());
     mocks.listeningPorts.mockResolvedValue(portSnapshot());
+    mocks.dnsConfiguration.mockResolvedValue(dnsSnapshot());
   });
-  it('runs exactly one address-route-socket sequence and keeps Refresh disabled through the socket request', async () => {
+  it('runs exactly one address-route-socket-DNS sequence and keeps Refresh disabled through DNS', async () => {
     const addresses = deferred<NetworkSnapshot>();
     const routes = deferred<NetworkRouteSnapshot>();
     const ports = deferred<ListeningPortSnapshot>();
+    const dns = deferred<DnsConfigurationSnapshot>();
     mocks.list.mockReturnValueOnce(addresses.promise);
     mocks.routes.mockReturnValueOnce(routes.promise);
     mocks.listeningPorts.mockReturnValueOnce(ports.promise);
+    mocks.dnsConfiguration.mockReturnValueOnce(dns.promise);
     render(<NetworkWorkspace host={host} />);
     await waitFor(() => expect(mocks.list).toHaveBeenCalledExactlyOnceWith(host.id, A));
     expect(mocks.routes).not.toHaveBeenCalled();
     expect(mocks.listeningPorts).not.toHaveBeenCalled();
+    expect(mocks.dnsConfiguration).not.toHaveBeenCalled();
     await act(async () => {
       addresses.resolve(snapshot());
     });
     expect(mocks.routes).toHaveBeenCalledExactlyOnceWith(host.id, A);
     expect(mocks.listeningPorts).not.toHaveBeenCalled();
+    expect(mocks.dnsConfiguration).not.toHaveBeenCalled();
     await act(async () => {
       routes.resolve(routeSnapshot());
     });
     expect(mocks.listeningPorts).toHaveBeenCalledExactlyOnceWith(host.id, A);
+    expect(mocks.dnsConfiguration).not.toHaveBeenCalled();
     const button = screen.getByRole('button', { name: 'Refresh' });
     expect(button).toBeDisabled();
     await userEvent.click(button);
     expect(mocks.list).toHaveBeenCalledTimes(1);
     await act(async () => {
       ports.resolve(portSnapshot());
+    });
+    expect(mocks.dnsConfiguration).toHaveBeenCalledExactlyOnceWith(host.id, A);
+    expect(button).toBeDisabled();
+    await act(async () => {
+      dns.resolve(dnsSnapshot());
     });
     expect(button).toBeEnabled();
     expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
@@ -708,6 +755,7 @@ describe('Listening Ports', () => {
       render(<NetworkWorkspace host={host} />);
       expect(await screen.findByText('192.0.2.10')).toBeInTheDocument();
       expect(mocks.listeningPorts).toHaveBeenCalledExactlyOnceWith(host.id, A);
+      expect(mocks.dnsConfiguration).toHaveBeenCalledExactlyOnceWith(host.id, A);
     },
   );
   it.each([portSnapshot(otherHost.id), portSnapshot(host.id, B)])(
@@ -786,7 +834,7 @@ describe('Listening Ports', () => {
     });
     expect(mocks.listeningPorts).not.toHaveBeenCalled();
   });
-  it('has one three-section sequence under StrictMode and keyboard filters cause no remote calls', async () => {
+  it('has one four-section sequence under StrictMode and keyboard filters cause no remote calls', async () => {
     render(
       <StrictMode>
         <NetworkWorkspace host={host} />
@@ -801,5 +849,149 @@ describe('Listening Ports', () => {
     expect(mocks.list).toHaveBeenCalledTimes(1);
     expect(mocks.routes).toHaveBeenCalledTimes(1);
     expect(mocks.listeningPorts).toHaveBeenCalledTimes(1);
+    expect(mocks.dnsConfiguration).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('DNS Configuration', () => {
+  beforeEach(() => {
+    mocks.state = 'connected';
+    mocks.sessionId = A;
+    mocks.list.mockResolvedValue(snapshot());
+    mocks.routes.mockResolvedValue(routeSnapshot());
+    mocks.listeningPorts.mockResolvedValue(portSnapshot());
+    mocks.dnsConfiguration.mockResolvedValue(dnsSnapshot());
+  });
+
+  it('renders validated directives, source, timestamp and explicit observation limits as text', async () => {
+    render(<NetworkWorkspace host={host} />);
+    expect(await screen.findByText('127.0.0.53')).toBeInTheDocument();
+    const section = dnsSection();
+    expect(section.getByText('2001:db8::53')).toBeInTheDocument();
+    expect(section.getAllByText('IPv4')).toHaveLength(1);
+    expect(section.getAllByText('IPv6')).toHaveLength(1);
+    expect(section.getByText(/Observed search directive:/)).toHaveTextContent(
+      'example.test, xn--bcher-kva.example',
+    );
+    expect(section.getByText('edns0, ndots:5')).toBeInTheDocument();
+    expect(section.getByText(/192\.0\.2\.0\/255\.255\.255\.0 \(IPv4\)/)).toBeInTheDocument();
+    expect(section.getByText('DNS configuration observed', { exact: false })).toHaveTextContent(
+      '2026-10-21T12:01:00Z',
+    );
+    expect(section.getByText(/127\.0\.0\.53 nameserver can identify/)).toHaveTextContent(
+      'does not reveal upstream resolvers',
+    );
+    expect(section.getByText(/Per-link and DHCP DNS/)).toHaveTextContent(
+      'does not test DNS reachability, health, response correctness or security',
+    );
+    expect(document.querySelector('img')).toBeNull();
+  });
+
+  it('distinguishes a valid empty snapshot from failure without claiming DNS is disabled', async () => {
+    mocks.dnsConfiguration.mockResolvedValueOnce({ ...dnsSnapshot(), nameservers: [] });
+    const view = render(<NetworkWorkspace host={host} />);
+    expect(
+      await screen.findByText(
+        'No nameserver directives were observed. This does not prove that DNS is disabled.',
+      ),
+    ).toBeInTheDocument();
+    view.unmount();
+    mocks.dnsConfiguration.mockRejectedValueOnce(new Error('PRIVATE HOST OUTPUT'));
+    render(<NetworkWorkspace host={host} />);
+    expect(
+      await screen.findByText('DNS configuration is unavailable on this host.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('PRIVATE HOST OUTPUT')).not.toBeInTheDocument();
+    expect(screen.getByText('IPv4 127.0.0.1/8')).toBeInTheDocument();
+    expect(screen.getByText('192.0.2.10')).toBeInTheDocument();
+  });
+
+  it('retains only a same-session DNS snapshot with an explicit stale warning after Refresh failure', async () => {
+    render(<NetworkWorkspace host={host} />);
+    await screen.findByText('127.0.0.53');
+    mocks.dnsConfiguration.mockRejectedValueOnce(new Error('Synthetic DNS failure'));
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(
+      await screen.findByText(
+        'DNS configuration refresh failed — showing the last successful same-session snapshot.',
+      ),
+    ).toBeInTheDocument();
+    expect(dnsSection().getByText('127.0.0.53')).toBeInTheDocument();
+    expect(mocks.dnsConfiguration).toHaveBeenCalledTimes(2);
+  });
+
+  it('still reads DNS after every earlier Network section fails', async () => {
+    mocks.list.mockRejectedValueOnce(new Error('interfaces'));
+    mocks.routes.mockRejectedValueOnce(new Error('routes'));
+    mocks.listeningPorts.mockRejectedValueOnce(new Error('ports'));
+    render(<NetworkWorkspace host={host} />);
+    expect(await screen.findByText('127.0.0.53')).toBeInTheDocument();
+    expect(mocks.dnsConfiguration).toHaveBeenCalledExactlyOnceWith(host.id, A);
+  });
+
+  it.each([dnsSnapshot(otherHost.id), dnsSnapshot(host.id, B)])(
+    'rejects mismatched DNS ownership',
+    async (data) => {
+      mocks.dnsConfiguration.mockResolvedValueOnce(data);
+      render(<NetworkWorkspace host={host} />);
+      expect(
+        await screen.findByText('DNS configuration is unavailable on this host.'),
+      ).toBeInTheDocument();
+      expect(dnsSection().queryByText('127.0.0.53')).not.toBeInTheDocument();
+    },
+  );
+
+  it.each(['host', 'session', 'disconnect', 'unmount'])(
+    'drops delayed DNS responses after %s turnover',
+    async (turnover) => {
+      const old = deferred<DnsConfigurationSnapshot>();
+      mocks.dnsConfiguration.mockReturnValueOnce(old.promise);
+      const view = render(<NetworkWorkspace host={host} />);
+      await waitFor(() => expect(mocks.dnsConfiguration).toHaveBeenCalledTimes(1));
+      if (turnover === 'unmount') view.unmount();
+      else if (turnover === 'disconnect') {
+        mocks.state = 'disconnected';
+        mocks.sessionId = null;
+        view.rerender(<NetworkWorkspace host={host} />);
+      } else {
+        const nextHost = turnover === 'host' ? otherHost : host;
+        const nextSession = turnover === 'session' ? B : A;
+        mocks.sessionId = nextSession;
+        mocks.list.mockResolvedValue(snapshot(nextHost.id, nextSession));
+        mocks.routes.mockResolvedValue(routeSnapshot(nextHost.id, nextSession));
+        mocks.listeningPorts.mockResolvedValue(portSnapshot(nextHost.id, nextSession));
+        mocks.dnsConfiguration.mockResolvedValue({
+          ...dnsSnapshot(nextHost.id, nextSession),
+          nameservers: [],
+        });
+        view.rerender(<NetworkWorkspace host={nextHost} />);
+      }
+      await act(async () => {
+        old.resolve(dnsSnapshot());
+      });
+      expect(screen.queryByText('127.0.0.53')).not.toBeInTheDocument();
+    },
+  );
+
+  it('starts exactly one four-section sequence in StrictMode and prevents overlapping Refresh', async () => {
+    const dns = deferred<DnsConfigurationSnapshot>();
+    mocks.dnsConfiguration.mockReturnValueOnce(dns.promise);
+    render(
+      <StrictMode>
+        <NetworkWorkspace host={host} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(mocks.dnsConfiguration).toHaveBeenCalledTimes(1));
+    const refresh = screen.getByRole('button', { name: 'Refresh' });
+    expect(refresh).toBeDisabled();
+    await userEvent.click(refresh);
+    expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.routes).toHaveBeenCalledTimes(1);
+    expect(mocks.listeningPorts).toHaveBeenCalledTimes(1);
+    expect(mocks.dnsConfiguration).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      dns.resolve(dnsSnapshot());
+    });
+    expect(refresh).toBeEnabled();
   });
 });

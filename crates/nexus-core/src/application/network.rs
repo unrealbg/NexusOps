@@ -81,6 +81,28 @@ impl Application {
         .await
     }
 
+    /// One bounded `/etc/resolv.conf` read shares admission with all Network observations.
+    pub async fn list_host_dns_configuration(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+    ) -> Result<DnsConfigurationSnapshot, AppError> {
+        self.with_network_admission(
+            host_id,
+            host_session_id,
+            |transport, cancellation| async move {
+                nexus_discovery::observe_dns_configuration(
+                    transport.as_ref(),
+                    cancellation,
+                    host_id,
+                    host_session_id,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
     async fn with_network_admission<T, F, Fut>(
         &self,
         host_id: HostId,
@@ -171,6 +193,9 @@ mod tests {
             }
             Ok(match command {
                 ReadOnlyCommand::ListeningPorts => "tcp LISTEN 0 128 192.0.2.10:8080 *:*",
+                ReadOnlyCommand::DnsConfiguration => {
+                    "nameserver 127.0.0.53\nsearch example.test\noptions edns0\n"
+                }
                 ReadOnlyCommand::NetworkRoutesV4 => {
                     r#"[{"dst":"default","gateway":"192.0.2.1","dev":"eth0"}]"#
                 }
@@ -233,14 +258,17 @@ mod tests {
         // An empty disposable profile only. No connect/credential/keychain API is
         // called; synthetic connected transports are installed directly below.
         let app = Application::open(dir.path()).unwrap();
-        let transport = Arc::new(Transport {
+        let transport = transport(stall);
+        (dir, Arc::new(app), transport)
+    }
+    fn transport(stall: Option<ReadOnlyCommand>) -> Arc<Transport> {
+        Arc::new(Transport {
             stall,
             calls: StdMutex::new(vec![]),
             fail: std::sync::atomic::AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
-        });
-        (dir, Arc::new(app), transport)
+        })
     }
     async fn install(app: &Application, transport: Arc<Transport>) -> (HostId, HostSessionId) {
         let host = HostId::new();
@@ -453,11 +481,12 @@ mod tests {
         assert_eq!(app.network_limit.available_permits(), 4);
     }
     #[tokio::test]
-    async fn all_three_network_observations_share_host_admission_and_release_dropped_requests() {
+    async fn all_four_network_observations_share_host_admission_and_release_dropped_requests() {
         for command in [
             ReadOnlyCommand::NetworkAddresses,
             ReadOnlyCommand::NetworkRoutesV4,
             ReadOnlyCommand::ListeningPorts,
+            ReadOnlyCommand::DnsConfiguration,
         ] {
             let (_dir, app, transport) = setup(Some(command));
             let (host, owner) = install(&app, transport.clone()).await;
@@ -472,6 +501,10 @@ mod tests {
                     }
                     ReadOnlyCommand::ListeningPorts => request_app
                         .list_host_listening_ports(host, owner)
+                        .await
+                        .map(|_| ()),
+                    ReadOnlyCommand::DnsConfiguration => request_app
+                        .list_host_dns_configuration(host, owner)
                         .await
                         .map(|_| ()),
                     _ => unreachable!(),
@@ -493,12 +526,105 @@ mod tests {
                     .code,
                 ErrorCode::Conflict
             );
+            assert_eq!(
+                app.list_host_dns_configuration(host, owner)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Conflict
+            );
             request.abort();
             let _ = request.await;
             assert_eq!(app.network_limit.available_permits(), 4);
             transport.release.add_permits(1);
             assert!(app.list_host_listening_ports(host, owner).await.is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn dns_requires_exact_owner_does_not_persist_and_ignores_service_admission() {
+        let (dir, app, transport) = setup(None);
+        let (host, owner) = install(&app, transport.clone()).await;
+        assert_eq!(
+            app.list_host_dns_configuration(host, HostSessionId::new())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert!(transport.calls.lock().unwrap().is_empty());
+        let audit = std::fs::read(dir.path().join("audit.jsonl")).unwrap_or_default();
+        let hosts = app.list_hosts().unwrap();
+        let _services = app.service_limit.acquire_many(4).await.unwrap();
+        let snapshot = app.list_host_dns_configuration(host, owner).await.unwrap();
+        assert_eq!(snapshot.host_id, host);
+        assert_eq!(snapshot.host_session_id, owner);
+        assert_eq!(snapshot.nameservers[0].address, "127.0.0.53");
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            vec![ReadOnlyCommand::DnsConfiguration]
+        );
+        assert_eq!(app.list_hosts().unwrap(), hosts);
+        assert_eq!(
+            std::fs::read(dir.path().join("audit.jsonl")).unwrap_or_default(),
+            audit
+        );
+        assert_eq!(app.network_limit.available_permits(), 4);
+    }
+
+    #[tokio::test]
+    async fn all_four_network_operation_types_share_the_four_global_permits() {
+        let (_dir, app, _) = setup(None);
+        let mut requests = Vec::new();
+        let mut transports = Vec::new();
+        for command in [
+            ReadOnlyCommand::NetworkAddresses,
+            ReadOnlyCommand::NetworkRoutesV4,
+            ReadOnlyCommand::ListeningPorts,
+            ReadOnlyCommand::DnsConfiguration,
+        ] {
+            let transport = transport(Some(command));
+            let (host, owner) = install(&app, transport.clone()).await;
+            let request_app = app.clone();
+            requests.push(tokio::spawn(async move {
+                match command {
+                    ReadOnlyCommand::NetworkAddresses => {
+                        request_app.list_host_network(host, owner).await.map(|_| ())
+                    }
+                    ReadOnlyCommand::NetworkRoutesV4 => {
+                        request_app.list_host_routes(host, owner).await.map(|_| ())
+                    }
+                    ReadOnlyCommand::ListeningPorts => request_app
+                        .list_host_listening_ports(host, owner)
+                        .await
+                        .map(|_| ()),
+                    ReadOnlyCommand::DnsConfiguration => request_app
+                        .list_host_dns_configuration(host, owner)
+                        .await
+                        .map(|_| ()),
+                    _ => unreachable!(),
+                }
+            }));
+            entered(&transport).await;
+            transports.push(transport);
+        }
+        assert_eq!(app.network_limit.available_permits(), 0);
+        let fifth = transport(None);
+        let (host, owner) = install(&app, fifth).await;
+        assert_eq!(
+            app.list_host_dns_configuration(host, owner)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        for transport in &transports {
+            transport.release.add_permits(1);
+        }
+        for request in requests {
+            assert!(request.await.unwrap().is_ok());
+        }
+        assert_eq!(app.network_limit.available_permits(), 4);
     }
     #[tokio::test]
     async fn listening_ports_share_the_four_global_network_slots() {
@@ -526,6 +652,13 @@ mod tests {
         );
         assert_eq!(
             app.list_host_routes(host, owner).await.unwrap_err().code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            app.list_host_dns_configuration(host, owner)
+                .await
+                .unwrap_err()
+                .code,
             ErrorCode::Conflict
         );
         transport.release.add_permits(4);
@@ -595,5 +728,38 @@ mod tests {
             .fail
             .store(false, std::sync::atomic::Ordering::SeqCst);
         assert!(app.list_host_listening_ports(host, owner).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dns_rejects_stale_post_io_completion_and_releases_admission_without_retry() {
+        let (_dir, app, transport) = setup(Some(ReadOnlyCommand::DnsConfiguration));
+        let (host, owner) = install(&app, transport.clone()).await;
+        let request_app = app.clone();
+        let request =
+            tokio::spawn(async move { request_app.list_host_dns_configuration(host, owner).await });
+        entered(&transport).await;
+        app.slot(host).await.data.lock().await.generation += 1;
+        transport.release.add_permits(1);
+        assert_eq!(
+            request.await.unwrap().unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+        assert_eq!(app.network_limit.available_permits(), 4);
+
+        let (_dir, app, transport) = setup(None);
+        let (host, owner) = install(&app, transport.clone()).await;
+        transport
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            app.list_host_dns_configuration(host, owner)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Connection
+        );
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+        assert_eq!(app.network_limit.available_permits(), 4);
     }
 }

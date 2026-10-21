@@ -102,3 +102,38 @@ pub struct ListeningPortSnapshot {
     pub observed_at: String,
     pub entries: Vec<ListeningSocketEntry>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum DnsSearchDirective {
+    Search,
+    Domain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsNameserverEntry {
+    pub address: String,
+    pub family: NetworkAddressFamily,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsSortlistEntry {
+    pub address: String,
+    pub family: NetworkAddressFamily,
+    pub netmask: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DnsConfigurationSnapshot {
+    pub host_id: HostId,
+    pub host_session_id: HostSessionId,
+    pub observed_at: String,
+    pub nameservers: Vec<DnsNameserverEntry>,
+    pub search_directive: Option<DnsSearchDirective>,
+    pub search_domains: Vec<String>,
+    pub options: Vec<String>,
+    pub sortlist: Vec<DnsSortlistEntry>,
+}
