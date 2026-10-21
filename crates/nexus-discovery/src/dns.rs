@@ -16,6 +16,7 @@ const MAX_OPTIONS: usize = 32;
 const MAX_SORTLIST_ENTRIES: usize = 16;
 const MAX_DNS_NAME_BYTES: usize = 253;
 const MAX_OPTION_BYTES: usize = 64;
+const MAX_SCOPE_BYTES: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedDnsConfiguration {
@@ -38,6 +39,43 @@ fn family(address: IpAddr) -> NetworkAddressFamily {
         IpAddr::V4(_) => NetworkAddressFamily::Ipv4,
         IpAddr::V6(_) => NetworkAddressFamily::Ipv6,
     }
+}
+
+fn nameserver(value: &str) -> Result<DnsNameserverEntry, AppError> {
+    let (raw, scope) = match value.split_once('%') {
+        Some((raw, scope)) => {
+            if scope.is_empty()
+                || scope.len() > MAX_SCOPE_BYTES
+                || !scope
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+            {
+                return Err(invalid());
+            }
+            let scope = if scope.bytes().all(|byte| byte.is_ascii_digit()) {
+                let index = scope.parse::<u32>().map_err(|_| invalid())?;
+                if index == 0 {
+                    return Err(invalid());
+                }
+                index.to_string()
+            } else {
+                scope.to_owned()
+            };
+            (raw, Some(scope))
+        }
+        None => (value, None),
+    };
+    let address: IpAddr = raw.parse().map_err(|_| invalid())?;
+    if scope.is_some() && !address.is_ipv6() {
+        return Err(invalid());
+    }
+    Ok(DnsNameserverEntry {
+        address: match scope {
+            Some(scope) => format!("{address}%{scope}"),
+            None => address.to_string(),
+        },
+        family: family(address),
+    })
 }
 
 fn valid_dns_suffix(value: &str) -> bool {
@@ -173,11 +211,7 @@ pub fn parse_dns_configuration(output: &str) -> Result<ParsedDnsConfiguration, A
                 if parsed.nameservers.len() == MAX_NAMESERVERS {
                     return Err(invalid());
                 }
-                let address: IpAddr = value.parse().map_err(|_| invalid())?;
-                parsed.nameservers.push(DnsNameserverEntry {
-                    address: address.to_string(),
-                    family: family(address),
-                });
+                parsed.nameservers.push(nameserver(value)?);
             }
             ["search", domains @ ..] if !domains.is_empty() => {
                 if domains.len() > MAX_SEARCH_DOMAINS
@@ -294,6 +328,43 @@ mod tests {
     }
 
     #[test]
+    fn accepts_canonical_ipv4_ipv6_and_strict_scoped_ipv6_nameservers_in_order() {
+        let parsed = parse_dns_configuration(
+            "nameserver 192.0.2.53\nnameserver fe80::1%eth0\nnameserver fe80::abcd%enp1s0\nnameserver FE80:0:0:0:0:0:0:ABCD%0002\nnameserver 2001:0DB8:0:0::53\nnameserver fe80::2%veth_0.1-2\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.nameservers,
+            vec![
+                DnsNameserverEntry {
+                    address: "192.0.2.53".into(),
+                    family: NetworkAddressFamily::Ipv4,
+                },
+                DnsNameserverEntry {
+                    address: "fe80::1%eth0".into(),
+                    family: NetworkAddressFamily::Ipv6,
+                },
+                DnsNameserverEntry {
+                    address: "fe80::abcd%enp1s0".into(),
+                    family: NetworkAddressFamily::Ipv6,
+                },
+                DnsNameserverEntry {
+                    address: "fe80::abcd%2".into(),
+                    family: NetworkAddressFamily::Ipv6,
+                },
+                DnsNameserverEntry {
+                    address: "2001:db8::53".into(),
+                    family: NetworkAddressFamily::Ipv6,
+                },
+                DnsNameserverEntry {
+                    address: "fe80::2%veth_0.1-2".into(),
+                    family: NetworkAddressFamily::Ipv6,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn last_search_or_domain_wins_while_observed_options_sortlist_and_nameserver_order_remain() {
         let parsed = parse_dns_configuration(
             "nameserver 2001:db8::2\nnameserver 192.0.2.53\nsearch EXAMPLE.com xn--bcher-kva.example.\ndomain final.example\noptions ndots:5 rotate\noptions single-request-reopen\nsortlist 192.0.2.0/255.255.255.0 2001:db8::/ffff:ffff:ffff:ffff::\n",
@@ -341,7 +412,6 @@ mod tests {
         for input in [
             "nameserver",
             "nameserver 999.1.1.1",
-            "nameserver fe80::1%eth0",
             "nameserver 192.0.2.1 extra",
             "search",
             "search -bad.example",
@@ -360,6 +430,32 @@ mod tests {
         ] {
             bad(input);
         }
+    }
+
+    #[test]
+    fn rejects_invalid_unsupported_and_unsafe_nameserver_scopes() {
+        for value in [
+            "192.0.2.1%eth0",
+            "192.0.2.1%2",
+            "fe80::1%",
+            "fe80::1%0",
+            "fe80::1%0000",
+            "fe80::1%4294967296",
+            "fe80::1%eth0%2",
+            "fe80::1%eth/0",
+            "fe80::1%eth:0",
+            "fe80::gggg%eth0",
+            "fe80::1%eth\u{1b}[31m",
+            "fe80::1%eth\u{7f}",
+            "fe80::1%eth\u{202e}0",
+        ] {
+            bad(&format!("nameserver {value}\n"));
+        }
+        bad(&format!(
+            "nameserver fe80::1%{}\n",
+            "a".repeat(MAX_SCOPE_BYTES + 1)
+        ));
+        bad("nameserver 192.0.2.53\nnameserver fe80::1%0\n");
     }
 
     #[test]
