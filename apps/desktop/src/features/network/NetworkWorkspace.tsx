@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Host, NetworkRouteSnapshot, NetworkSnapshot } from '@nexusops/protocol';
+import type {
+  Host,
+  ListeningPortSnapshot,
+  NetworkRouteSnapshot,
+  NetworkSnapshot,
+} from '@nexusops/protocol';
 import { Button, Notice, Spinner } from '@nexusops/ui';
 import { networkApi } from '../../api/client';
 import { useHostSession } from '../../api/queries';
@@ -31,6 +36,9 @@ export function NetworkWorkspace({ host }: { host: Host }) {
 function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }) {
   const [interfaces, setInterfaces] = useState<Observation<NetworkSnapshot>>(initial);
   const [routes, setRoutes] = useState<Observation<NetworkRouteSnapshot>>(initial);
+  const [ports, setPorts] = useState<Observation<ListeningPortSnapshot>>(initial);
+  const [portSearch, setPortSearch] = useState('');
+  const [portProtocol, setPortProtocol] = useState('all');
   const [filter, setFilter] = useState('');
   const [routeFilter, setRouteFilter] = useState('');
   const [family, setFamily] = useState('all');
@@ -43,6 +51,7 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
       inFlight.current = true;
       setInterfaces((previous) => ({ ...previous, error: false, pending: true }));
       setRoutes((previous) => ({ ...previous, error: false, pending: true }));
+      setPorts((previous) => ({ ...previous, error: false, pending: true }));
       try {
         const result = await networkApi.list(host.id, sessionId);
         if (generation.current !== current) return;
@@ -65,6 +74,17 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
       } catch {
         if (generation.current !== current) return;
         setRoutes((previous) => ({ ...previous, error: true, pending: false }));
+      }
+      if (generation.current !== current) return;
+      try {
+        const result = await networkApi.listeningPorts(host.id, sessionId);
+        if (generation.current !== current) return;
+        if (result.hostId !== host.id || result.hostSessionId !== sessionId)
+          throw new Error('Snapshot ownership mismatch');
+        setPorts({ snapshot: result, error: false, pending: false });
+      } catch {
+        if (generation.current !== current) return;
+        setPorts((previous) => ({ ...previous, error: true, pending: false }));
       } finally {
         if (generation.current === current) inFlight.current = false;
       }
@@ -83,6 +103,19 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
     };
   }, [load]);
 
+  const portSnapshot = ports.snapshot;
+  const portRows = useMemo(() => {
+    const term = portSearch.trim().toLowerCase();
+    return (
+      portSnapshot?.entries.filter(
+        (entry) =>
+          (portProtocol === 'all' || entry.protocol === portProtocol) &&
+          [entry.localAddress, String(entry.port), entry.protocol, entry.family, entry.state].some(
+            (field) => field.toLowerCase().includes(term),
+          ),
+      ) ?? []
+    );
+  }, [portProtocol, portSearch, portSnapshot]);
   const snapshot = interfaces.snapshot;
   const routeSnapshot = routes.snapshot;
   const rows = useMemo(() => {
@@ -123,7 +156,7 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
         </div>
         <Button
           onClick={() => void load(generation.current)}
-          disabled={interfaces.pending || routes.pending}
+          disabled={interfaces.pending || routes.pending || ports.pending}
         >
           Refresh
         </Button>
@@ -297,6 +330,105 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
                         <td>{entry.metric ?? 'Not reported'}</td>
                         <td>{entry.family === 'ipv4' ? 'IPv4' : 'IPv6'}</td>
                         <td>{entry.preference ?? 'Not reported'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </section>
+      <section className="network-routes" aria-labelledby="network-ports-title">
+        <h2 id="network-ports-title">Listening Ports</h2>
+        <p>
+          A local listening socket does not prove external reachability or firewall exposure. UDP
+          bound sockets do not prove that a reachable service is accepting traffic.
+        </p>
+        {ports.pending && !portSnapshot && <Spinner label="Reading listening ports…" />}
+        {ports.error && (
+          <Notice>
+            {portSnapshot
+              ? 'Listening-port refresh failed — showing the last successful same-session socket snapshot.'
+              : 'Listening-port inventory is unavailable on this host.'}
+          </Notice>
+        )}
+        {portSnapshot && (
+          <>
+            <p>
+              Listening ports observed{' '}
+              <time dateTime={portSnapshot.observedAt}>{portSnapshot.observedAt}</time>
+            </p>
+            <p className="network-socket-summary">
+              TCP listening:{' '}
+              {portSnapshot.entries.filter((entry) => entry.protocol === 'tcp').length} · UDP bound
+              sockets: {portSnapshot.entries.filter((entry) => entry.protocol === 'udp').length}
+            </p>
+            <div className="network-route-controls">
+              <label>
+                Search listening ports
+                <input
+                  type="search"
+                  value={portSearch}
+                  onChange={(event) => setPortSearch(event.target.value)}
+                />
+              </label>
+              <label>
+                Socket protocol
+                <select
+                  value={portProtocol}
+                  onChange={(event) => setPortProtocol(event.target.value)}
+                >
+                  <option value="all">TCP and UDP</option>
+                  <option value="tcp">TCP</option>
+                  <option value="udp">UDP</option>
+                </select>
+              </label>
+            </div>
+            <p role="status">
+              Showing {portRows.length} of {portSnapshot.entries.length} sockets
+            </p>
+            {portRows.length === 0 ? (
+              <p>
+                {portSnapshot.entries.length === 0
+                  ? 'No supported listening or bound sockets were returned.'
+                  : 'No sockets match these filters.'}
+              </p>
+            ) : (
+              <div className="files-table-wrap">
+                <table className="files-table">
+                  <caption className="sr-only">Listening and bound sockets</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Protocol</th>
+                      <th scope="col">Local bind address</th>
+                      <th scope="col">Port</th>
+                      <th scope="col">Address family</th>
+                      <th scope="col">Reported state</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {portRows.map((entry) => (
+                      <tr
+                        key={JSON.stringify([
+                          entry.protocol,
+                          entry.family,
+                          entry.localAddress,
+                          entry.port,
+                          entry.state,
+                        ])}
+                      >
+                        <td>{entry.protocol.toUpperCase()}</td>
+                        <td>{entry.localAddress}</td>
+                        <td>{entry.port}</td>
+                        <td>
+                          {entry.family === 'ipv4'
+                            ? 'IPv4'
+                            : entry.family === 'ipv6'
+                              ? 'IPv6'
+                              : 'Unknown'}
+                        </td>
+                        <td>{entry.state.toUpperCase()}</td>
                       </tr>
                     ))}
                   </tbody>

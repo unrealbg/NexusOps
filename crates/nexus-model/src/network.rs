@@ -61,3 +61,44 @@ pub struct NetworkRouteSnapshot {
     pub observed_at: String,
     pub entries: Vec<NetworkRouteEntry>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ListeningSocketProtocol {
+    Tcp,
+    Udp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ListeningSocketFamily {
+    Ipv4,
+    Ipv6,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum ListeningSocketState {
+    Listen,
+    Unconn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ListeningSocketEntry {
+    pub protocol: ListeningSocketProtocol,
+    pub family: ListeningSocketFamily,
+    pub local_address: String,
+    pub port: u16,
+    pub state: ListeningSocketState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ListeningPortSnapshot {
+    pub host_id: HostId,
+    pub host_session_id: HostSessionId,
+    pub observed_at: String,
+    pub entries: Vec<ListeningSocketEntry>,
+}

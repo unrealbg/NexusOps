@@ -9,6 +9,7 @@ import type {
   HostMonitorSample,
   NetworkSnapshot,
   NetworkRouteSnapshot,
+  ListeningPortSnapshot,
   SystemJournalSnapshot,
   ContainerSnapshot,
   ServiceSnapshot,
@@ -193,6 +194,8 @@ export const networkApi = {
     request<NetworkSnapshot>('list_host_network', { hostId, hostSessionId }),
   routes: (hostId: string, hostSessionId: string) =>
     request<NetworkRouteSnapshot>('list_host_routes', { hostId, hostSessionId }),
+  listeningPorts: (hostId: string, hostSessionId: string) =>
+    request<ListeningPortSnapshot>('list_host_listening_ports', { hostId, hostSessionId }),
 };
 
 /** Sensitive, session-owned journal snapshot; never cache or persist the result. */

@@ -2,6 +2,7 @@
 
 mod capabilities;
 mod containers;
+mod listening_ports;
 mod logs;
 mod monitoring;
 mod network;
@@ -12,6 +13,7 @@ mod services;
 
 pub use capabilities::{CapabilityRegistry, capabilities};
 pub use containers::{observe_docker_containers, parse_docker_containers};
+pub use listening_ports::{observe_listening_ports, parse_listening_ports};
 pub use logs::{observe_system_journal, parse_system_journal};
 pub use monitoring::{MonitorBaseline, MonitorReading, derive_sample, observe_monitor};
 pub use network::{observe_network, parse_network};

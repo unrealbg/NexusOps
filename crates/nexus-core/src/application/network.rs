@@ -59,6 +59,28 @@ impl Application {
         .await
     }
 
+    /// One bounded socket read shares admission with interfaces and routes.
+    pub async fn list_host_listening_ports(
+        &self,
+        host_id: HostId,
+        host_session_id: HostSessionId,
+    ) -> Result<ListeningPortSnapshot, AppError> {
+        self.with_network_admission(
+            host_id,
+            host_session_id,
+            |transport, cancellation| async move {
+                nexus_discovery::observe_listening_ports(
+                    transport.as_ref(),
+                    cancellation,
+                    host_id,
+                    host_session_id,
+                )
+                .await
+            },
+        )
+        .await
+    }
+
     async fn with_network_admission<T, F, Fut>(
         &self,
         host_id: HostId,
@@ -125,6 +147,7 @@ mod tests {
     struct Transport {
         stall: Option<ReadOnlyCommand>,
         calls: StdMutex<Vec<ReadOnlyCommand>>,
+        fail: std::sync::atomic::AtomicBool,
         entered: Semaphore,
         release: Semaphore,
     }
@@ -136,11 +159,18 @@ mod tests {
             _: CancellationToken,
         ) -> Result<String, AppError> {
             self.calls.lock().unwrap().push(command);
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(AppError::new(
+                    ErrorCode::Connection,
+                    "Synthetic read failure",
+                ));
+            }
             if self.stall == Some(command) {
                 self.entered.add_permits(1);
                 self.release.acquire().await.unwrap().forget();
             }
             Ok(match command {
+                ReadOnlyCommand::ListeningPorts => "tcp LISTEN 0 128 192.0.2.10:8080 *:*",
                 ReadOnlyCommand::NetworkRoutesV4 => {
                     r#"[{"dst":"default","gateway":"192.0.2.1","dev":"eth0"}]"#
                 }
@@ -206,6 +236,7 @@ mod tests {
         let transport = Arc::new(Transport {
             stall,
             calls: StdMutex::new(vec![]),
+            fail: std::sync::atomic::AtomicBool::new(false),
             entered: Semaphore::new(0),
             release: Semaphore::new(0),
         });
@@ -390,5 +421,179 @@ mod tests {
             assert!(request.await.unwrap().is_ok());
         }
         assert_eq!(app.network_limit.available_permits(), 4);
+    }
+    #[tokio::test]
+    async fn listening_ports_require_exact_owner_and_do_not_persist_or_use_service_admission() {
+        let (dir, app, transport) = setup(None);
+        let (host, owner) = install(&app, transport.clone()).await;
+        assert_eq!(
+            app.list_host_listening_ports(host, HostSessionId::new())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert!(transport.calls.lock().unwrap().is_empty());
+        let audit = std::fs::read(dir.path().join("audit.jsonl")).unwrap_or_default();
+        let hosts = app.list_hosts().unwrap();
+        let _services = app.service_limit.acquire_many(4).await.unwrap();
+        let snapshot = app.list_host_listening_ports(host, owner).await.unwrap();
+        assert_eq!(snapshot.host_id, host);
+        assert_eq!(snapshot.host_session_id, owner);
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(
+            *transport.calls.lock().unwrap(),
+            vec![ReadOnlyCommand::ListeningPorts]
+        );
+        assert_eq!(app.list_hosts().unwrap(), hosts);
+        assert_eq!(
+            std::fs::read(dir.path().join("audit.jsonl")).unwrap_or_default(),
+            audit
+        );
+        assert_eq!(app.network_limit.available_permits(), 4);
+    }
+    #[tokio::test]
+    async fn all_three_network_observations_share_host_admission_and_release_dropped_requests() {
+        for command in [
+            ReadOnlyCommand::NetworkAddresses,
+            ReadOnlyCommand::NetworkRoutesV4,
+            ReadOnlyCommand::ListeningPorts,
+        ] {
+            let (_dir, app, transport) = setup(Some(command));
+            let (host, owner) = install(&app, transport.clone()).await;
+            let request_app = app.clone();
+            let request = tokio::spawn(async move {
+                match command {
+                    ReadOnlyCommand::NetworkAddresses => {
+                        request_app.list_host_network(host, owner).await.map(|_| ())
+                    }
+                    ReadOnlyCommand::NetworkRoutesV4 => {
+                        request_app.list_host_routes(host, owner).await.map(|_| ())
+                    }
+                    ReadOnlyCommand::ListeningPorts => request_app
+                        .list_host_listening_ports(host, owner)
+                        .await
+                        .map(|_| ()),
+                    _ => unreachable!(),
+                }
+            });
+            entered(&transport).await;
+            assert_eq!(
+                app.list_host_network(host, owner).await.unwrap_err().code,
+                ErrorCode::Conflict
+            );
+            assert_eq!(
+                app.list_host_routes(host, owner).await.unwrap_err().code,
+                ErrorCode::Conflict
+            );
+            assert_eq!(
+                app.list_host_listening_ports(host, owner)
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Conflict
+            );
+            request.abort();
+            let _ = request.await;
+            assert_eq!(app.network_limit.available_permits(), 4);
+            transport.release.add_permits(1);
+            assert!(app.list_host_listening_ports(host, owner).await.is_ok());
+        }
+    }
+    #[tokio::test]
+    async fn listening_ports_share_the_four_global_network_slots() {
+        let (_dir, app, transport) = setup(Some(ReadOnlyCommand::ListeningPorts));
+        let mut requests = vec![];
+        for _ in 0..4 {
+            let (host, owner) = install(&app, transport.clone()).await;
+            let request_app = app.clone();
+            requests.push(tokio::spawn(async move {
+                request_app.list_host_listening_ports(host, owner).await
+            }));
+            entered(&transport).await;
+        }
+        let (host, owner) = install(&app, transport.clone()).await;
+        assert_eq!(
+            app.list_host_listening_ports(host, owner)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            app.list_host_network(host, owner).await.unwrap_err().code,
+            ErrorCode::Conflict
+        );
+        assert_eq!(
+            app.list_host_routes(host, owner).await.unwrap_err().code,
+            ErrorCode::Conflict
+        );
+        transport.release.add_permits(4);
+        for request in requests {
+            assert!(request.await.unwrap().is_ok());
+        }
+        assert_eq!(app.network_limit.available_permits(), 4);
+    }
+    #[tokio::test]
+    async fn listening_ports_reject_post_io_generation_transport_and_view_replacement() {
+        for change in 0..4 {
+            let (_dir, app, transport) = setup(Some(ReadOnlyCommand::ListeningPorts));
+            let (host, owner) = install(&app, transport.clone()).await;
+            let request_app = app.clone();
+            let request =
+                tokio::spawn(
+                    async move { request_app.list_host_listening_ports(host, owner).await },
+                );
+            entered(&transport).await;
+            let slot = app.slot(host).await;
+            {
+                let mut data = slot.data.lock().await;
+                match change {
+                    0 => data.generation += 1,
+                    1 => data.connection_id = Some(HostSessionId::new()),
+                    2 => data.view.host_session_id = Some(HostSessionId::new()),
+                    _ => data.view.state = ConnectionState::Disconnected,
+                }
+            }
+            transport.release.add_permits(1);
+            assert_eq!(
+                request.await.unwrap().unwrap_err().code,
+                ErrorCode::Cancelled
+            );
+            assert_eq!(app.network_limit.available_permits(), 4);
+        }
+    }
+    #[tokio::test]
+    async fn listening_ports_cancellation_and_transport_failure_release_admission_without_retry() {
+        let (_dir, app, transport) = setup(Some(ReadOnlyCommand::ListeningPorts));
+        let (host, owner) = install(&app, transport.clone()).await;
+        let request_app = app.clone();
+        let request =
+            tokio::spawn(async move { request_app.list_host_listening_ports(host, owner).await });
+        entered(&transport).await;
+        app.slot(host).await.data.lock().await.cancel.cancel();
+        assert_eq!(
+            request.await.unwrap().unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+        assert_eq!(app.network_limit.available_permits(), 4);
+        let (_dir, app, transport) = setup(None);
+        let (host, owner) = install(&app, transport.clone()).await;
+        transport
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            app.list_host_listening_ports(host, owner)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Connection
+        );
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
+        assert_eq!(app.network_limit.available_permits(), 4);
+        transport
+            .fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(app.list_host_listening_ports(host, owner).await.is_ok());
     }
 }
