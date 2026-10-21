@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  DnsConfigurationSnapshot,
   Host,
   ListeningPortSnapshot,
   NetworkRouteSnapshot,
@@ -37,6 +38,7 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
   const [interfaces, setInterfaces] = useState<Observation<NetworkSnapshot>>(initial);
   const [routes, setRoutes] = useState<Observation<NetworkRouteSnapshot>>(initial);
   const [ports, setPorts] = useState<Observation<ListeningPortSnapshot>>(initial);
+  const [dns, setDns] = useState<Observation<DnsConfigurationSnapshot>>(initial);
   const [portSearch, setPortSearch] = useState('');
   const [portProtocol, setPortProtocol] = useState('all');
   const [filter, setFilter] = useState('');
@@ -52,6 +54,7 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
       setInterfaces((previous) => ({ ...previous, error: false, pending: true }));
       setRoutes((previous) => ({ ...previous, error: false, pending: true }));
       setPorts((previous) => ({ ...previous, error: false, pending: true }));
+      setDns((previous) => ({ ...previous, error: false, pending: true }));
       try {
         const result = await networkApi.list(host.id, sessionId);
         if (generation.current !== current) return;
@@ -85,6 +88,17 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
       } catch {
         if (generation.current !== current) return;
         setPorts((previous) => ({ ...previous, error: true, pending: false }));
+      }
+      if (generation.current !== current) return;
+      try {
+        const result = await networkApi.dnsConfiguration(host.id, sessionId);
+        if (generation.current !== current) return;
+        if (result.hostId !== host.id || result.hostSessionId !== sessionId)
+          throw new Error('Snapshot ownership mismatch');
+        setDns({ snapshot: result, error: false, pending: false });
+      } catch {
+        if (generation.current !== current) return;
+        setDns((previous) => ({ ...previous, error: true, pending: false }));
       } finally {
         if (generation.current === current) inFlight.current = false;
       }
@@ -118,6 +132,7 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
   }, [portProtocol, portSearch, portSnapshot]);
   const snapshot = interfaces.snapshot;
   const routeSnapshot = routes.snapshot;
+  const dnsSnapshot = dns.snapshot;
   const rows = useMemo(() => {
     const term = filter.trim().toLowerCase();
     return (
@@ -156,7 +171,7 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
         </div>
         <Button
           onClick={() => void load(generation.current)}
-          disabled={interfaces.pending || routes.pending || ports.pending}
+          disabled={interfaces.pending || routes.pending || ports.pending || dns.pending}
         >
           Refresh
         </Button>
@@ -435,6 +450,91 @@ function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }
                 </table>
               </div>
             )}
+          </>
+        )}
+      </section>
+      <section className="network-routes" aria-labelledby="network-dns-title">
+        <h2 id="network-dns-title">DNS Configuration — `/etc/resolv.conf`</h2>
+        <p>
+          Source: <code>/etc/resolv.conf</code>. This is selected observed configuration, not an
+          authoritative effective DNS state or an attestation by the host.
+        </p>
+        <p>
+          A 127.0.0.53 nameserver can identify a local systemd-resolved stub and does not reveal
+          upstream resolvers. Per-link and DHCP DNS, resolver-manager state, NSS configuration and
+          per-process LOCALDOMAIN or RES_OPTIONS overrides are outside this snapshot. Reading this
+          file does not test DNS reachability, health, response correctness or security.
+        </p>
+        {dns.pending && !dnsSnapshot && <Spinner label="Reading DNS configuration…" />}
+        {dns.error && (
+          <Notice>
+            {dnsSnapshot
+              ? 'DNS configuration refresh failed — showing the last successful same-session snapshot.'
+              : 'DNS configuration is unavailable on this host.'}
+          </Notice>
+        )}
+        {dnsSnapshot && (
+          <>
+            <p>
+              DNS configuration observed{' '}
+              <time dateTime={dnsSnapshot.observedAt}>{dnsSnapshot.observedAt}</time>
+            </p>
+            <h3>Nameservers</h3>
+            {dnsSnapshot.nameservers.length === 0 ? (
+              <p>
+                No nameserver directives were observed. This does not prove that DNS is disabled.
+              </p>
+            ) : (
+              <div className="files-table-wrap">
+                <table className="files-table">
+                  <caption className="sr-only">Observed resolv.conf nameservers</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Address</th>
+                      <th scope="col">Family</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dnsSnapshot.nameservers.map((entry, index) => (
+                      <tr key={`${index}:${entry.family}:${entry.address}`}>
+                        <td>{entry.address}</td>
+                        <td>{entry.family === 'ipv4' ? 'IPv4' : 'IPv6'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <h3>Search configuration</h3>
+            {dnsSnapshot.searchDirective ? (
+              <p>
+                Observed {dnsSnapshot.searchDirective === 'search' ? 'search' : 'domain'} directive:{' '}
+                {dnsSnapshot.searchDomains.join(', ')}
+              </p>
+            ) : (
+              <p>No search or domain directive was observed.</p>
+            )}
+            <h3>Resolver options</h3>
+            <p>
+              {dnsSnapshot.options.length === 0
+                ? 'No resolver option tokens were observed.'
+                : dnsSnapshot.options.join(', ')}
+            </p>
+            <h3>Sort list</h3>
+            <p>
+              {dnsSnapshot.sortlist.length === 0
+                ? 'No supported sortlist entries were observed.'
+                : dnsSnapshot.sortlist
+                    .map(
+                      (entry) =>
+                        `${entry.address}${entry.netmask ? `/${entry.netmask}` : ''} (${entry.family === 'ipv4' ? 'IPv4' : 'IPv6'})`,
+                    )
+                    .join(', ')}
+            </p>
+            <p>
+              Options and sortlist values are displayed only as observed configuration; their
+              effects and use by individual processes are not tested or inferred.
+            </p>
           </>
         )}
       </section>

@@ -30,6 +30,7 @@ fn main() {
             "list_host_network",
             "list_host_routes",
             "list_host_listening_ports",
+            "list_host_dns_configuration",
             "list_host_logs",
             "list_host_containers",
             "list_terminals",
