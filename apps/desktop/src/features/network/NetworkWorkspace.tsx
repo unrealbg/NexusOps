@@ -1,115 +1,311 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Host, NetworkSnapshot } from '@nexusops/protocol';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { Host, NetworkRouteSnapshot, NetworkSnapshot } from '@nexusops/protocol';
 import { Button, Notice, Spinner } from '@nexusops/ui';
 import { networkApi } from '../../api/client';
 import { useHostSession } from '../../api/queries';
 
+type Observation<T> = { snapshot: T | null; error: boolean; pending: boolean };
+const initial = { snapshot: null, error: false, pending: true };
+
 export function NetworkWorkspace({ host }: { host: Host }) {
   const session = useHostSession(host.id).data;
-  const connected = session?.state === 'connected';
-  const sessionId = connected ? session.hostSessionId : null;
-  const owner = `${host.id}:${sessionId ?? ''}`;
-  const [snapshot, setSnapshot] = useState<NetworkSnapshot | null>(null);
-  const [error, setError] = useState<{ owner: string; failedRefresh: boolean } | null>(null);
-  const [refreshingOwner, setRefreshingOwner] = useState<string | null>(null);
-  const [filter, setFilter] = useState('');
-  const generation = useRef(0);
-  const inFlight = useRef(false);
-
-  useEffect(() => {
-    const current = ++generation.current;
-    inFlight.current = false;
-    if (!connected || !sessionId) return () => { generation.current += 1; };
-    inFlight.current = true;
-    void networkApi.list(host.id, sessionId).then(
-      (result) => {
-        if (generation.current !== current) return;
-        if (result.hostId !== host.id || result.hostSessionId !== sessionId) {
-          setError({ owner, failedRefresh: false });
-          return;
-        }
-        setSnapshot(result);
-      },
-      () => {
-        if (generation.current === current) setError({ owner, failedRefresh: false });
-      },
-    ).finally(() => {
-      if (generation.current === current) inFlight.current = false;
-    });
-    return () => { generation.current += 1; };
-  }, [connected, host.id, owner, sessionId]);
-
-  const validSnapshot = connected && snapshot?.hostId === host.id && snapshot.hostSessionId === sessionId
-    ? snapshot : null;
-  const visibleError = error?.owner === owner ? error : null;
-  const pending = refreshingOwner === owner || (connected && !validSnapshot && !visibleError);
-  const rows = useMemo(() => {
-    if (!validSnapshot) return [];
-    const term = filter.trim().toLocaleLowerCase();
-    if (!term) return validSnapshot.entries;
-    return validSnapshot.entries.filter((entry) =>
-      [entry.name, entry.operState ?? '', ...entry.addresses.map((address) =>
-        `${address.address}/${address.prefixLength}`)]
-        .some((field) => field.toLocaleLowerCase().includes(term)),
-    );
-  }, [filter, validSnapshot]);
-
-  function refresh() {
-    if (!connected || !sessionId || inFlight.current) return;
-    const current = generation.current;
-    const hadSnapshot = validSnapshot !== null;
-    inFlight.current = true;
-    setRefreshingOwner(owner);
-    setError(null);
-    void networkApi.list(host.id, sessionId).then(
-      (result) => {
-        if (generation.current !== current) return;
-        if (result.hostId !== host.id || result.hostSessionId !== sessionId) {
-          setError({ owner, failedRefresh: hadSnapshot });
-          return;
-        }
-        setSnapshot(result);
-      },
-      () => {
-        if (generation.current === current) setError({ owner, failedRefresh: hadSnapshot });
-      },
-    ).finally(() => {
-      if (generation.current === current) {
-        inFlight.current = false;
-        setRefreshingOwner(null);
-      }
-    });
-  }
-
-  const addressCount = validSnapshot?.entries.reduce((total, entry) => total + entry.addresses.length, 0) ?? 0;
+  const sessionId = session?.state === 'connected' ? session.hostSessionId : null;
+  if (sessionId)
+    return <ConnectedNetwork key={`${host.id}:${sessionId}`} host={host} sessionId={sessionId} />;
   return (
     <section aria-labelledby="network-title">
       <header className="page-heading">
-        <div><div className="eyebrow">READ-ONLY INVENTORY</div><h1 id="network-title">Network</h1><p>{host.displayName} · {connected ? 'Connected' : 'Disconnected'}</p></div>
-        <Button onClick={refresh} disabled={!connected || !sessionId || pending}>Refresh</Button>
+        <div>
+          <div className="eyebrow">READ-ONLY INVENTORY</div>
+          <h1 id="network-title">Network</h1>
+          <p>{host.displayName} · Disconnected</p>
+        </div>
+        <Button disabled>Refresh</Button>
       </header>
-      {!connected ? <p>Connect this host to inspect network interfaces.</p> : (
-        <>
-          {pending && !validSnapshot && <Spinner label="Reading network interfaces…" />}
-          {visibleError && (
-            <Notice>{visibleError.failedRefresh && validSnapshot
+      <p>Connect this host to inspect network interfaces.</p>
+    </section>
+  );
+}
+
+// Remount on ownership changes: topology and errors never survive an old host/session.
+function ConnectedNetwork({ host, sessionId }: { host: Host; sessionId: string }) {
+  const [interfaces, setInterfaces] = useState<Observation<NetworkSnapshot>>(initial);
+  const [routes, setRoutes] = useState<Observation<NetworkRouteSnapshot>>(initial);
+  const [filter, setFilter] = useState('');
+  const [routeFilter, setRouteFilter] = useState('');
+  const [family, setFamily] = useState('all');
+  const generation = useRef(0);
+  const inFlight = useRef(false);
+
+  const load = useCallback(
+    async (current: number) => {
+      if (inFlight.current || generation.current !== current) return;
+      inFlight.current = true;
+      setInterfaces((previous) => ({ ...previous, error: false, pending: true }));
+      setRoutes((previous) => ({ ...previous, error: false, pending: true }));
+      try {
+        const result = await networkApi.list(host.id, sessionId);
+        if (generation.current !== current) return;
+        if (result.hostId !== host.id || result.hostSessionId !== sessionId)
+          throw new Error('Snapshot ownership mismatch');
+        setInterfaces({ snapshot: result, error: false, pending: false });
+      } catch {
+        if (generation.current !== current) return;
+        setInterfaces((previous) => ({ ...previous, error: true, pending: false }));
+      }
+      // Address and route operations share the backend Network gate. Always wait
+      // for the first operation to settle, including failure, before reading routes.
+      if (generation.current !== current) return;
+      try {
+        const result = await networkApi.routes(host.id, sessionId);
+        if (generation.current !== current) return;
+        if (result.hostId !== host.id || result.hostSessionId !== sessionId)
+          throw new Error('Snapshot ownership mismatch');
+        setRoutes({ snapshot: result, error: false, pending: false });
+      } catch {
+        if (generation.current !== current) return;
+        setRoutes((previous) => ({ ...previous, error: true, pending: false }));
+      } finally {
+        if (generation.current === current) inFlight.current = false;
+      }
+    },
+    [host.id, sessionId],
+  );
+
+  useEffect(() => {
+    const current = ++generation.current;
+    // Skip the discarded StrictMode setup before starting any IPC request.
+    void Promise.resolve().then(() => {
+      if (generation.current === current) void load(current);
+    });
+    return () => {
+      generation.current += 1;
+    };
+  }, [load]);
+
+  const snapshot = interfaces.snapshot;
+  const routeSnapshot = routes.snapshot;
+  const rows = useMemo(() => {
+    const term = filter.trim().toLowerCase();
+    return (
+      snapshot?.entries.filter((entry) =>
+        [
+          entry.name,
+          entry.operState ?? '',
+          ...entry.addresses.map((address) => `${address.address}/${address.prefixLength}`),
+        ].some((field) => field.toLowerCase().includes(term)),
+      ) ?? []
+    );
+  }, [filter, snapshot]);
+  const routeRows = useMemo(() => {
+    const term = routeFilter.trim().toLowerCase();
+    return (
+      routeSnapshot?.entries.filter(
+        (entry) =>
+          (family === 'all' || entry.family === family) &&
+          [entry.destination, entry.gateway ?? '', entry.interface].some((field) =>
+            field.toLowerCase().includes(term),
+          ),
+      ) ?? []
+    );
+  }, [family, routeFilter, routeSnapshot]);
+  const addressCount =
+    snapshot?.entries.reduce((total, entry) => total + entry.addresses.length, 0) ?? 0;
+  const defaultCount =
+    routeSnapshot?.entries.filter((entry) => entry.destination === 'default').length ?? 0;
+  return (
+    <section aria-labelledby="network-title">
+      <header className="page-heading">
+        <div>
+          <div className="eyebrow">READ-ONLY INVENTORY</div>
+          <h1 id="network-title">Network</h1>
+          <p>{host.displayName} · Connected</p>
+        </div>
+        <Button
+          onClick={() => void load(generation.current)}
+          disabled={interfaces.pending || routes.pending}
+        >
+          Refresh
+        </Button>
+      </header>
+      <section aria-labelledby="network-interfaces-title">
+        <h2 id="network-interfaces-title">Interfaces &amp; Addresses</h2>
+        {interfaces.pending && !snapshot && <Spinner label="Reading network interfaces…" />}
+        {interfaces.error && (
+          <Notice>
+            {snapshot
               ? 'Refresh failed — showing the last successful snapshot.'
-              : 'Network inventory is unavailable on this host.'}</Notice>
-          )}
-          {validSnapshot && (
-            <>
-              <p>Observed <time dateTime={validSnapshot.observedAt}>{validSnapshot.observedAt}</time> · {validSnapshot.entries.length} interfaces · {addressCount} addresses</p>
-              <label htmlFor="network-filter">Filter interfaces and addresses</label>
-              <input id="network-filter" type="search" value={filter} onChange={(event) => setFilter(event.target.value)} />
-              {validSnapshot.entries.length === 0 ? <p>No network interfaces were returned.</p>
-                : rows.length === 0 ? <p>No interfaces match this filter.</p>
-                : <div className="files-table-wrap"><table className="files-table"><thead><tr><th scope="col">Interface</th><th scope="col">State</th><th scope="col">MTU</th><th scope="col">Addresses</th></tr></thead><tbody>
-                    {rows.map((entry) => <tr key={entry.ifindex}><td>{entry.name}</td><td>{entry.operState ?? '—'}</td><td>{entry.mtu ?? '—'}</td><td>{entry.addresses.length === 0 ? '—' : entry.addresses.map((address) => <div key={`${address.family}:${address.address}/${address.prefixLength}`}>{address.family === 'ipv4' ? 'IPv4' : 'IPv6'} {address.address}/{address.prefixLength}</div>)}</td></tr>)}
-                  </tbody></table></div>}
-            </>
-          )}
-        </>
-      )}
+              : 'Network inventory is unavailable on this host.'}
+          </Notice>
+        )}
+        {snapshot && (
+          <>
+            <p>
+              Observed <time dateTime={snapshot.observedAt}>{snapshot.observedAt}</time> ·{' '}
+              {snapshot.entries.length} interfaces · {addressCount} addresses
+            </p>
+            <label htmlFor="network-filter">Filter interfaces and addresses</label>
+            <input
+              id="network-filter"
+              type="search"
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+            />
+            {snapshot.entries.length === 0 ? (
+              <p>No network interfaces were returned.</p>
+            ) : rows.length === 0 ? (
+              <p>No interfaces match this filter.</p>
+            ) : (
+              <div className="files-table-wrap">
+                <table className="files-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Interface</th>
+                      <th scope="col">State</th>
+                      <th scope="col">MTU</th>
+                      <th scope="col">Addresses</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((entry) => (
+                      <tr key={entry.ifindex}>
+                        <td>{entry.name}</td>
+                        <td>{entry.operState ?? '—'}</td>
+                        <td>{entry.mtu ?? '—'}</td>
+                        <td>
+                          {entry.addresses.length === 0
+                            ? '—'
+                            : entry.addresses.map((address) => (
+                                <div
+                                  key={`${address.family}:${address.address}/${address.prefixLength}`}
+                                >
+                                  {address.family === 'ipv4' ? 'IPv4' : 'IPv6'} {address.address}/
+                                  {address.prefixLength}
+                                </div>
+                              ))}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </section>
+      <section className="network-routes" aria-labelledby="network-routes-title">
+        <h2 id="network-routes-title">Routes &amp; Gateway</h2>
+        <p>
+          Main routing table only. This does not include other tables, policy rules or the route
+          selected for a particular packet.
+        </p>
+        {routes.pending && !routeSnapshot && <Spinner label="Reading main-table routes…" />}
+        {routes.error && (
+          <Notice>
+            {routeSnapshot
+              ? 'Route refresh failed — showing the last successful same-session route snapshot.'
+              : 'Route inventory is unavailable on this host.'}
+          </Notice>
+        )}
+        {routeSnapshot && (
+          <>
+            <p>
+              Routes observed{' '}
+              <time dateTime={routeSnapshot.observedAt}>{routeSnapshot.observedAt}</time> ·{' '}
+              {routeSnapshot.entries.length} routes
+            </p>
+            {defaultCount === 0 ? (
+              <p>
+                No default gateway is observed in the main table. This does not establish whether
+                external connectivity is available.
+              </p>
+            ) : (
+              <p>
+                {defaultCount} default route(s) observed; no uniquely preferred gateway is inferred.
+              </p>
+            )}
+            {(['ipv4', 'ipv6'] as const).map(
+              (value) =>
+                !routeSnapshot.entries.some((entry) => entry.family === value) && (
+                  <p key={value}>
+                    No {value === 'ipv4' ? 'IPv4' : 'IPv6'} routes were returned from the main
+                    table.
+                  </p>
+                ),
+            )}
+            <div className="network-route-controls">
+              <label>
+                Search routes
+                <input
+                  type="search"
+                  value={routeFilter}
+                  onChange={(event) => setRouteFilter(event.target.value)}
+                />
+              </label>
+              <label>
+                Route address family
+                <select value={family} onChange={(event) => setFamily(event.target.value)}>
+                  <option value="all">IPv4 and IPv6</option>
+                  <option value="ipv4">IPv4</option>
+                  <option value="ipv6">IPv6</option>
+                </select>
+              </label>
+            </div>
+            <p role="status">
+              Showing {routeRows.length} of {routeSnapshot.entries.length} routes
+            </p>
+            {routeRows.length === 0 ? (
+              <p>
+                {routeSnapshot.entries.length === 0
+                  ? 'No main-table routes were returned.'
+                  : 'No routes match these filters.'}
+              </p>
+            ) : (
+              <div className="files-table-wrap">
+                <table className="files-table">
+                  <caption className="sr-only">Main routing table routes</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">Destination</th>
+                      <th scope="col">Gateway</th>
+                      <th scope="col">Interface</th>
+                      <th scope="col">Metric</th>
+                      <th scope="col">Family</th>
+                      <th scope="col">Preference</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {routeRows.map((entry) => (
+                      <tr
+                        key={JSON.stringify([
+                          entry.family,
+                          entry.destination,
+                          entry.gateway,
+                          entry.interface,
+                          entry.metric,
+                        ])}
+                      >
+                        <td>{entry.destination}</td>
+                        <td>
+                          {entry.gateway ?? 'Direct / on-link'}
+                          {entry.onLink && entry.gateway ? ' (on-link)' : ''}
+                        </td>
+                        <td>
+                          {entry.interface}
+                          {entry.linkDown ? ' (link down)' : ''}
+                        </td>
+                        <td>{entry.metric ?? 'Not reported'}</td>
+                        <td>{entry.family === 'ipv4' ? 'IPv4' : 'IPv6'}</td>
+                        <td>{entry.preference ?? 'Not reported'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
+      </section>
     </section>
   );
 }

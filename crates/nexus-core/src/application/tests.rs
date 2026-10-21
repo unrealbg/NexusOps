@@ -168,6 +168,8 @@ impl RemoteSession for TestSession {
                     None => DEFAULT_SERVICE_SNAPSHOT,
                 }
             },
+            ReadOnlyCommand::NetworkRoutesV4 => r#"[{"dst":"default","gateway":"192.0.2.1","dev":"eth0"}]"#,
+            ReadOnlyCommand::NetworkRoutesV6 => r#"[{"dst":"2001:db8::/64","dev":"eth0","metric":256}]"#,
             ReadOnlyCommand::NetworkAddresses => {
                 if self.network.stall.load(Ordering::SeqCst) {
                     self.network.entered.add_permits(1);
