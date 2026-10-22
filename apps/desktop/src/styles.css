@@ -10,6 +10,69 @@
   border: 0;
 }
 
+/* One persistent Terminal + SFTP layout per visited host. */
+.ssh-host-root {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  gap: 8px;
+}
+.ssh-host-root[hidden],
+.ssh-layout > [hidden],
+.files-actions[hidden],
+.transfer-queue[hidden] { display: none; }
+.ssh-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.ssh-files-slot,
+.ssh-terminal-slot { min-width: 0; min-height: 0; overflow: hidden; }
+.ssh-terminal-slot { display: flex; }
+.ssh-terminal-slot .terminal-heading { flex-wrap: wrap; gap: 8px; }
+.ssh-terminal-slot .heading-actions { flex-wrap: wrap; }
+.ssh-separator { background: var(--border-soft); cursor: col-resize; touch-action: none; user-select: none; }
+.ssh-separator:hover,
+.ssh-separator:focus-visible { background: var(--accent); }
+.ssh-separator:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ssh-collapsed-files { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--muted); }
+.files-workspace--compact { gap: 8px; padding-right: 8px; }
+.files-workspace--compact .files-heading { flex-wrap: wrap; gap: 6px; }
+.files-workspace--compact .files-heading h1 { font-size: 15px; overflow-wrap: anywhere; }
+.files-workspace--compact .files-session { padding: 3px 6px; }
+.files-workspace--compact .files-toolbar { flex-wrap: wrap; gap: 4px; }
+.files-workspace--compact .files-address { flex-basis: 100%; min-width: 0; }
+.files-workspace--compact input { min-width: 0; }
+.files-workspace--compact .files-view-options label { max-width: 100%; flex-wrap: wrap; }
+.files-workspace--compact .files-table { table-layout: fixed; }
+.files-workspace--compact .files-table th:first-child { width: 32px; }
+.files-workspace--compact .files-table th:nth-child(n+3),
+.files-workspace--compact .files-table td:nth-child(n+3) { display: none; }
+.files-workspace--compact .file-name { display: block; width: 100%; max-width: 100%; }
+.files-workspace--compact .notice { overflow-wrap: anywhere; }
+.compact-monitor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px 18px;
+  border-top: 1px solid var(--border);
+  padding: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.compact-monitor strong { color: var(--text); font-weight: 500; }
+.compact-monitor-freshness { overflow-wrap: anywhere; }
+
 /* SFTP workspace */
 .files-host-root,
 .files-workspace {

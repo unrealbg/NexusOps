@@ -18,10 +18,14 @@ export function TerminalWorkspace({
   host,
   visible,
   onShowOverview,
+  combined = false,
+  onToggleFiles,
 }: {
   host: Host;
   visible: boolean;
   onShowOverview: () => void;
+  combined?: boolean;
+  onToggleFiles?: () => void;
 }) {
   const hostSession = useHostSession(host.id);
   const [sessions, setSessions] = useState<TerminalSession[]>([]);
@@ -156,6 +160,9 @@ export function TerminalWorkspace({
           </p>
         </div>
         <div className="heading-actions">
+          {onToggleFiles && <Button aria-pressed={combined} onClick={onToggleFiles}>
+            {combined ? 'Hide files panel' : 'Combine Terminal + Files'}
+          </Button>}
           <Button variant="ghost" onClick={onShowOverview}>
             Overview
           </Button>
