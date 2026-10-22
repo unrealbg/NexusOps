@@ -39,8 +39,9 @@ function listing(path: string, owner: Pick<SftpSessionInfo, 'id' | 'hostId' | 'h
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => { resolve = accept; });
-  return { promise, resolve };
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((accept, fail) => { resolve = accept; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function uploadPlan(id = 'plan-upload'): FileOperationPlan {
@@ -132,6 +133,12 @@ describe('Files workspace boundaries', () => {
     </QueryClientProvider></StrictMode>;
     const view = render(pane(true));
     await waitFor(() => expect(filesApi.open).toHaveBeenCalledOnce());
+    for (let transition = 0; transition < 3; transition += 1) {
+      view.rerender(pane(false));
+      view.rerender(pane(true));
+      await act(async () => { await Promise.resolve(); });
+      expect(filesApi.open).toHaveBeenCalledOnce();
+    }
     view.rerender(pane(false));
     await act(async () => { opening.resolve(session); });
     expect(filesApi.list).not.toHaveBeenCalled();
@@ -139,6 +146,85 @@ describe('Files workspace boundaries', () => {
     await screen.findByDisplayValue('/home/test');
     expect(filesApi.open).toHaveBeenCalledOnce();
     expect(filesApi.list).toHaveBeenCalledOnce();
+  });
+
+  it('starts one fresh open on the first visible activation after a hidden rejection', async () => {
+    const first = deferred<SftpSessionInfo>();
+    const recovery = deferred<SftpSessionInfo>();
+    vi.mocked(filesApi.open).mockReturnValueOnce(first.promise).mockReturnValueOnce(recovery.promise);
+    const view = renderFiles();
+    const pane = (visible: boolean) => <QueryClientProvider client={view.client}>
+      <FilesWorkspace host={host} visible={visible} onShowOverview={vi.fn()} />
+    </QueryClientProvider>;
+    await waitFor(() => expect(filesApi.open).toHaveBeenCalledOnce());
+    view.rerender(pane(false));
+    await act(async () => { first.reject(new Error('Synthetic hidden open failure')); });
+    expect(filesApi.open).toHaveBeenCalledOnce();
+    expect(filesApi.list).not.toHaveBeenCalled();
+    view.rerender(pane(true));
+    await waitFor(() => expect(filesApi.open).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    const recovered = { ...session, id: 'sftp-recovered' };
+    await act(async () => { recovery.resolve(recovered); });
+    await screen.findByDisplayValue(recovered.rootPath);
+    expect(filesApi.list).toHaveBeenCalledExactlyOnceWith(recovered, recovered.rootPath);
+    view.rerender(pane(false));
+    view.rerender(pane(true));
+    expect(filesApi.open).toHaveBeenCalledTimes(2);
+    expect(filesApi.list).toHaveBeenCalledOnce();
+  });
+
+  it('does not let an obsolete connection rejection evict the current pending open', async () => {
+    const obsolete = deferred<SftpSessionInfo>();
+    const current = deferred<SftpSessionInfo>();
+    vi.mocked(filesApi.open).mockReturnValueOnce(obsolete.promise).mockReturnValueOnce(current.promise);
+    const view = renderFiles();
+    const pane = (visible: boolean) => <QueryClientProvider client={view.client}>
+      <FilesWorkspace host={host} visible={visible} onShowOverview={vi.fn()} />
+    </QueryClientProvider>;
+    await waitFor(() => expect(filesApi.open).toHaveBeenCalledOnce());
+    vi.mocked(hostApi.session).mockResolvedValue({ ...connected, hostSessionId: nextSession.hostSessionId });
+    await act(async () => { view.client.setQueryData(hostKeys.session(host.id), { ...connected, hostSessionId: nextSession.hostSessionId }); });
+    await waitFor(() => expect(filesApi.open).toHaveBeenCalledTimes(2));
+    await act(async () => { obsolete.reject(new Error('Synthetic obsolete open failure')); });
+    for (let transition = 0; transition < 2; transition += 1) {
+      view.rerender(pane(false));
+      view.rerender(pane(true));
+      await act(async () => { await Promise.resolve(); });
+      expect(filesApi.open).toHaveBeenCalledTimes(2);
+    }
+    await act(async () => { current.resolve(nextSession); });
+    await screen.findByDisplayValue(nextSession.rootPath);
+    expect(filesApi.list).toHaveBeenCalledExactlyOnceWith(nextSession, nextSession.rootPath);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('does not retry permanent failures without a new visibility or ownership transition', async () => {
+    vi.useFakeTimers();
+    const view = renderFiles(false);
+    try {
+      vi.mocked(filesApi.open).mockRejectedValue(new Error('Synthetic permanent open failure'));
+      const pane = (visible: boolean) => <QueryClientProvider client={view.client}>
+        <FilesWorkspace host={host} visible={visible} onShowOverview={vi.fn()} />
+      </QueryClientProvider>;
+      view.rerender(pane(true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(filesApi.open).toHaveBeenCalledOnce();
+      expect(screen.getByRole('alert')).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(filesApi.open).toHaveBeenCalledOnce();
+      view.rerender(pane(false));
+      view.rerender(pane(true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(filesApi.open).toHaveBeenCalledTimes(2);
+      vi.mocked(hostApi.session).mockResolvedValue({ ...connected, hostSessionId: nextSession.hostSessionId });
+      await act(async () => {
+        view.client.setQueryData(hostKeys.session(host.id), { ...connected, hostSessionId: nextSession.hostSessionId });
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(filesApi.open).toHaveBeenCalledTimes(3);
+      expect(filesApi.list).not.toHaveBeenCalled();
+    } finally { view.unmount(); vi.useRealTimers(); }
   });
 
   it('stops transfer polling on hide without cancelling accepted backend work', async () => {

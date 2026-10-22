@@ -147,7 +147,8 @@ export function FilesWorkspace({ host, visible, onShowOverview, presentation = '
     if (!openingSession.current || openingSession.current.owner !== connectionOwner) {
       openingSession.current = { owner: connectionOwner, promise: Promise.resolve().then(() => filesApi.open(host.id)) };
     }
-    void openingSession.current.promise.then((session) => {
+    const opening = openingSession.current;
+    void opening.promise.then((session) => {
       if (!active) return;
       if (session.hostId !== host.id || session.hostSessionId !== hostSessionId) throw new Error('The SFTP session does not match the current connection.');
       if (!activeSession.current || !sameSession(activeSession.current, session)) {
@@ -161,7 +162,11 @@ export function FilesWorkspace({ host, visible, onShowOverview, presentation = '
       setSftp(session);
       void loadDirectory(session, listing?.path ?? session.rootPath, listing ? 'history' : 'replace');
     }).catch((reason) => {
-      if (active) { openingSession.current = null; setError(applicationError(reason).message); }
+      // Retire this failed attempt even after hide, without evicting a newer owner or Promise.
+      if (openingSession.current?.owner === connectionOwner && openingSession.current.promise === opening.promise) {
+        openingSession.current = null;
+      }
+      if (active) setError(applicationError(reason).message);
     });
     return () => { active = false; };
     // Reopen after a visible disconnect/reconnect transition; keep location by host.
