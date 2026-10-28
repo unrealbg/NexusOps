@@ -115,6 +115,7 @@ impl<'a> ServiceProperties<'a> {
             try_restart_observation_id: None,
             reload_observation_id: None,
             start_observation_id: None,
+            stop_impact_inspection_id: None,
         })
     }
 }

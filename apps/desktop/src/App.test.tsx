@@ -2,9 +2,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Host, TerminalSession, UpdateOperationSnapshot } from '@nexusops/protocol';
+import type { Host, SystemdStopImpactAssessment, TerminalSession, UpdateOperationSnapshot } from '@nexusops/protocol';
 import App from './App';
-import { containersApi, hostApi, securityApi, logsApi, updateApi, terminalApi, filesApi, monitorApi } from './api/client';
+import { containersApi, hostApi, securityApi, logsApi, updateApi, terminalApi, filesApi, monitorApi, servicesApi, networkApi } from './api/client';
 import { useSelection } from './state/selection';
 import { connected, disconnected, host } from './test/fixtures';
 
@@ -26,6 +26,8 @@ vi.mock('./api/client', async (original) => ({
   terminalApi: { list: vi.fn(), open: vi.fn(), close: vi.fn(), rename: vi.fn() },
   filesApi: { open: vi.fn(), list: vi.fn(), transfers: vi.fn() },
   monitorApi: { sample: vi.fn() },
+  servicesApi: { list: vi.fn(), assessStopImpact: vi.fn() },
+  networkApi: { list: vi.fn(), routes: vi.fn(), listeningPorts: vi.fn(), dnsConfiguration: vi.fn() },
   hostApi: {
     list: vi.fn(),
     save: vi.fn(),
@@ -71,6 +73,12 @@ beforeEach(() => {
     authentication: host.connection.authentication,
     endpointPin: null,
   });
+  vi.mocked(servicesApi.list).mockReset();
+  vi.mocked(servicesApi.assessStopImpact).mockReset();
+  vi.mocked(networkApi.list).mockReset();
+  vi.mocked(networkApi.routes).mockReset();
+  vi.mocked(networkApi.listeningPorts).mockReset();
+  vi.mocked(networkApi.dnsConfiguration).mockReset();
   vi.mocked(containersApi.list).mockReset();
   vi.mocked(updateApi.state).mockReset();
   vi.mocked(updateApi.check).mockReset();
@@ -161,6 +169,63 @@ describe('unified SSH workspace', () => {
       expect(JSON.stringify(useSelection.getState())).not.toContain('synthetic-file');
       expect(storage).not.toHaveBeenCalled();
     } finally { storage.mockRestore(); }
+  });
+
+  it('isolates a late stop-impact assessment across Services and Network without replacing Terminal or Files owners', async () => {
+    const sessionId = connected.hostSessionId!;
+    let finishAssessment!: (value: SystemdStopImpactAssessment) => void;
+    vi.mocked(servicesApi.assessStopImpact).mockReturnValue(new Promise((resolve) => { finishAssessment = resolve; }));
+    vi.mocked(servicesApi.list).mockResolvedValue({
+      hostId: host.id, hostSessionId: sessionId, observedAt: '2026-10-28T00:00:00Z',
+      entries: [{
+        unit: 'fixture.service', loadState: 'loaded', activeState: 'active', subState: 'running',
+        description: 'Synthetic service', canStart: false, canReload: false,
+        resetFailedObservationId: null, tryRestartObservationId: null, reloadObservationId: null,
+        startObservationId: null, stopImpactInspectionId: 'synthetic-inspection',
+      }],
+    });
+    vi.mocked(networkApi.list).mockResolvedValue({
+      hostId: host.id, hostSessionId: sessionId, observedAt: '2026-10-28T00:00:00Z',
+      entries: [{ ifindex: 1, name: 'fixture0', operState: 'UP', mtu: 1500,
+        addresses: [{ family: 'ipv4', address: '192.0.2.10', prefixLength: 24 }] }],
+    });
+    const client = await openTerminal();
+    const terminal = screen.getByTestId(host.id + '-pty');
+    const text = screen.getByRole('textbox', { name: 'Synthetic Shell' });
+    await userEvent.type(text, ' retained');
+    await combine();
+    const files = screen.getByRole('region', { name: 'Files on ' + host.displayName });
+    const selection = screen.getByRole('checkbox', { name: 'Select synthetic-file' });
+    await userEvent.click(selection);
+    await userEvent.click(screen.getByRole('button', { name: 'Services' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    expect(servicesApi.assessStopImpact).toHaveBeenCalledExactlyOnceWith(host.id, sessionId, 'synthetic-inspection');
+    await userEvent.click(screen.getByRole('button', { name: 'Network' }));
+    await screen.findByText('fixture0');
+    expect(networkApi.list).toHaveBeenCalledExactlyOnceWith(host.id, sessionId);
+    await act(async () => { finishAssessment({
+      hostId: host.id, hostSessionId: sessionId, rootUnit: 'synthetic-impact.service',
+      observedAt: '2026-10-28T00:00:00Z', completeness: 'complete', uncertainty: 'directOnly',
+      rootConsistent: true, units: [], edges: [], conditionalConsequences: [],
+      conditionalDiagnostics: [], warnings: [], limitations: [],
+      accounting: { observedUnitRecords: 1, observedRelationshipReferences: 0,
+        observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0, retainedCandidates: 0,
+        retainedDiagnostics: 0, omittedKnownUnits: 0, omittedKnownEdges: 0,
+        omittedKnownCandidates: 0, omittedKnownDiagnostics: 0, unresolvedFrontierReferences: 0,
+        actualSshQueries: 2 },
+    }); });
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Terminal' }));
+    expect(screen.getByTestId(host.id + '-pty')).toBe(terminal);
+    expect(text).toHaveValue('Synthetic local scrollback retained');
+    expect(screen.getByRole('region', { name: 'Files on ' + host.displayName })).toBe(files);
+    expect(selection).toBeChecked();
+    expect(terminalApi.open).toHaveBeenCalledOnce();
+    expect(filesApi.open).toHaveBeenCalledOnce();
+    expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state))).not.toContain('synthetic-impact.service');
+    await userEvent.click(screen.getByRole('button', { name: 'Services' }));
+    await waitFor(() => expect(servicesApi.list).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
   });
 
   it('clamps keyboard and captured pointer resizing to the container and releases drag on hide', async () => {

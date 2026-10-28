@@ -11,6 +11,7 @@ mod parsers;
 mod probes;
 mod routes;
 mod services;
+mod stop_impact;
 
 pub use capabilities::{CapabilityRegistry, capabilities};
 pub use containers::{observe_docker_containers, parse_docker_containers};
@@ -22,6 +23,7 @@ pub use network::{observe_network, parse_network};
 pub use probes::{HostProbe, builtin_probes};
 pub use routes::{observe_routes, parse_routes};
 pub use services::{observe_services, parse_services};
+pub use stop_impact::{assess_systemd_stop_impact, parse_systemd_stop_impact};
 
 use nexus_model::{AppError, DiscoverySnapshot, ErrorCode};
 use nexus_operations::{OperationEngine, RemoteSession};

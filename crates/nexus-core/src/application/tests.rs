@@ -32,6 +32,7 @@ struct TestProvider {
     release: Notify,
     monitor: Arc<MonitorControl>,
     services: Arc<ServiceControl>,
+    stop_impact: Arc<StopImpactControl>,
     network: Arc<ServiceControl>,
     logs: Arc<ServiceControl>,
     containers: Arc<ServiceControl>,
@@ -55,6 +56,12 @@ enum ServiceReply {
     Failure,
 }
 
+#[derive(Default)]
+struct StopImpactControl {
+    responses: std::sync::Mutex<VecDeque<String>>,
+    requested_units: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
 const DEFAULT_SERVICE_SNAPSHOT: &str = "Id=sshd.service\nLoadState=loaded\nActiveState=active\nSubState=running\nDescription=OpenSSH daemon\nCanStart=no\nCanReload=yes\n\nId=broken.service\nLoadState=loaded\nActiveState=failed\nSubState=failed\nDescription=Broken fixture\nCanStart=yes\nCanReload=no\n\nId=inactive-startable.service\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nDescription=Inactive startable fixture\nCanStart=yes\nCanReload=no\n";
 
 fn start_service_snapshot(active_state: &str, sub_state: &str, can_start: &str) -> String {
@@ -69,6 +76,7 @@ impl TestProvider {
             cancel,
             monitor: self.monitor.clone(),
             services: self.services.clone(),
+            stop_impact: self.stop_impact.clone(),
             network: self.network.clone(),
             logs: self.logs.clone(),
             containers: self.containers.clone(),
@@ -99,6 +107,7 @@ struct TestSession {
     cancel: CancellationToken,
     monitor: Arc<MonitorControl>,
     services: Arc<ServiceControl>,
+    stop_impact: Arc<StopImpactControl>,
     network: Arc<ServiceControl>,
     logs: Arc<ServiceControl>,
     containers: Arc<ServiceControl>,
@@ -181,6 +190,23 @@ impl RemoteSession for TestSession {
                 "[{\"ifindex\":1,\"ifname\":\"lo\",\"addr_info\":[{\"family\":\"inet\",\"local\":\"127.0.0.1\",\"prefixlen\":8}]}]"
             },
         }.into())
+    }
+    async fn execute_stop_impact(
+        &self,
+        query: &nexus_operations::SystemdStopImpactQuery,
+        _: CancellationToken,
+    ) -> Result<String, AppError> {
+        self.stop_impact
+            .requested_units
+            .lock()
+            .unwrap()
+            .push(query.units().to_vec());
+        self.stop_impact
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| AppError::new(ErrorCode::Discovery, "Test stop-impact queue exhausted."))
     }
     async fn disconnect(&self) -> Result<(), AppError> {
         self.cancel.cancel();
@@ -311,6 +337,7 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
             replies: std::sync::Mutex::new(VecDeque::new()),
             calls: AtomicUsize::new(0),
         }),
+        stop_impact: Arc::new(StopImpactControl::default()),
         logs: Arc::new(ServiceControl {
             stall: AtomicBool::new(false),
             entered: Semaphore::new(0),
@@ -356,6 +383,8 @@ fn setup(stall: bool) -> (tempfile::TempDir, Arc<Application>, Arc<TestProvider>
         service_gates: Mutex::new(HashMap::new()),
         service_limit: Semaphore::new(4),
         service_observations: crate::service_observations::ServiceObservationStore::default(),
+        stop_impact_inspections: crate::stop_impact_inspections::StopImpactInspectionStore::default(
+        ),
         network_gates: Mutex::new(HashMap::new()),
         network_limit: Semaphore::new(4),
         log_gates: Mutex::new(HashMap::new()),
@@ -404,6 +433,96 @@ async fn add_connected_host(app: &Application) -> (HostId, HostSessionId) {
         .host_session_id
         .unwrap();
     (host.id, session)
+}
+
+#[tokio::test]
+async fn ri01_stop_impact_rejects_wrong_root_with_valid_inspection_and_session() {
+    let (_dir, app, provider) = setup(false);
+    let (host_id, host_session_id) = add_connected_host(&app).await;
+    let snapshot = app
+        .list_host_services(host_id, host_session_id)
+        .await
+        .unwrap();
+    let inspection_id = snapshot
+        .entries
+        .iter()
+        .find(|entry| entry.unit == "sshd.service")
+        .and_then(|entry| entry.stop_impact_inspection_id)
+        .expect("current inventory must mint a real inspection capability");
+    let slot = app.slot(host_id).await;
+    let generation = {
+        let data = slot.data.lock().await;
+        assert_eq!(data.view.state, ConnectionState::Connected);
+        assert_eq!(data.connection_id, Some(host_session_id));
+        assert_eq!(data.view.host_session_id, Some(host_session_id));
+        assert!(!data.cancel.is_cancelled());
+        assert!(!data.transport.as_ref().unwrap().is_closed());
+        data.generation
+    };
+    let binding = nexus_remote_operations::AuthorityBinding {
+        host_id,
+        host_session_id,
+        generation,
+    };
+    assert_eq!(
+        app.stop_impact_inspections
+            .resolve(inspection_id, binding)
+            .unwrap(),
+        "sshd.service"
+    );
+
+    let unrelated = nexus_operations::SYSTEMD_STOP_IMPACT_PROPERTIES
+        .iter()
+        .map(|property| {
+            let value = match *property {
+                "Id" | "Names" => "unrelated.service",
+                "LoadState" => "loaded",
+                "ActiveState" => "active",
+                "SubState" => "running",
+                "CanStop" => "yes",
+                "RefuseManualStop" | "NeedDaemonReload" | "StopWhenUnneeded" => "no",
+                "OnSuccessJobMode" => "fail",
+                "OnFailureJobMode" => "replace",
+                "SuccessAction" | "FailureAction" => "none",
+                _ => "",
+            };
+            format!("{property}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let parsed = nexus_discovery::parse_systemd_stop_impact(&unrelated).unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].id, "unrelated.service");
+    assert!(!parsed[0].names.iter().any(|name| name == "sshd.service"));
+    provider
+        .stop_impact
+        .responses
+        .lock()
+        .unwrap()
+        .extend([unrelated.clone(), unrelated]);
+
+    let error = app
+        .assess_service_stop_impact(host_id, host_session_id, inspection_id)
+        .await
+        .expect_err("valid ownership must not publish an unrelated-root assessment");
+    assert_eq!(error.code, ErrorCode::Discovery);
+    let queries = provider.stop_impact.requested_units.lock().unwrap().clone();
+    assert_eq!(queries, vec![vec!["sshd.service".to_owned()]]);
+    assert_eq!(provider.stop_impact.responses.lock().unwrap().len(), 1);
+    assert_eq!(provider.service_mutations.load(Ordering::SeqCst), 0);
+    let data = slot.data.lock().await;
+    assert_eq!(data.generation, generation);
+    assert_eq!(data.view.state, ConnectionState::Connected);
+    assert_eq!(data.connection_id, Some(host_session_id));
+    assert!(!data.cancel.is_cancelled());
+    assert!(!data.transport.as_ref().unwrap().is_closed());
+    drop(data);
+    assert_eq!(
+        app.stop_impact_inspections
+            .resolve(inspection_id, binding)
+            .unwrap(),
+        "sshd.service"
+    );
 }
 
 async fn mint_start_plan(

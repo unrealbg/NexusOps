@@ -9,6 +9,7 @@ mod security;
 mod services;
 mod session;
 mod sftp;
+mod stop_impact;
 mod terminal;
 mod update;
 pub use containers::*;
@@ -21,6 +22,7 @@ pub use security::*;
 pub use services::*;
 pub use session::*;
 pub use sftp::*;
+pub use stop_impact::*;
 pub use terminal::*;
 pub use update::*;
 

@@ -1,12 +1,13 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { Host, ServiceSnapshot } from '@nexusops/protocol';
+import type { Host, ServiceSnapshot, SystemdStopImpactAssessment } from '@nexusops/protocol';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   state: 'disconnected',
   sessionId: null as string | null,
   list: vi.fn(),
+  assessStopImpact: vi.fn(),
   planResetFailed: vi.fn(),
   discardResetFailed: vi.fn(),
   executeResetFailed: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock('../../api/queries', () => ({
 }));
 vi.mock('../../api/client', () => ({ servicesApi: {
   list: mocks.list,
+  assessStopImpact: mocks.assessStopImpact,
   planResetFailed: mocks.planResetFailed,
   discardResetFailed: mocks.discardResetFailed,
   executeResetFailed: mocks.executeResetFailed,
@@ -49,9 +51,23 @@ function snapshot(hostId = host.id, hostSessionId = A): ServiceSnapshot {
   return {
     hostId, hostSessionId, observedAt: '2026-09-26T12:00:00Z',
     entries: [
-      { unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running', description: 'OpenSSH server', canStart: false, canReload: false, resetFailedObservationId: null , tryRestartObservationId: null, reloadObservationId: null, startObservationId: null},
-      { unit: 'future.service', loadState: 'loaded', activeState: 'repairing', subState: 'unknown', description: '<script>bad</script> text', canStart: false, canReload: false, resetFailedObservationId: null , tryRestartObservationId: null, reloadObservationId: null, startObservationId: null},
+      { unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running', description: 'OpenSSH server', canStart: false, canReload: false, resetFailedObservationId: null , tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null},
+      { unit: 'future.service', loadState: 'loaded', activeState: 'repairing', subState: 'unknown', description: '<script>bad</script> text', canStart: false, canReload: false, resetFailedObservationId: null , tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null},
     ],
+  };
+}
+function stopImpactAssessment(hostSessionId = A): SystemdStopImpactAssessment {
+  return {
+    hostId: host.id, hostSessionId, rootUnit: 'ssh.service', observedAt: '2026-10-10T00:00:00Z',
+    completeness: 'complete', uncertainty: 'directOnly', rootConsistent: true,
+    units: [], edges: [], conditionalConsequences: [], conditionalDiagnostics: [], warnings: [], limitations: [],
+    accounting: {
+      observedUnitRecords: 1, observedRelationshipReferences: 0, observedCandidateReferences: 0,
+      retainedUnits: 1, retainedEdges: 0, retainedCandidates: 0, retainedDiagnostics: 0,
+      omittedKnownUnits: 0, omittedKnownEdges: 0, omittedKnownCandidates: 0,
+      omittedKnownDiagnostics: 0, unresolvedFrontierReferences: 0,
+      actualSshQueries: 2,
+    },
   };
 }
 function deferred<T>() {
@@ -64,6 +80,7 @@ beforeEach(() => {
   mocks.state = 'disconnected';
   mocks.sessionId = null;
   mocks.list.mockReset();
+  mocks.assessStopImpact.mockReset();
   mocks.planResetFailed.mockReset();
   mocks.discardResetFailed.mockReset().mockResolvedValue(true);
   mocks.executeResetFailed.mockReset();
@@ -106,6 +123,150 @@ describe('session-bound Services workspace', () => {
     expect(mocks.list).toHaveBeenCalledTimes(2);
     await act(async () => { refresh.resolve(snapshot()); });
     await waitFor(() => expect(button).toBeEnabled());
+  });
+
+  it('requests one opaque read-only assessment and renders bounded diagnostic truth', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    const value = snapshot();
+    value.entries[0]!.stopImpactInspectionId = 'inspection-a';
+    mocks.list.mockResolvedValueOnce(value);
+    mocks.assessStopImpact.mockResolvedValueOnce({
+      hostId: host.id,
+      hostSessionId: A,
+      rootUnit: 'ssh.service',
+      observedAt: '2026-10-09T00:00:00Z',
+      completeness: 'partial',
+      uncertainty: 'unknownImpact',
+      rootConsistent: false,
+      units: [{
+        canonicalUnit: 'ssh.service', loadState: 'loaded', activeState: 'active',
+        subState: 'running', canStop: true, refuseManualStop: false,
+        stopWhenUnneeded: false, hasPendingJob: false, depth: 0, provenance: 'direct',
+      }],
+      edges: [{
+        source: 'ssh.service', target: 'worker.service', relationship: 'requiredBy',
+        provenance: 'direct',
+      }],
+      conditionalConsequences: [{
+        canonicalUnit: 'cache.service', sources: ['ssh.service'],
+        classification: 'retainedByUnaffectedReference',
+      }],
+      conditionalDiagnostics: [
+        { canonicalUnit: 'ssh.service', kind: 'onFailureActivation', relatedUnit: 'recovery.service', jobMode: null, managerAction: null },
+        { canonicalUnit: 'ssh.service', kind: 'upheldByReactivation', relatedUnit: 'guardian.service', jobMode: null, managerAction: null },
+        { canonicalUnit: 'ssh.service', kind: 'successManagerAction', relatedUnit: null, jobMode: null, managerAction: 'reboot' },
+      ],
+      accounting: {
+        observedUnitRecords: 1, observedRelationshipReferences: 0,
+        observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0,
+        retainedCandidates: 0, retainedDiagnostics: 3, omittedKnownUnits: 0,
+        omittedKnownEdges: 0, omittedKnownCandidates: 0, omittedKnownDiagnostics: 0,
+        unresolvedFrontierReferences: 2, actualSshQueries: 2,
+      },
+      warnings: ['concurrentTopologyChange'],
+      limitations: ['systemd topology only'],
+    });
+    render(<ServicesWorkspace host={host} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    expect(mocks.assessStopImpact).toHaveBeenCalledExactlyOnceWith(host.id, A, 'inspection-a');
+    const dialog = await screen.findByRole('dialog', { name: 'Read-only stop impact' });
+    expect(within(dialog).getByText(/does not authorize or perform a stop/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/Absence of an observed relationship/)).toBeInTheDocument();
+    expect(within(dialog).getAllByText('ssh.service')).toHaveLength(7);
+    expect(within(dialog).getByText('requiredBy')).toBeInTheDocument();
+    expect(within(dialog).getByText('worker.service')).toBeInTheDocument();
+    expect(within(dialog).getByText('retainedByUnaffectedReference')).toBeInTheDocument();
+    expect(within(dialog).getByText('cache.service')).toBeInTheDocument();
+    expect(within(dialog).getByText('onFailureActivation')).toBeInTheDocument();
+    expect(within(dialog).getByText('recovery.service')).toBeInTheDocument();
+    expect(within(dialog).getByText('upheldByReactivation')).toBeInTheDocument();
+    expect(within(dialog).getByText('guardian.service')).toBeInTheDocument();
+    expect(within(dialog).getByText('successManagerAction')).toBeInTheDocument();
+    expect(within(dialog).getByText('reboot')).toBeInTheDocument();
+    expect(within(dialog).getByText('Retained passive diagnostics')).toBeInTheDocument();
+    expect(within(dialog).getByText('Omitted known passive diagnostics')).toBeInTheDocument();
+    expect(within(dialog).getByText(/do not prove causation/)).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: /stop/i })).not.toBeInTheDocument();
+    expect(within(dialog).getByText(/concurrentTopologyChange/)).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+  });
+
+  it('drops delayed stop-impact results after session turnover', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    const value = snapshot();
+    value.entries[0]!.stopImpactInspectionId = 'inspection-a';
+    const delayed = deferred<unknown>();
+    mocks.list.mockResolvedValueOnce(value).mockResolvedValueOnce(snapshot(host.id, B));
+    mocks.assessStopImpact.mockReturnValueOnce(delayed.promise);
+    const view = render(<ServicesWorkspace host={host} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    mocks.state = 'connected'; mocks.sessionId = B;
+    view.rerender(<ServicesWorkspace host={host} />);
+    await act(async () => { delayed.resolve({
+      hostId: host.id, hostSessionId: A, rootUnit: 'ssh.service', observedAt: '',
+      completeness: 'complete', uncertainty: 'directOnly', rootConsistent: true,
+      units: [], edges: [], conditionalConsequences: [], conditionalDiagnostics: [], warnings: [], limitations: [], accounting: {
+        observedUnitRecords: 1, observedRelationshipReferences: 0,
+        observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0,
+        retainedCandidates: 0, retainedDiagnostics: 0, omittedKnownUnits: 0,
+        omittedKnownEdges: 0, omittedKnownCandidates: 0, omittedKnownDiagnostics: 0,
+        unresolvedFrontierReferences: 0, actualSshQueries: 2,
+      },
+    }); });
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+  });
+
+  it('does not reopen diagnostics when assessment settles before an in-flight refresh', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    const value = snapshot();
+    value.entries[0]!.stopImpactInspectionId = 'inspection-a';
+    const assessment = deferred<SystemdStopImpactAssessment>();
+    const refresh = deferred<ServiceSnapshot>();
+    mocks.list.mockResolvedValueOnce(value).mockReturnValueOnce(refresh.promise);
+    mocks.assessStopImpact.mockReturnValueOnce(assessment.promise);
+    render(<ServicesWorkspace host={host} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await act(async () => { assessment.resolve(stopImpactAssessment()); });
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+    await act(async () => { refresh.resolve(value); });
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+  });
+
+  it('dismisses a visible assessment as soon as refresh begins', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    const value = snapshot();
+    value.entries[0]!.stopImpactInspectionId = 'inspection-a';
+    const refresh = deferred<ServiceSnapshot>();
+    mocks.list.mockResolvedValueOnce(value).mockReturnValueOnce(refresh.promise);
+    mocks.assessStopImpact.mockResolvedValueOnce(stopImpactAssessment());
+    render(<ServicesWorkspace host={host} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    expect(await screen.findByRole('dialog', { name: 'Read-only stop impact' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+    await act(async () => { refresh.resolve(value); });
+  });
+
+  it('does not reopen diagnostics when refresh settles before the invalidated assessment', async () => {
+    mocks.state = 'connected'; mocks.sessionId = A;
+    const value = snapshot();
+    value.entries[0]!.stopImpactInspectionId = 'inspection-a';
+    const assessment = deferred<SystemdStopImpactAssessment>();
+    const refresh = deferred<ServiceSnapshot>();
+    mocks.list.mockResolvedValueOnce(value).mockReturnValueOnce(refresh.promise);
+    mocks.assessStopImpact.mockReturnValueOnce(assessment.promise);
+    render(<ServicesWorkspace host={host} />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    const assessButton = screen.getByRole('button', { name: 'Assess stop impact' });
+    expect(assessButton).toBeDisabled();
+    await userEvent.click(assessButton);
+    expect(mocks.assessStopImpact).toHaveBeenCalledTimes(1);
+    await act(async () => { refresh.resolve(value); });
+    await act(async () => { assessment.resolve(stopImpactAssessment()); });
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
   });
 
   it('distinguishes empty, unavailable and failed refresh with same-session snapshot', async () => {
@@ -161,10 +322,10 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null,
+        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null,
       }, {
         unit: 'text-only.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'No backend authority', canStart: false, canReload: false, resetFailedObservationId: null, tryRestartObservationId: null, reloadObservationId: null, startObservationId: null,
+        description: 'No backend authority', canStart: false, canReload: false, resetFailedObservationId: null, tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null,
       }],
     };
     mocks.list.mockResolvedValueOnce(observed);
@@ -215,7 +376,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null,
+        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null,
       }],
     });
     mocks.planResetFailed.mockResolvedValueOnce({
@@ -248,7 +409,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running',
-        description: 'OpenSSH server', canStart: false, canReload: false, resetFailedObservationId: null, tryRestartObservationId: 'restart-observation', reloadObservationId: null, startObservationId: null,
+        description: 'OpenSSH server', canStart: false, canReload: false, resetFailedObservationId: null, tryRestartObservationId: 'restart-observation', reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null,
       }],
     });
     mocks.planTryRestart.mockResolvedValueOnce({
@@ -283,7 +444,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running',
-        description: 'OpenSSH server', canStart: false, canReload: false, resetFailedObservationId: null, tryRestartObservationId: 'restart-observation', reloadObservationId: null, startObservationId: null,
+        description: 'OpenSSH server', canStart: false, canReload: false, resetFailedObservationId: null, tryRestartObservationId: 'restart-observation', reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null,
       }],
     });
     mocks.planTryRestart.mockResolvedValueOnce({
@@ -306,7 +467,7 @@ describe('session-bound Services workspace', () => {
       entries: [{
         unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running',
         description: 'OpenSSH server', canStart: false, canReload: true, resetFailedObservationId: null,
-        tryRestartObservationId: 'restart-observation', reloadObservationId: 'reload-observation', startObservationId: null,
+        tryRestartObservationId: 'restart-observation', reloadObservationId: 'reload-observation', startObservationId: null, stopImpactInspectionId: null,
       }],
     });
     mocks.planReload.mockResolvedValueOnce({
@@ -342,7 +503,7 @@ describe('session-bound Services workspace', () => {
       entries: [{
         unit: 'ssh.service', loadState: 'loaded', activeState: 'active', subState: 'running',
         description: 'OpenSSH server', canStart: false, canReload: true, resetFailedObservationId: null,
-        tryRestartObservationId: 'restart-observation', reloadObservationId: 'reload-observation', startObservationId: null,
+        tryRestartObservationId: 'restart-observation', reloadObservationId: 'reload-observation', startObservationId: null, stopImpactInspectionId: null,
       }],
     });
     mocks.planReload.mockResolvedValueOnce({
@@ -365,7 +526,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null,
+        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null,
       }],
     }).mockResolvedValueOnce(snapshot(host.id, B));
     const delayed = deferred<{
@@ -393,7 +554,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null,
+        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null,
       }],
     };
     mocks.list.mockResolvedValueOnce(observed)
@@ -426,7 +587,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null,
+        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null,
       }],
     });
     mocks.planResetFailed.mockResolvedValueOnce({
@@ -457,25 +618,25 @@ describe('session-bound Services workspace', () => {
           unit: 'inactive-startable.service', loadState: 'loaded', activeState: 'inactive', subState: 'dead',
           description: 'Startable fixture', canStart: true, canReload: false,
           resetFailedObservationId: null, tryRestartObservationId: null, reloadObservationId: null,
-          startObservationId: 'start-observation',
+          startObservationId: 'start-observation', stopImpactInspectionId: null,
         },
         {
           unit: 'inactive-disabled.service', loadState: 'loaded', activeState: 'inactive', subState: 'dead',
           description: 'Not startable', canStart: false, canReload: false,
           resetFailedObservationId: null, tryRestartObservationId: null, reloadObservationId: null,
-          startObservationId: null,
+          startObservationId: null, stopImpactInspectionId: null,
         },
         {
           unit: 'running.service', loadState: 'loaded', activeState: 'active', subState: 'running',
           description: 'Running', canStart: true, canReload: false,
           resetFailedObservationId: null, tryRestartObservationId: 'restart-observation', reloadObservationId: null,
-          startObservationId: null,
+          startObservationId: null, stopImpactInspectionId: null,
         },
         {
           unit: 'failed.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
           description: 'Failed', canStart: true, canReload: false,
           resetFailedObservationId: 'reset-observation', tryRestartObservationId: null, reloadObservationId: null,
-          startObservationId: null,
+          startObservationId: null, stopImpactInspectionId: null,
         },
       ],
     } satisfies ServiceSnapshot;
@@ -527,7 +688,7 @@ describe('session-bound Services workspace', () => {
       ...snapshot(),
       entries: [{
         unit: 'broken.service', loadState: 'loaded', activeState: 'failed', subState: 'failed',
-        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null,
+        description: 'Broken fixture', canStart: false, canReload: false, resetFailedObservationId: 'observation-a', tryRestartObservationId: null, reloadObservationId: null, startObservationId: null, stopImpactInspectionId: null,
       }],
     };
     mocks.state = 'connected'; mocks.sessionId = A;
