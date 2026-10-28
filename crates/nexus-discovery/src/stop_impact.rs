@@ -1666,11 +1666,15 @@ pub async fn assess_systemd_stop_impact(
     if initial.len() != 1 {
         return Err(invalid());
     }
+    let initial_root = initial.remove(0);
+    if initial_root.id != root_unit && !initial_root.names.contains(&root_unit) {
+        return Err(invalid());
+    }
     let mut builder = Builder::new(
         host_id,
         host_session_id,
         root_unit,
-        initial.remove(0),
+        initial_root,
         initial_output.len(),
     );
     let root = builder.root_initial.id.clone();
@@ -2397,6 +2401,189 @@ mod tests {
         fn is_closed(&self) -> bool {
             false
         }
+    }
+
+    #[tokio::test]
+    async fn ri01_rejects_unrelated_initial_root_before_any_followup_query() {
+        let unrelated = record("unrelated.service", "", "", false);
+        let parsed = parse_systemd_stop_impact(&unrelated).unwrap();
+        assert_ne!(parsed[0].id, "root.service");
+        assert!(!parsed[0].names.iter().any(|name| name == "root.service"));
+        for final_response in [unrelated.clone(), record("root.service", "", "", false)] {
+            let commands = Arc::new(Mutex::new(Vec::new()));
+            let session = Session {
+                responses: Mutex::new(VecDeque::from([unrelated.clone(), final_response])),
+                commands: commands.clone(),
+            };
+            let error = assess_systemd_stop_impact(
+                &session,
+                CancellationToken::new(),
+                HostId::new(),
+                HostSessionId::new(),
+                "root.service".into(),
+            )
+            .await
+            .expect_err("unrelated initial root must not seed an assessment");
+            assert_eq!(error.code, ErrorCode::Discovery);
+            let queries = commands.lock().unwrap().clone();
+            assert_eq!(queries.len(), 1);
+            assert!(queries[0].ends_with(" show -- 'root.service'"));
+            assert_eq!(session.responses.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn ri01_accepts_canonical_names_and_following_root_matches() {
+        let canonical = record("canonical.service", "", "", false);
+        let alias = canonical.replace(
+            "Names=canonical.service",
+            "Names=canonical.service alias.service",
+        );
+        let following = record("alias.service", "", "", false)
+            .replace("Following=", "Following=canonical.service");
+        for (requested, initial, expected_root) in [
+            ("canonical.service", canonical, "canonical.service"),
+            ("alias.service", alias, "canonical.service"),
+            ("alias.service", following, "canonical.service"),
+        ] {
+            let commands = Arc::new(Mutex::new(Vec::new()));
+            let session = Session {
+                responses: Mutex::new(VecDeque::from([initial.clone(), initial])),
+                commands: commands.clone(),
+            };
+            let assessment = assess_systemd_stop_impact(
+                &session,
+                CancellationToken::new(),
+                HostId::new(),
+                HostSessionId::new(),
+                requested.into(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(assessment.root_unit, expected_root);
+            assert!(assessment.root_consistent);
+            assert_eq!(assessment.completeness, StopImpactCompleteness::Complete);
+            assert_eq!(assessment.uncertainty, StopImpactUncertainty::DirectOnly);
+            let queries = commands.lock().unwrap().clone();
+            assert_eq!(queries.len(), 2);
+            assert!(
+                queries
+                    .iter()
+                    .all(|query| query.ends_with(&format!(" show -- '{requested}'")))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ri01_keeps_changed_or_malformed_final_root_partial_and_unknown() {
+        let root = record("root.service", "", "", false);
+        let alias = record("canonical.service", "", "", false).replace(
+            "Names=canonical.service",
+            "Names=canonical.service alias.service",
+        );
+        for (requested, initial, final_response) in [
+            (
+                "root.service",
+                root.clone(),
+                record("other.service", "", "", false),
+            ),
+            (
+                "root.service",
+                root.clone(),
+                root.replace("CanStop=yes\n", ""),
+            ),
+            (
+                "alias.service",
+                alias,
+                record("canonical.service", "", "", false),
+            ),
+        ] {
+            let commands = Arc::new(Mutex::new(Vec::new()));
+            let session = Session {
+                responses: Mutex::new(VecDeque::from([initial, final_response])),
+                commands: commands.clone(),
+            };
+            let assessment = assess_systemd_stop_impact(
+                &session,
+                CancellationToken::new(),
+                HostId::new(),
+                HostSessionId::new(),
+                requested.into(),
+            )
+            .await
+            .unwrap();
+            assert!(!assessment.root_consistent);
+            assert_eq!(assessment.completeness, StopImpactCompleteness::Partial);
+            assert_eq!(assessment.uncertainty, StopImpactUncertainty::UnknownImpact);
+            assert!(
+                assessment
+                    .warnings
+                    .contains(&StopImpactWarning::ConcurrentTopologyChange)
+            );
+            assert_eq!(commands.lock().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn ri01_keeps_malformed_initial_root_fail_closed() {
+        let root = record("root.service", "", "", false);
+        for malformed in [
+            format!("{root}\nId=again.service"),
+            root.replace("CanStop=yes\n", ""),
+            format!("{root}\n\n{root}"),
+        ] {
+            let commands = Arc::new(Mutex::new(Vec::new()));
+            let session = Session {
+                responses: Mutex::new(VecDeque::from([malformed])),
+                commands: commands.clone(),
+            };
+            let error = assess_systemd_stop_impact(
+                &session,
+                CancellationToken::new(),
+                HostId::new(),
+                HostSessionId::new(),
+                "root.service".into(),
+            )
+            .await
+            .expect_err("malformed initial record must fail closed");
+            assert_eq!(error.code, ErrorCode::Discovery);
+            assert_eq!(commands.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn ri01_keeps_unrelated_non_root_batch_fail_closed() {
+        let root = record("root.service", "child.service", "", false);
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let session = Session {
+            responses: Mutex::new(VecDeque::from([
+                root.clone(),
+                record("unrelated.service", "", "", false),
+                root,
+            ])),
+            commands: commands.clone(),
+        };
+        let assessment = assess_systemd_stop_impact(
+            &session,
+            CancellationToken::new(),
+            HostId::new(),
+            HostSessionId::new(),
+            "root.service".into(),
+        )
+        .await
+        .unwrap();
+        assert!(assessment.root_consistent);
+        assert_eq!(assessment.completeness, StopImpactCompleteness::Partial);
+        assert_eq!(assessment.uncertainty, StopImpactUncertainty::UnknownImpact);
+        assert!(
+            assessment
+                .warnings
+                .contains(&StopImpactWarning::UnsupportedProperty)
+        );
+        let queries = commands.lock().unwrap().clone();
+        assert_eq!(queries.len(), 3);
+        assert!(queries[1].ends_with(" show -- 'child.service'"));
+        assert!(queries[2].ends_with(" show -- 'root.service'"));
     }
 
     #[tokio::test]
