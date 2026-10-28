@@ -8,6 +8,9 @@ import type {
   HostKeyRotationPlan,
   HostMonitorSample,
   NetworkSnapshot,
+  NetworkRouteSnapshot,
+  ListeningPortSnapshot,
+  DnsConfigurationSnapshot,
   SystemJournalSnapshot,
   ContainerSnapshot,
   ServiceSnapshot,
@@ -199,6 +202,12 @@ export const servicesApi = {
 export const networkApi = {
   list: (hostId: string, hostSessionId: string) =>
     request<NetworkSnapshot>('list_host_network', { hostId, hostSessionId }),
+  routes: (hostId: string, hostSessionId: string) =>
+    request<NetworkRouteSnapshot>('list_host_routes', { hostId, hostSessionId }),
+  listeningPorts: (hostId: string, hostSessionId: string) =>
+    request<ListeningPortSnapshot>('list_host_listening_ports', { hostId, hostSessionId }),
+  dnsConfiguration: (hostId: string, hostSessionId: string) =>
+    request<DnsConfigurationSnapshot>('list_host_dns_configuration', { hostId, hostSessionId }),
 };
 
 /** Sensitive, session-owned journal snapshot; never cache or persist the result. */

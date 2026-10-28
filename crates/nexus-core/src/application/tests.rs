@@ -168,6 +168,10 @@ impl RemoteSession for TestSession {
                     None => DEFAULT_SERVICE_SNAPSHOT,
                 }
             },
+            ReadOnlyCommand::ListeningPorts => "tcp LISTEN 0 128 192.0.2.10:8080 0.0.0.0:*\n",
+            ReadOnlyCommand::DnsConfiguration => "nameserver 127.0.0.53\n",
+            ReadOnlyCommand::NetworkRoutesV4 => r#"[{"dst":"default","gateway":"192.0.2.1","dev":"eth0"}]"#,
+            ReadOnlyCommand::NetworkRoutesV6 => r#"[{"dst":"2001:db8::/64","dev":"eth0","metric":256}]"#,
             ReadOnlyCommand::NetworkAddresses => {
                 if self.network.stall.load(Ordering::SeqCst) {
                     self.network.entered.add_permits(1);

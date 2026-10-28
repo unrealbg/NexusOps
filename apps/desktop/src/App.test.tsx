@@ -1,12 +1,21 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Host, UpdateOperationSnapshot } from '@nexusops/protocol';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Host, SystemdStopImpactAssessment, TerminalSession, UpdateOperationSnapshot } from '@nexusops/protocol';
 import App from './App';
-import { containersApi, hostApi, securityApi, logsApi, updateApi } from './api/client';
+import { containersApi, hostApi, securityApi, logsApi, updateApi, terminalApi, filesApi, monitorApi, servicesApi, networkApi } from './api/client';
 import { useSelection } from './state/selection';
 import { connected, disconnected, host } from './test/fixtures';
+
+// Real workspace orchestration with an inert xterm boundary. TerminalWorkspace's
+// own tests exercise the real TerminalPane against the established xterm mocks.
+vi.mock('./features/terminal/TerminalPane', () => ({
+  TerminalPane: ({ session, active, visible }: { session: TerminalSession; active: boolean; visible: boolean }) =>
+    <div hidden={!active} data-testid={session.id} data-visible={visible}>
+      <textarea aria-label={`Synthetic ${session.label}`} defaultValue="Synthetic local scrollback" />
+    </div>,
+}));
 
 vi.mock('./api/client', async (original) => ({
   ...(await original<typeof import('./api/client')>()),
@@ -14,6 +23,11 @@ vi.mock('./api/client', async (original) => ({
   logsApi: { list: vi.fn() },
   containersApi: { list: vi.fn() },
   updateApi: { state: vi.fn(), check: vi.fn(), download: vi.fn(), install: vi.fn() },
+  terminalApi: { list: vi.fn(), open: vi.fn(), close: vi.fn(), rename: vi.fn() },
+  filesApi: { open: vi.fn(), list: vi.fn(), transfers: vi.fn() },
+  monitorApi: { sample: vi.fn() },
+  servicesApi: { list: vi.fn(), assessStopImpact: vi.fn() },
+  networkApi: { list: vi.fn(), routes: vi.fn(), listeningPorts: vi.fn(), dnsConfiguration: vi.fn() },
   hostApi: {
     list: vi.fn(),
     save: vi.fn(),
@@ -42,6 +56,16 @@ beforeEach(() => {
   useSelection.setState({ hostId: null });
   vi.mocked(hostApi.list).mockResolvedValue([]);
   vi.mocked(hostApi.session).mockResolvedValue(disconnected);
+  vi.mocked(terminalApi.list).mockReset().mockResolvedValue([]);
+  vi.mocked(terminalApi.open).mockReset();
+  vi.mocked(filesApi.open).mockReset();
+  vi.mocked(filesApi.list).mockReset();
+  vi.mocked(filesApi.transfers).mockReset().mockResolvedValue([]);
+  vi.mocked(monitorApi.sample).mockReset().mockImplementation(async (hostId, hostSessionId) => ({
+    hostId, hostSessionId, observedAt: new Date().toISOString(), cpuUsagePercent: null,
+    memoryUsedBytes: null, memoryTotalBytes: null, rootUsedBytes: null, rootTotalBytes: null,
+    swapUsedBytes: null, swapTotalBytes: null, networkRxBytesPerSecond: null, networkTxBytesPerSecond: null, warnings: [],
+  }));
   vi.mocked(securityApi.get).mockResolvedValue({
     hostId: host.id,
     hostname: host.connection.hostname,
@@ -49,6 +73,12 @@ beforeEach(() => {
     authentication: host.connection.authentication,
     endpointPin: null,
   });
+  vi.mocked(servicesApi.list).mockReset();
+  vi.mocked(servicesApi.assessStopImpact).mockReset();
+  vi.mocked(networkApi.list).mockReset();
+  vi.mocked(networkApi.routes).mockReset();
+  vi.mocked(networkApi.listeningPorts).mockReset();
+  vi.mocked(networkApi.dnsConfiguration).mockReset();
   vi.mocked(containersApi.list).mockReset();
   vi.mocked(updateApi.state).mockReset();
   vi.mocked(updateApi.check).mockReset();
@@ -61,6 +91,246 @@ beforeEach(() => {
     announcementId: null,
     verifiedArtifactId: null,
     installationSupported: false,
+  });
+});
+
+describe('unified SSH workspace', () => {
+  let width = 1_000;
+  let measure: ReturnType<typeof vi.spyOn>;
+  const observers: Array<{ notify: () => void; disconnect: ReturnType<typeof vi.fn> }> = [];
+  beforeEach(() => {
+    width = 1_000;
+    observers.length = 0;
+    measure = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
+      width, height: 600, x: 0, y: 0, left: 0, top: 0, right: width, bottom: 600, toJSON() {},
+    }));
+    vi.stubGlobal('ResizeObserver', class {
+      disconnect = vi.fn();
+      constructor(notify: () => void) { observers.push({ notify, disconnect: this.disconnect }); }
+      observe() {}
+    });
+    vi.stubGlobal('PointerEvent', class extends MouseEvent {
+      pointerId: number;
+      constructor(type: string, init: PointerEventInit) { super(type, init); this.pointerId = init.pointerId ?? 0; }
+    });
+    vi.mocked(hostApi.list).mockResolvedValue([host]);
+    vi.mocked(hostApi.session).mockResolvedValue(connected);
+    vi.mocked(terminalApi.open).mockImplementation(async (id, size) => ({ id: `${id}-pty`, hostId: id,
+      hostSessionId: connected.hostSessionId!, label: 'Shell', size, state: 'open', error: null }));
+    vi.mocked(filesApi.open).mockImplementation(async (id) => ({ id: `${id}-sftp`, hostId: id,
+      hostSessionId: connected.hostSessionId!, protocolVersion: 3, rootPath: '/synthetic', extensions: [],
+      limits: { maxPacketBytes: '262144', maxReadBytes: '65536', maxWriteBytes: '65536', maxOpenHandles: '64', clientChunkBytes: '65536', listingEntryCap: 5000 } }));
+    vi.mocked(filesApi.list).mockImplementation(async (session, path) => ({ hostId: session.hostId,
+      hostSessionId: session.hostSessionId, sftpSessionId: session.id, path, partial: false, entryCap: 5000,
+      entries: [{ name: 'synthetic-file', displayName: 'synthetic-file', path: `${path}/synthetic-file`,
+        kind: 'file', sizeBytes: '1', modifiedAt: null, permissions: null, uid: null, gid: null }] }));
+  });
+  afterEach(() => { measure.mockRestore(); vi.unstubAllGlobals(); });
+  async function openTerminal() {
+    const client = renderApp();
+    await userEvent.click(await screen.findByRole('button', { name: `Open ${host.displayName}` }));
+    await userEvent.click(screen.getByRole('button', { name: 'Terminal' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Open terminal' }));
+    await screen.findByRole('textbox', { name: 'Synthetic Shell' });
+    return client;
+  }
+  async function combine() {
+    await userEvent.click(screen.getByRole('button', { name: 'Combine Terminal + Files' }));
+    await screen.findByDisplayValue('/synthetic');
+  }
+
+  it('switches all three modes with stable PTY, SFTP, selection and private component state', async () => {
+    const storage = vi.spyOn(Storage.prototype, 'setItem');
+    try {
+      const client = await openTerminal();
+      const terminal = screen.getByTestId(`${host.id}-pty`);
+      const text = screen.getByRole('textbox', { name: 'Synthetic Shell' });
+      await userEvent.type(text, ' retained');
+      await combine();
+      const files = screen.getByRole('region', { name: `Files on ${host.displayName}` });
+      const selected = screen.getByRole('checkbox', { name: 'Select synthetic-file' });
+      await userEvent.click(selected);
+      await userEvent.click(screen.getByRole('button', { name: 'Open full Files view' }));
+      expect(terminal).not.toBeVisible();
+      expect(selected).toBeChecked();
+      await userEvent.click(screen.getByRole('button', { name: 'Terminal' }));
+      expect(screen.getByTestId(`${host.id}-pty`)).toBe(terminal);
+      expect(text).toHaveValue('Synthetic local scrollback retained');
+      expect(screen.getByRole('region', { name: `Files on ${host.displayName}` })).toBe(files);
+      await userEvent.click(screen.getByRole('button', { name: 'Hide files panel' }));
+      expect(files).not.toBeVisible();
+      await combine();
+      expect(selected).toBeChecked();
+      expect(terminalApi.open).toHaveBeenCalledOnce();
+      expect(terminalApi.list).toHaveBeenCalledOnce();
+      expect(filesApi.open).toHaveBeenCalledOnce();
+      expect(filesApi.list).toHaveBeenCalledOnce();
+      expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state))).not.toContain('synthetic-file');
+      expect(JSON.stringify(useSelection.getState())).not.toContain('synthetic-file');
+      expect(storage).not.toHaveBeenCalled();
+    } finally { storage.mockRestore(); }
+  });
+
+  it('isolates a late stop-impact assessment across Services and Network without replacing Terminal or Files owners', async () => {
+    const sessionId = connected.hostSessionId!;
+    let finishAssessment!: (value: SystemdStopImpactAssessment) => void;
+    vi.mocked(servicesApi.assessStopImpact).mockReturnValue(new Promise((resolve) => { finishAssessment = resolve; }));
+    vi.mocked(servicesApi.list).mockResolvedValue({
+      hostId: host.id, hostSessionId: sessionId, observedAt: '2026-10-28T00:00:00Z',
+      entries: [{
+        unit: 'fixture.service', loadState: 'loaded', activeState: 'active', subState: 'running',
+        description: 'Synthetic service', canStart: false, canReload: false,
+        resetFailedObservationId: null, tryRestartObservationId: null, reloadObservationId: null,
+        startObservationId: null, stopImpactInspectionId: 'synthetic-inspection',
+      }],
+    });
+    vi.mocked(networkApi.list).mockResolvedValue({
+      hostId: host.id, hostSessionId: sessionId, observedAt: '2026-10-28T00:00:00Z',
+      entries: [{ ifindex: 1, name: 'fixture0', operState: 'UP', mtu: 1500,
+        addresses: [{ family: 'ipv4', address: '192.0.2.10', prefixLength: 24 }] }],
+    });
+    const client = await openTerminal();
+    const terminal = screen.getByTestId(host.id + '-pty');
+    const text = screen.getByRole('textbox', { name: 'Synthetic Shell' });
+    await userEvent.type(text, ' retained');
+    await combine();
+    const files = screen.getByRole('region', { name: 'Files on ' + host.displayName });
+    const selection = screen.getByRole('checkbox', { name: 'Select synthetic-file' });
+    await userEvent.click(selection);
+    await userEvent.click(screen.getByRole('button', { name: 'Services' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Assess stop impact' }));
+    expect(servicesApi.assessStopImpact).toHaveBeenCalledExactlyOnceWith(host.id, sessionId, 'synthetic-inspection');
+    await userEvent.click(screen.getByRole('button', { name: 'Network' }));
+    await screen.findByText('fixture0');
+    expect(networkApi.list).toHaveBeenCalledExactlyOnceWith(host.id, sessionId);
+    await act(async () => { finishAssessment({
+      hostId: host.id, hostSessionId: sessionId, rootUnit: 'synthetic-impact.service',
+      observedAt: '2026-10-28T00:00:00Z', completeness: 'complete', uncertainty: 'directOnly',
+      rootConsistent: true, units: [], edges: [], conditionalConsequences: [],
+      conditionalDiagnostics: [], warnings: [], limitations: [],
+      accounting: { observedUnitRecords: 1, observedRelationshipReferences: 0,
+        observedCandidateReferences: 0, retainedUnits: 1, retainedEdges: 0, retainedCandidates: 0,
+        retainedDiagnostics: 0, omittedKnownUnits: 0, omittedKnownEdges: 0,
+        omittedKnownCandidates: 0, omittedKnownDiagnostics: 0, unresolvedFrontierReferences: 0,
+        actualSshQueries: 2 },
+    }); });
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Terminal' }));
+    expect(screen.getByTestId(host.id + '-pty')).toBe(terminal);
+    expect(text).toHaveValue('Synthetic local scrollback retained');
+    expect(screen.getByRole('region', { name: 'Files on ' + host.displayName })).toBe(files);
+    expect(selection).toBeChecked();
+    expect(terminalApi.open).toHaveBeenCalledOnce();
+    expect(filesApi.open).toHaveBeenCalledOnce();
+    expect(JSON.stringify(client.getQueryCache().getAll().map((query) => query.state))).not.toContain('synthetic-impact.service');
+    await userEvent.click(screen.getByRole('button', { name: 'Services' }));
+    await waitFor(() => expect(servicesApi.list).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('dialog', { name: 'Read-only stop impact' })).not.toBeInTheDocument();
+  });
+
+  it('clamps keyboard and captured pointer resizing to the container and releases drag on hide', async () => {
+    await openTerminal();
+    await combine();
+    const separator = screen.getByRole('separator', { name: 'Resize files panel' });
+    expect(separator).toHaveAttribute('aria-orientation', 'vertical');
+    expect(Number(separator.getAttribute('aria-valuenow'))).toBeCloseTo(327, 0);
+    fireEvent.keyDown(separator, { key: 'End' });
+    expect(separator).toHaveAttribute('aria-valuenow', '592');
+    fireEvent.keyDown(separator, { key: 'ArrowRight' });
+    expect(separator).toHaveAttribute('aria-valuenow', '592');
+    fireEvent.keyDown(separator, { key: 'Home' });
+    fireEvent.keyDown(separator, { key: 'ArrowLeft' });
+    expect(separator).toHaveAttribute('aria-valuenow', '280');
+    fireEvent.keyDown(separator, { key: 'ArrowRight' });
+    expect(separator).toHaveAttribute('aria-valuenow', '296');
+    let captured = false;
+    separator.setPointerCapture = vi.fn(() => { captured = true; });
+    separator.hasPointerCapture = vi.fn(() => captured);
+    separator.releasePointerCapture = vi.fn(() => { captured = false; });
+    fireEvent.pointerDown(separator, { pointerId: 4, button: 0, clientX: 300 });
+    expect(separator.setPointerCapture).toHaveBeenCalledWith(4);
+    fireEvent.pointerMove(separator, { pointerId: 4, clientX: 5_000 });
+    expect(separator).toHaveAttribute('aria-valuenow', '592');
+    await userEvent.click(screen.getByRole('button', { name: 'Hide files panel' }));
+    expect(separator.releasePointerCapture).toHaveBeenCalledWith(4);
+    const prior = separator.getAttribute('aria-valuenow');
+    fireEvent.pointerMove(separator, { pointerId: 4, clientX: 0 });
+    expect(separator).toHaveAttribute('aria-valuenow', prior);
+  });
+
+  it('preserves a Files-first workspace when Terminal is first opened later', async () => {
+    renderApp();
+    await userEvent.click(await screen.findByRole('button', { name: `Open ${host.displayName}` }));
+    await userEvent.click(screen.getByRole('button', { name: 'Files' }));
+    await screen.findByDisplayValue('/synthetic');
+    const files = screen.getByRole('region', { name: `Files on ${host.displayName}` });
+    const selection = screen.getByRole('checkbox', { name: 'Select synthetic-file' });
+    await userEvent.click(selection);
+    expect(terminalApi.list).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: 'Terminal' }));
+    await screen.findByRole('button', { name: 'Open terminal' });
+    await combine();
+    expect(screen.getByRole('region', { name: `Files on ${host.displayName}` })).toBe(files);
+    expect(selection).toBeChecked();
+    expect(filesApi.open).toHaveBeenCalledOnce();
+    expect(filesApi.list).toHaveBeenCalledOnce();
+  });
+
+  it('releases pointer capture on cancellation and unmount and disconnects the layout observer', async () => {
+    const client = await openTerminal();
+    await combine();
+    const separator = screen.getByRole('separator');
+    let captured = false;
+    separator.setPointerCapture = vi.fn(() => { captured = true; });
+    separator.hasPointerCapture = vi.fn(() => captured);
+    separator.releasePointerCapture = vi.fn(() => { captured = false; });
+    fireEvent.pointerDown(separator, { pointerId: 8, button: 0, clientX: 300 });
+    fireEvent.pointerCancel(separator, { pointerId: 8 });
+    expect(separator.releasePointerCapture).toHaveBeenCalledTimes(1);
+    fireEvent.pointerDown(separator, { pointerId: 9, button: 0, clientX: 300 });
+    await act(async () => { client.setQueryData(['hosts'], []); });
+    await waitFor(() => expect(separator).not.toBeInTheDocument());
+    expect(separator.releasePointerCapture).toHaveBeenCalledTimes(2);
+    expect(observers.at(-1)!.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('collapses at narrow container widths and opens full Files without moving the terminal', async () => {
+    await openTerminal();
+    await combine();
+    const terminal = screen.getByTestId(`${host.id}-pty`);
+    const files = screen.getByRole('region', { name: `Files on ${host.displayName}` });
+    act(() => { width = 640; observers.forEach((observer) => observer.notify()); });
+    expect(files).not.toBeVisible();
+    expect(screen.queryByRole('separator')).not.toBeInTheDocument();
+    expect(screen.getByText(/Files panel collapsed/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Open full Files view' }));
+    expect(files).toBeVisible();
+    await userEvent.click(screen.getByRole('button', { name: 'Terminal' }));
+    expect(screen.getByTestId(`${host.id}-pty`)).toBe(terminal);
+    act(() => { width = 900; observers.forEach((observer) => observer.notify()); });
+    expect(files).toBeVisible();
+    expect(Number(screen.getByRole('separator').getAttribute('aria-valuenow'))).toBeLessThanOrEqual(492);
+    expect(filesApi.open).toHaveBeenCalledOnce();
+  });
+
+  it('starts only one compact sampler and keeps inactive host workspaces isolated', async () => {
+    const other = { ...host, id: 'other-host', displayName: 'Other host' };
+    vi.mocked(hostApi.list).mockResolvedValue([host, other]);
+    vi.mocked(hostApi.session).mockImplementation(async (id) => ({ ...connected, hostId: id }));
+    await openTerminal();
+    await act(async () => { await Promise.resolve(); });
+    const before = vi.mocked(monitorApi.sample).mock.calls.length;
+    await combine();
+    await waitFor(() => expect(monitorApi.sample).toHaveBeenCalledTimes(before + 1));
+    expect(screen.getAllByRole('region', { name: 'SSH workspace monitoring' })).toHaveLength(1);
+    await userEvent.selectOptions(screen.getByLabelText('Select a host'), other.id);
+    expect(screen.queryByRole('region', { name: 'SSH workspace monitoring' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: `Files on ${host.displayName}` })).not.toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText('Select a host'), host.id);
+    expect(screen.getAllByRole('region', { name: `Files on ${host.displayName}` })).toHaveLength(1);
+    expect(screen.getAllByRole('region', { name: 'SSH workspace monitoring' })).toHaveLength(1);
+    expect(filesApi.open).toHaveBeenCalledOnce();
+    expect(terminalApi.open).toHaveBeenCalledOnce();
   });
 });
 

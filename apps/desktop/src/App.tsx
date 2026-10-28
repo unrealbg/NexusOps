@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { CredentialInput, Host, HostInput } from '@nexusops/protocol';
 import { SecurityWorkspace } from './features/security/SecurityWorkspace';
 import { Button, Modal, Notice, Spinner } from '@nexusops/ui';
 import { hostApi, applicationError } from './api/client';
-import { hostKeys, useHosts } from './api/queries';
+import { hostKeys, useHosts, useHostSession } from './api/queries';
 import { useSelection } from './state/selection';
 import { HostSidebar } from './components/HostSidebar';
 import { UpdateCheck } from './components/UpdateCheck';
@@ -17,9 +17,96 @@ import { ServicesWorkspace } from './features/services/ServicesWorkspace';
 import { LogsWorkspace } from './features/logs/LogsWorkspace';
 import { ContainersWorkspace } from './features/containers/ContainersWorkspace';
 import { NetworkWorkspace } from './features/network/NetworkWorkspace';
+import { CompactMonitorStrip } from './features/overview/CompactMonitorStrip';
 
 type DialogState =
   { type: 'add' } | { type: 'edit'; host: Host } | { type: 'delete'; host: Host } | null;
+
+const FILES_MIN_WIDTH = 280;
+const TERMINAL_MIN_WIDTH = 400;
+const SPLIT_HANDLE_WIDTH = 8;
+
+// A host's two workspaces always occupy these same parent slots. Modes change
+// visibility and presentation, never the owner or parent of a mounted pane.
+function SshWorkspace({ host, mode, terminalVisited, filesVisited, onShowOverview, onShowFiles }: {
+  host: Host; mode: 'terminal' | 'files' | null; terminalVisited: boolean; filesVisited: boolean;
+  onShowOverview: () => void; onShowFiles: () => void;
+}) {
+  const connection = useHostSession(host.id);
+  const [combined, setCombined] = useState(false);
+  const [filesRequested, setFilesRequested] = useState(false);
+  const [fraction, setFraction] = useState(0.33);
+  const [width, setWidth] = useState(0);
+  const root = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ pointer: number; element: HTMLElement; startX: number; startLeft: number } | null>(null);
+  const panelId = useId();
+  const narrow = width < FILES_MIN_WIDTH + TERMINAL_MIN_WIDTH + SPLIT_HANDLE_WIDTH;
+  const split = mode === 'terminal' && combined && !narrow;
+  const filesVisible = mode === 'files' || split;
+  const maximum = Math.max(FILES_MIN_WIDTH, width - TERMINAL_MIN_WIDTH - SPLIT_HANDLE_WIDTH);
+  const left = Math.min(maximum, Math.max(FILES_MIN_WIDTH, (width - SPLIT_HANDLE_WIDTH) * fraction));
+
+  const stopDrag = useCallback(() => {
+    const current = drag.current;
+    drag.current = null;
+    if (current?.element.hasPointerCapture(current.pointer)) current.element.releasePointerCapture(current.pointer);
+  }, []);
+
+  useLayoutEffect(() => {
+    const element = root.current;
+    if (!element) return;
+    const measure = () => setWidth(element.getBoundingClientRect().width);
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    measure();
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => stopDrag, [split, stopDrag]);
+
+  function resize(next: number) {
+    if (!split) return;
+    setFraction(Math.min(maximum, Math.max(FILES_MIN_WIDTH, next)) / (width - SPLIT_HANDLE_WIDTH));
+  }
+
+  return <div className="ssh-host-root" hidden={mode === null}>
+    <div ref={root} className={`ssh-layout ${split ? 'ssh-layout--split' : ''}`}
+      style={split ? { gridTemplateColumns: `${left}px ${SPLIT_HANDLE_WIDTH}px minmax(0, 1fr)` } : undefined}>
+      <div id={`${panelId}-files`} className="ssh-files-slot" hidden={!filesVisible}>
+        {(filesVisited || filesRequested) && <FilesWorkspace host={host} visible={filesVisible}
+          presentation={mode === 'files' ? 'full' : 'compact'} onShowFull={onShowFiles} onShowOverview={onShowOverview} />}
+      </div>
+      <div className="ssh-separator" hidden={!split} role="separator" aria-label="Resize files panel"
+        aria-orientation="vertical" aria-controls={`${panelId}-files ${panelId}-terminal`}
+        aria-valuemin={FILES_MIN_WIDTH} aria-valuemax={Math.round(maximum)} aria-valuenow={Math.round(left)}
+        aria-valuetext={`${Math.round(left)} pixels for files`} tabIndex={split ? 0 : -1}
+        onKeyDown={(event) => {
+          const next = event.key === 'ArrowLeft' ? left - 16 : event.key === 'ArrowRight' ? left + 16
+            : event.key === 'Home' ? FILES_MIN_WIDTH : event.key === 'End' ? maximum : null;
+          if (next !== null) { event.preventDefault(); resize(next); }
+        }}
+        onPointerDown={(event) => {
+          if (!split || event.button !== 0) return;
+          event.preventDefault();
+          event.currentTarget.focus();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          drag.current = { pointer: event.pointerId, element: event.currentTarget, startX: event.clientX, startLeft: left };
+        }}
+        onPointerMove={(event) => {
+          if (drag.current?.pointer === event.pointerId) resize(drag.current.startLeft + event.clientX - drag.current.startX);
+        }}
+        onPointerUp={stopDrag} onPointerCancel={stopDrag} onLostPointerCapture={stopDrag} />
+      <div id={`${panelId}-terminal`} className="ssh-terminal-slot" hidden={mode !== 'terminal'}>
+        {terminalVisited && <TerminalWorkspace host={host} visible={mode === 'terminal'} onShowOverview={onShowOverview}
+          combined={combined} onToggleFiles={() => { setFilesRequested(true); setCombined((current) => !current); }} />}
+      </div>
+    </div>
+    {mode === 'terminal' && combined && narrow && <div className="ssh-collapsed-files" role="status">
+      Files panel collapsed to keep the terminal usable. <Button onClick={onShowFiles}>Open full Files view</Button>
+    </div>}
+    <CompactMonitorStrip hostId={host.id} hostSessionId={connection.data?.hostSessionId ?? null}
+      connected={connection.data?.state === 'connected'} visible={mode === 'terminal' && combined} />
+  </div>;
+}
 
 export default function App() {
   const hostsQuery = useHosts();
@@ -147,29 +234,13 @@ export default function App() {
           ) : !selectedHost ? (
             <HostList hosts={hosts} onSelect={selectHost} onAdd={() => setDialog({ type: 'add' })} />
           ) : null}
-          {terminalHosts.map((terminalHostId) => {
-            const terminalHost = hosts.find((host) => host.id === terminalHostId);
-            if (!terminalHost) return null;
-            const visible = section === 'terminal' && selectedHost?.id === terminalHost.id;
-            return (
-              <div key={terminalHost.id} hidden={!visible} className="terminal-host-root">
-                <TerminalWorkspace
-                  host={terminalHost}
-                  visible={visible}
-                  onShowOverview={() => setSection('overview')}
-                />
-              </div>
-            );
-          })}
-          {fileHosts.map((fileHostId) => {
-            const fileHost = hosts.find((host) => host.id === fileHostId);
-            if (!fileHost) return null;
-            const visible = section === 'files' && selectedHost?.id === fileHost.id;
-            return (
-              <div key={fileHost.id} hidden={!visible} className="files-host-root">
-                <FilesWorkspace host={fileHost} visible={visible} onShowOverview={() => setSection('overview')} />
-              </div>
-            );
+          {[...new Set([...terminalHosts, ...fileHosts])].map((id) => {
+            const host = hosts.find((candidate) => candidate.id === id);
+            if (!host) return null;
+            return <SshWorkspace key={host.id} host={host}
+              mode={selectedHost?.id === id && (section === 'terminal' || section === 'files') ? section : null}
+              terminalVisited={terminalHosts.includes(id)} filesVisited={fileHosts.includes(id)}
+              onShowOverview={() => setSection('overview')} onShowFiles={() => selectSection('files')} />;
           })}
           {selectedHost && section === 'services' && (
             <ServicesWorkspace key={selectedHost.id} host={selectedHost} />

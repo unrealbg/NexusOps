@@ -4,8 +4,9 @@ use crate::update_install;
 use crate::updates::UpdateService;
 use nexus_core::Application;
 use nexus_model::{
-    AppError, ContainerSnapshot, Host, HostId, HostInput, HostKeyChallenge, HostKeyRotationPlan,
-    HostKeyRotationPlanId, HostMonitorSample, HostSession, HostSessionId, NetworkSnapshot,
+    AppError, ContainerSnapshot, DnsConfigurationSnapshot, Host, HostId, HostInput,
+    HostKeyChallenge, HostKeyRotationPlan, HostKeyRotationPlanId, HostMonitorSample, HostSession,
+    HostSessionId, ListeningPortSnapshot, NetworkRouteSnapshot, NetworkSnapshot,
     RemoteOperationPlanId, ServiceObservationId, ServiceReloadPlan, ServiceReloadResult,
     ServiceResetFailedPlan, ServiceResetFailedResult, ServiceSnapshot, ServiceStartPlan,
     ServiceStartResult, ServiceTryRestartPlan, ServiceTryRestartResult, SshEndpointTrust,
@@ -405,6 +406,41 @@ pub async fn list_host_network(
 ) -> Result<NetworkSnapshot, AppError> {
     let _permit = lifecycle.admit()?;
     app.list_host_network(host_id, host_session_id).await
+}
+
+#[tauri::command]
+pub async fn list_host_routes(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+) -> Result<NetworkRouteSnapshot, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.list_host_routes(host_id, host_session_id).await
+}
+
+#[tauri::command]
+pub async fn list_host_listening_ports(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+) -> Result<ListeningPortSnapshot, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.list_host_listening_ports(host_id, host_session_id)
+        .await
+}
+
+#[tauri::command]
+pub async fn list_host_dns_configuration(
+    lifecycle: State<'_, LifecycleCoordinator>,
+    app: State<'_, Application>,
+    host_id: HostId,
+    host_session_id: HostSessionId,
+) -> Result<DnsConfigurationSnapshot, AppError> {
+    let _permit = lifecycle.admit()?;
+    app.list_host_dns_configuration(host_id, host_session_id)
+        .await
 }
 
 #[tauri::command]

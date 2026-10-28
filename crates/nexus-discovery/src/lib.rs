@@ -2,20 +2,26 @@
 
 mod capabilities;
 mod containers;
+mod dns;
+mod listening_ports;
 mod logs;
 mod monitoring;
 mod network;
 mod parsers;
 mod probes;
+mod routes;
 mod services;
 mod stop_impact;
 
 pub use capabilities::{CapabilityRegistry, capabilities};
 pub use containers::{observe_docker_containers, parse_docker_containers};
+pub use dns::{observe_dns_configuration, parse_dns_configuration};
+pub use listening_ports::{observe_listening_ports, parse_listening_ports};
 pub use logs::{observe_system_journal, parse_system_journal};
 pub use monitoring::{MonitorBaseline, MonitorReading, derive_sample, observe_monitor};
 pub use network::{observe_network, parse_network};
 pub use probes::{HostProbe, builtin_probes};
+pub use routes::{observe_routes, parse_routes};
 pub use services::{observe_services, parse_services};
 pub use stop_impact::{assess_systemd_stop_impact, parse_systemd_stop_impact};
 

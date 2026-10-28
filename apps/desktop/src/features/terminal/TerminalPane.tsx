@@ -298,6 +298,7 @@ export function TerminalPane({
       lastSize.current = size;
       if (resizeTimer.current !== null) window.clearTimeout(resizeTimer.current);
       resizeTimer.current = window.setTimeout(() => {
+        resizeTimer.current = null;
         void terminalApi.resize(sessionRef.current, size).catch((error) =>
           onError(applicationError(error).message),
         );
@@ -309,6 +310,12 @@ export function TerminalPane({
     return () => {
       observer.disconnect();
       window.cancelAnimationFrame(frame);
+      if (resizeTimer.current !== null) {
+        window.clearTimeout(resizeTimer.current);
+        resizeTimer.current = null;
+        // A hidden transition may cancel a size that was never sent.
+        lastSize.current = null;
+      }
     };
   }, [active, onError, session.id, visible]);
 
